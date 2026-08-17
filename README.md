@@ -20,7 +20,7 @@ affiliation with or equivalence to OpenAI Codex.
 
 ## Quick start
 
-Requirements: Node.js 20.19 or newer and pnpm 11.19.0.
+Requirements: Node.js 20.19 or newer and pnpm 10.34.5.
 
 ```bash
 pnpm install --frozen-lockfile
