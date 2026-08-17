@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAge: 1440
+
+minimumReleaseAgeExclude:
+  - "@types/node"
+  - "tsx"
+  - "typescript"

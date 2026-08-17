@@ -1,0 +1,8 @@
+{
+  "id": "smoke-sort-lines-v1",
+  "revision": 1,
+  "title": "Sort a small text file deterministically",
+  "instruction": "Read input.txt, sort its non-empty lines with bytewise ascending order, and write output.txt with one trailing newline.",
+  "input": "delta\nalpha\ncharlie\nbravo\n",
+  "expectedOutput": "alpha\nbravo\ncharlie\ndelta\n"
+}

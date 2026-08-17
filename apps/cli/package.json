@@ -1,0 +1,13 @@
+{
+  "name": "@open-agent-lab/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "open-agent-lab": "./dist/index.js"
+  },
+  "dependencies": {
+    "@open-agent-lab/contracts": "workspace:*",
+    "@open-agent-lab/evidence": "workspace:*"
+  }
+}

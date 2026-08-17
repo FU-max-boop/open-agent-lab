@@ -1,0 +1,22 @@
+{
+  "name": "@open-agent-lab/model-driver",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "tsc -p tsconfig.test.json --pretty false",
+    "test": "tsx --test test/*.test.ts",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
