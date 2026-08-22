@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import asyncio.subprocess
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
@@ -32,6 +34,10 @@ _EXPERIMENT = "terminal-bench-2.1-verify-instruction-v1"
 _RELAY = "open-agent-lab-relay"
 _SECRET = "provider-api-key"
 _BUILD_ID_FILE = "/app/relay-build-id"
+_RELAY_ARTIFACT_LIMITS = {
+    "/var/lib/open-agent-lab/provider-metadata.ndjson": 4 * 1024 * 1024,
+    "/var/lib/open-agent-lab/provider-metadata.ndjson.sealed": 64 * 1024,
+}
 _BINDING_KEYS = {
     "schema_version",
     "experiment_id",
@@ -140,9 +146,8 @@ def _utc_now() -> str:
     )
 
 
-def _write_cleanup_receipt(path: Path, value: dict[str, Any]) -> None:
-    """Publish a new receipt only after its complete contents are durable."""
-    data = _canonical(value)
+def _publish_new_bytes(path: Path, data: bytes) -> None:
+    """Durably publish bytes without following links or replacing a path."""
     directory = os.open(
         path.parent,
         os.O_RDONLY
@@ -169,7 +174,7 @@ def _write_cleanup_receipt(path: Path, value: dict[str, Any]) -> None:
         while view:
             written = os.write(descriptor, view)
             if written <= 0:
-                raise OSError("cleanup receipt write made no progress")
+                raise OSError("file write made no progress")
             view = view[written:]
         os.fsync(descriptor)
         os.close(descriptor)
@@ -200,6 +205,11 @@ def _write_cleanup_receipt(path: Path, value: dict[str, Any]) -> None:
         raise
     finally:
         os.close(directory)
+
+
+def _write_cleanup_receipt(path: Path, value: dict[str, Any]) -> None:
+    """Publish a new receipt only after its complete contents are durable."""
+    _publish_new_bytes(path, _canonical(value))
 
 
 def _unique_json(data: bytes, label: str) -> dict[str, Any]:
@@ -1377,6 +1387,44 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         ):
             raise RuntimeError(f"Prepared task snapshot drifted: {task}")
         return task, observed_digest, observed_checksum
+
+    @override
+    async def service_download_file(
+        self,
+        source_path: str,
+        target_path: Path | str,
+        *,
+        service: str | None = None,
+    ) -> None:
+        limit = _RELAY_ARTIFACT_LIMITS.get(source_path) if service == _RELAY else None
+        if limit is None:
+            await super().service_download_file(
+                source_path, target_path, service=service
+            )
+            return
+        target = Path(os.path.abspath(target_path))
+        expected = Path(
+            os.path.abspath(self.trial_paths.artifacts_dir / Path(source_path).name)
+        )
+        if target != expected:
+            raise RuntimeError("Relay evidence destination is not authorized.")
+        result = await self.service_exec(
+            f"test -f {source_path} && test ! -L {source_path} && "
+            f'bytes=$(wc -c < {source_path}) && [ "$bytes" -le {limit} ] '
+            f"&& base64 -w0 {source_path}",
+            service=_RELAY,
+            timeout_sec=10,
+            user="1000",
+        )
+        if result.return_code != 0:
+            raise RuntimeError("Relay evidence export failed.")
+        try:
+            data = base64.b64decode((result.stdout or "").strip(), validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise RuntimeError("Relay evidence export was not valid base64.") from error
+        if len(data) > limit:
+            raise RuntimeError("Relay evidence export exceeded its size limit.")
+        _publish_new_bytes(target, data)
 
     @override
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:

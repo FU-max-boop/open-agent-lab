@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import errno
 import hashlib
 import json
@@ -411,6 +412,115 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
         environment = object.__new__(PinnedRelayDockerEnvironment)
         with self.assertRaisesRegex(RuntimeError, "attach is unavailable"):
             asyncio.run(environment.attach())
+
+    def test_relay_tmpfs_artifacts_use_a_bounded_exact_path_export(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            environment = object.__new__(PinnedRelayDockerEnvironment)
+            environment.trial_paths = SimpleNamespace(artifacts_dir=artifacts)
+            environment.service_exec = AsyncMock()
+            for name, data, limit in (
+                ("provider-metadata.ndjson", b'{"event":"request"}\n', 4 * 1024 * 1024),
+                (
+                    "provider-metadata.ndjson.sealed",
+                    b'{"state":"sealed"}\n',
+                    64 * 1024,
+                ),
+            ):
+                environment.service_exec.return_value = SimpleNamespace(
+                    return_code=0,
+                    stdout=base64.b64encode(data).decode(),
+                )
+                target = artifacts / name
+                asyncio.run(
+                    environment.service_download_file(
+                        f"/var/lib/open-agent-lab/{name}",
+                        target,
+                        service="open-agent-lab-relay",
+                    )
+                )
+                self.assertEqual(target.read_bytes(), data)
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+                args, kwargs = environment.service_exec.await_args
+                self.assertIn(f"test ! -L /var/lib/open-agent-lab/{name}", args[0])
+                self.assertIn(f'[ "$bytes" -le {limit} ]', args[0])
+                self.assertEqual(
+                    kwargs,
+                    {
+                        "service": "open-agent-lab-relay",
+                        "timeout_sec": 10,
+                        "user": "1000",
+                    },
+                )
+                environment.service_exec.reset_mock()
+
+    def test_relay_tmpfs_artifact_export_fails_closed(self) -> None:
+        source = "/var/lib/open-agent-lab/provider-metadata.ndjson.sealed"
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            environment = object.__new__(PinnedRelayDockerEnvironment)
+            environment.trial_paths = SimpleNamespace(artifacts_dir=artifacts)
+            environment.service_exec = AsyncMock(
+                return_value=SimpleNamespace(return_code=1, stdout="")
+            )
+            with self.assertRaisesRegex(RuntimeError, "export failed"):
+                asyncio.run(
+                    environment.service_download_file(
+                        source,
+                        artifacts / Path(source).name,
+                        service="open-agent-lab-relay",
+                    )
+                )
+            environment.service_exec.return_value = SimpleNamespace(
+                return_code=0, stdout="not-base64"
+            )
+            with self.assertRaisesRegex(RuntimeError, "valid base64"):
+                asyncio.run(
+                    environment.service_download_file(
+                        source,
+                        artifacts / Path(source).name,
+                        service="open-agent-lab-relay",
+                    )
+                )
+            environment.service_exec.return_value = SimpleNamespace(
+                return_code=0,
+                stdout=base64.b64encode(b"x" * (64 * 1024 + 1)).decode(),
+            )
+            with self.assertRaisesRegex(RuntimeError, "size limit"):
+                asyncio.run(
+                    environment.service_download_file(
+                        source,
+                        artifacts / Path(source).name,
+                        service="open-agent-lab-relay",
+                    )
+                )
+            self.assertFalse((artifacts / Path(source).name).exists())
+            with self.assertRaisesRegex(RuntimeError, "destination"):
+                asyncio.run(
+                    environment.service_download_file(
+                        source,
+                        artifacts / "wrong-name",
+                        service="open-agent-lab-relay",
+                    )
+                )
+
+    def test_other_artifact_downloads_delegate_to_harbor(self) -> None:
+        environment = object.__new__(PinnedRelayDockerEnvironment)
+        parent = AsyncMock()
+        with patch.object(DockerEnvironment, "service_download_file", parent):
+            asyncio.run(
+                environment.service_download_file(
+                    "/tmp/other", "/tmp/target", service="open-agent-lab-relay"
+                )
+            )
+            asyncio.run(
+                environment.service_download_file(
+                    "/var/lib/open-agent-lab/provider-metadata.ndjson",
+                    "/tmp/target",
+                    service="main",
+                )
+            )
+        self.assertEqual(parent.await_count, 2)
 
     def test_retained_containers_are_rejected_before_harbor_initialization(
         self,
