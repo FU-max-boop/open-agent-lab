@@ -41,7 +41,24 @@ jobs:
 
       - name: Probe pinned Codex through native Responses relay
         run: |
-          npm install --prefix /tmp/open-agent-lab-codex --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
+          codex_archive=/tmp/codex-0.149.0-linux-x64.tgz
+          codex_runtime=/tmp/open-agent-lab-codex-runtime
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --output "$codex_archive" \
+            https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-x64.tgz
+          CODEX_ARCHIVE="$codex_archive" CODEX_RUNTIME="$codex_runtime" python3 - <<'PY'
+          import os
+          from benchmarks.terminal_bench.codex_runtime import (
+              codex_runtime_spec,
+              prepare_tree,
+          )
+
+          prepare_tree(
+              os.environ["CODEX_ARCHIVE"],
+              os.environ["CODEX_RUNTIME"],
+              codex_runtime_spec(),
+          )
+          PY
           userns_clone="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
           apparmor_userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
           restore_userns() {
@@ -54,35 +71,40 @@ jobs:
           trap restore_userns EXIT
           [ "$userns_clone" != 0 ] || sudo sysctl -q -w kernel.unprivileged_userns_clone=1
           [ "$apparmor_userns" != 1 ] || sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          OPEN_AGENT_LAB_CODEX_BIN=/tmp/open-agent-lab-codex/node_modules/.bin/codex \
+          OPEN_AGENT_LAB_CODEX_BIN="$codex_runtime/vendor/x86_64-unknown-linux-musl/bin/codex" \
             node --import tsx --test --test-name-pattern="installed Codex" apps/cli/test/codex-runner.test.ts
 
       - name: Validate Harbor 0.22 adapter
         run: |
           python3 -m pip install --disable-pip-version-check harbor==0.22.0 ruff==0.16.4
           python3 -m ruff format --check \
+            benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m ruff check \
+            benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m ruff check --select C901 \
+            benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
@@ -90,6 +112,7 @@ jobs:
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m unittest \
+            benchmarks.terminal_bench.test_codex_runtime \
             benchmarks.terminal_bench.test_experiment_contract \
             benchmarks.terminal_bench.test_harbor_agent \
             benchmarks.terminal_bench.test_harbor_environment \
@@ -178,9 +201,13 @@ jobs:
       - name: Run provider-free Harbor control and treatment trials
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
+          OPEN_AGENT_LAB_CODEX_ARCHIVE: /tmp/codex-0.149.0-linux-x64.tgz
           OAL_DEEPSEEK_API_KEY_FILE: /tmp/open-agent-lab-harbor-provider-key
           PYTHONPATH: ${{ github.workspace }}
         run: |
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --output "$OPEN_AGENT_LAB_CODEX_ARCHIVE" \
+            https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-x64.tgz
           sudo install -o 0 -g 0 -m 0400 /dev/null "$OAL_DEEPSEEK_API_KEY_FILE"
           openssl rand -hex 32 | sudo tee "$OAL_DEEPSEEK_API_KEY_FILE" >/dev/null
           prepared_parent="$(mktemp -d)"

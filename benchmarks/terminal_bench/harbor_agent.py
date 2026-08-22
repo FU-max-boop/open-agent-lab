@@ -16,8 +16,18 @@ from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from . import codex_runtime as _codex_runtime
 from . import experiment_contract as _experiment_contract
 from . import harbor_environment as _harbor_environment
+from .codex_runtime import (
+    CODEX_RUNTIME_ENTRYPOINT,
+    CODEX_RUNTIME_SPEC_SHA256,
+    HARBOR_CODEX_EXEC_PREFIX,
+    build_full_tree_verification_command,
+    codex_runtime_spec,
+    rewrite_harbor_launch,
+    validate_codex_runtime_spec,
+)
 from .experiment_contract import (
     EXPERIMENT_ID,
     RELAY_BUILD_ID_PATH,
@@ -54,6 +64,9 @@ _PROFILES: dict[str, _Profile] = {
     },
 }
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_AMBIENT_CODEX_EXEC = re.compile(
+    r"(?<![A-Za-z0-9._/-])(?:[A-Za-z0-9._/-]*/)?codex\s+exec(?:\s|$)"
+)
 _EMPTY_AUTH = Path(__file__).with_name("empty-auth.json")
 _RELAY_TOKEN_FILE = f"{RELAY_JOURNAL_PATH}.client-token"
 _RELAY_BOOTSTRAP_FILE = f"{RELAY_JOURNAL_PATH}.bootstrap-ready"
@@ -79,6 +92,7 @@ if (
     raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
 _VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
 _HARBOR_VERSION = "0.22.0"
+_CODEX_VERSION = "0.149.0"
 _CAPABILITY = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _EXPERIMENT_MANIFEST = (
@@ -225,6 +239,7 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
             or type(runtime.get("hermeticCodexRuntimeReady")) is not bool
         ):
             raise ValueError("hermetic Codex runtime gate is invalid")
+        validate_codex_runtime_spec(runtime["codexRuntime"])
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise RuntimeError("Live source identity could not be verified.") from error
     manifest_sha = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
@@ -241,6 +256,8 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
         != configured_root / "benchmarks/terminal_bench/harbor_environment.py"
         or Path(_experiment_contract.__file__).resolve(strict=True)
         != configured_root / "benchmarks/terminal_bench/experiment_contract.py"
+        or Path(_codex_runtime.__file__).resolve(strict=True)
+        != configured_root / "benchmarks/terminal_bench/codex_runtime.py"
         or _PinnedRelayDockerEnvironment.__module__
         != "benchmarks.terminal_bench.harbor_environment"
     ):
@@ -290,11 +307,14 @@ class OpenAgentLabCodex(Codex):
         *args: Any,
         config: Path | str | dict[str, Any] | None = None,
         extra_env: dict[str, str] | None = None,
+        version: str | None = None,
         enable_verify_instruction_v1: bool = False,
         run_binding: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         _validate_harbor_runtime()
+        if version != _CODEX_VERSION:
+            raise ValueError(f"version must be exactly {_CODEX_VERSION}.")
         if config is not None:
             raise ValueError("OpenAgentLabCodex owns its benchmark config.")
         if "provider_free_fixture" in kwargs:
@@ -366,6 +386,9 @@ class OpenAgentLabCodex(Codex):
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
         self._open_agent_lab_run_binding = binding
+        self._codex_runtime_spec = codex_runtime_spec()
+        self._codex_launches = 0
+        self._codex_run_active = False
         self._open_agent_lab_variant = {
             "schema_version": 1,
             "variant_id": (
@@ -387,7 +410,51 @@ class OpenAgentLabCodex(Codex):
             model_name=model_name,
             config=provider_config,
             extra_env=agent_env,
+            version=version,
             **kwargs,
+        )
+
+    @override
+    async def install(self, environment: BaseEnvironment) -> None:
+        environment = _pinned_environment(environment)
+        self._validate_request_source()
+        command = (
+            build_full_tree_verification_command(self._codex_runtime_spec)
+            + f'; test "$({CODEX_RUNTIME_ENTRYPOINT} --version)" = '
+            f'"codex-cli {_CODEX_VERSION}"'
+        )
+        await super().exec_as_agent(environment, command=command)
+
+    @override
+    def get_version_command(self) -> str | None:
+        return f"{CODEX_RUNTIME_ENTRYPOINT} --version"
+
+    @override
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ) -> Any:
+        if command.startswith(HARBOR_CODEX_EXEC_PREFIX):
+            if not self._codex_run_active or self._codex_launches:
+                raise RuntimeError("Codex must launch exactly once inside agent.run().")
+            command = (
+                build_full_tree_verification_command(self._codex_runtime_spec)
+                + "; "
+                + rewrite_harbor_launch(command)
+            )
+            self._codex_launches += 1
+        elif _AMBIENT_CODEX_EXEC.search(command):
+            raise RuntimeError("Unexpected ambient Codex launch command.")
+        return await super().exec_as_agent(
+            environment,
+            command,
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
         )
 
     @override
@@ -457,16 +524,23 @@ class OpenAgentLabCodex(Codex):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         environment = _pinned_environment(environment)
+        if self._codex_run_active:
+            raise RuntimeError("Concurrent Codex runs are not supported.")
+        self._codex_run_active = True
+        self._codex_launches = 0
         primary_error: BaseException | None = None
         try:
             self._validate_request_source()
             if _RELAY_TOKEN_ENV not in self._extra_env:
                 raise RuntimeError("Relay capability was not initialized during setup.")
             await super().run(instruction, environment, context)
+            if self._codex_launches != 1:
+                raise RuntimeError("Codex did not launch exactly once.")
         except BaseException as error:
             primary_error = error
             raise
         finally:
+            self._codex_run_active = False
             retained = asyncio.create_task(self._seal_and_retain(environment))
             try:
                 await asyncio.shield(retained)
@@ -594,6 +668,7 @@ class OpenAgentLabCodex(Codex):
             "requested_developer_instructions_sha256": self._open_agent_lab_variant[
                 "requested_developer_instructions_sha256"
             ],
+            "codex_runtime_spec_sha256": CODEX_RUNTIME_SPEC_SHA256,
             "run_binding": self._open_agent_lab_run_binding,
         }
         binding_hash = hashlib.sha256(

@@ -15,6 +15,13 @@ from harbor.models.job.result import JobResult
 from harbor.models.trajectories.trajectory import Trajectory
 from harbor.models.trial.result import TrialResult
 
+from benchmarks.terminal_bench.codex_runtime import (
+    CODEX_RUNTIME_INSTALL_ROOT,
+    CODEX_RUNTIME_PREPARED_RELATIVE,
+    CODEX_RUNTIME_SPEC_SHA256,
+    validate_codex_runtime_spec,
+    verify_tree,
+)
 from benchmarks.terminal_bench.experiment_contract import (
     ENVIRONMENT_IMPORT,
     RUN_BINDING_KEYS,
@@ -33,6 +40,7 @@ _MANIFEST = Path(__file__).with_name("verify-instruction-v1.experiment.json")
 _MANIFEST_BYTES = _MANIFEST.read_bytes()
 _MANIFEST_DATA = json.loads(_MANIFEST_BYTES)
 _MANIFEST_SHA256 = "sha256:" + hashlib.sha256(_MANIFEST_BYTES).hexdigest()
+_RUNTIME_SPEC = validate_codex_runtime_spec(_MANIFEST_DATA["runtime"]["codexRuntime"])
 _FIXTURE_BUILD_ID = _MANIFEST_DATA["relayBuildIds"]["providerFreeFixture"]
 _VERIFY_INSTRUCTION_SHA256 = (
     "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
@@ -235,13 +243,24 @@ def _assert_pinned_environment(
         "relay_compose_sha256": digest,
         "run_binding": run_binding,
     }
+    runtime_root = job_dir.parents[2] / CODEX_RUNTIME_PREPARED_RELATIVE
+    expected_mounts = [
+        {
+            "type": "bind",
+            "source": str(runtime_root),
+            "target": CODEX_RUNTIME_INSTALL_ROOT,
+            "read_only": True,
+        }
+    ]
     for environment in (job.environment, lock.environment):
         _require(
             environment.import_path == ENVIRONMENT_IMPORT
             and environment.kwargs == expected_kwargs
+            and environment.mounts == expected_mounts
             and [item.resolve() for item in environment.extra_docker_compose] == [path],
             "Pinned Harbor environment binding drifted.",
         )
+    verify_tree(runtime_root, _RUNTIME_SPEC)
     compose = yaml.safe_load(data)
     relay = compose.get("services", {}).get("open-agent-lab-relay", {})
     _require(
@@ -473,6 +492,10 @@ def validate(
         binding.get("requested_developer_instructions_sha256")
         == expected_variant["requested_developer_instructions_sha256"],
         "Bound developer instruction drifted.",
+    )
+    _require(
+        binding.get("codex_runtime_spec_sha256") == CODEX_RUNTIME_SPEC_SHA256,
+        "Bound Codex runtime identity drifted.",
     )
     _assert_secret_absent(job_dir, secret)
 

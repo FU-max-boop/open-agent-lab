@@ -55,6 +55,33 @@ def _hash(value: dict[str, object]) -> str:
     return "sha256:" + hashlib.sha256(paired._canonical(value).encode()).hexdigest()
 
 
+def _runtime_receipt() -> dict[str, object]:
+    spec = paired.codex_runtime_spec()
+    files = spec["files"]
+    assert isinstance(files, list)
+    entrypoint = next(
+        entry
+        for entry in files
+        if isinstance(entry, dict)
+        and f"{spec['installRoot']}/{entry['path']}" == spec["entrypoint"]
+    )
+    return {
+        "schema_version": 1,
+        "spec_sha256": paired.CODEX_RUNTIME_SPEC_SHA256,
+        "files": len(files),
+        "entrypoint_sha256": entrypoint["sha256"],
+    }
+
+
+def _prepare_fixture_runtime(
+    archive: Path, destination: Path, spec: object
+) -> dict[str, object]:
+    del archive
+    paired.validate_codex_runtime_spec(spec)
+    destination.mkdir()
+    return _runtime_receipt()
+
+
 def _materialize_fixture_tasks(temp: Path) -> dict[str, dict[str, str]]:
     for snapshot in paired._declared_task_snapshots().values():
         path = temp / snapshot["relativePath"]
@@ -294,6 +321,7 @@ def _trial_lock(
 ) -> dict[str, object]:
     compose = str(compose_path)
     spec = paired._VARIANTS[variant]
+    runtime_root = task_path.parent.parent / paired.CODEX_RUNTIME_PREPARED_RELATIVE
     return {
         "schema_version": 2,
         "task": {
@@ -330,6 +358,7 @@ def _trial_lock(
             "delete": True,
             "cpu_enforcement_policy": "auto",
             "memory_enforcement_policy": "auto",
+            "mounts": [paired._codex_runtime_mount(runtime_root)],
             "extra_docker_compose": [compose],
             "kwargs": {
                 "relay_compose_sha256": compose_sha256,
@@ -748,6 +777,11 @@ class RunFixture:
             compose_sha256 = paired._digest_bytes(compose_text.encode())
             config["environment"]["extra_docker_compose"] = [str(compose_path)]
             config["environment"]["import_path"] = ENVIRONMENT_IMPORT
+            config["environment"]["mounts"] = [
+                paired._codex_runtime_mount(
+                    self.root / paired.CODEX_RUNTIME_PREPARED_RELATIVE
+                )
+            ]
             config["environment"]["kwargs"] = {
                 "relay_compose_sha256": compose_sha256,
                 "run_binding": self.binding,
@@ -820,6 +854,7 @@ class RunFixture:
                         "relay_instance_id": verified["seal"]["relayInstanceId"],
                         "relay_build_id": verified["seal"]["buildId"],
                         "relay_marker_sha256": verified["seal"]["markerSha256"],
+                        "codex_runtime_spec_sha256": (paired.CODEX_RUNTIME_SPEC_SHA256),
                         "provider_id": provider,
                         "requested_model": model,
                         "variant_id": variant,
@@ -1033,6 +1068,7 @@ class RunFixture:
                 "relayImages": self.images,
                 "relayImageTags": self.image_tags,
                 "taskSnapshots": self.task_snapshots,
+                "codexRuntime": _runtime_receipt(),
                 "providers": providers,
             },
         )
@@ -1065,6 +1101,34 @@ class StrictInputTest(unittest.TestCase):
 
 
 class PrepareTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runtime_env = patch.dict(
+            paired.os.environ,
+            {paired.CODEX_ARCHIVE_ENV: "/tmp/open-agent-lab-test-codex.tgz"},
+        )
+        self.runtime_prepare = patch.object(
+            paired, "prepare_tree", side_effect=_prepare_fixture_runtime
+        )
+        self.runtime_env.start()
+        self.runtime_prepare.start()
+
+    def tearDown(self) -> None:
+        self.runtime_prepare.stop()
+        self.runtime_env.stop()
+
+    def test_runtime_preparation_requires_an_absolute_archive_path(self) -> None:
+        spec = paired.codex_runtime_spec()
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw)
+            for value, message in ((None, "must name"), ("relative.tgz", "absolute")):
+                with self.subTest(value=value):
+                    if value is None:
+                        paired.os.environ.pop(paired.CODEX_ARCHIVE_ENV)
+                    else:
+                        paired.os.environ[paired.CODEX_ARCHIVE_ENV] = value
+                    with self.assertRaisesRegex(paired.IntegrityError, message):
+                        paired._materialize_codex_runtime(workspace, spec)
+
     def test_task_materialization_uses_exact_exported_package_refs(self) -> None:
         observed: list[paired.PackageTaskId] = []
         options: list[tuple[bool, bool]] = []
@@ -1306,6 +1370,13 @@ class PrepareTest(unittest.TestCase):
                 deepseek["environment"]["extra_docker_compose"],
                 [str(output.resolve() / "overlays/relay.deepseek.compose.yaml")],
             )
+            expected_mount = paired._codex_runtime_mount(
+                output.resolve() / paired.CODEX_RUNTIME_PREPARED_RELATIVE
+            )
+            self.assertEqual(deepseek["environment"]["mounts"], [expected_mount])
+            self.assertEqual(fixture["environment"]["mounts"], [expected_mount])
+            self.assertEqual(record["codexRuntime"], _runtime_receipt())
+            self.assertTrue((output / paired.CODEX_RUNTIME_PREPARED_RELATIVE).is_dir())
             manifest = json.loads((paired._repo_root() / paired._MANIFEST).read_text())
             self.assertEqual(
                 fixture_binding["relay_build_sha256"],
@@ -1479,8 +1550,13 @@ class PairedResultsTest(unittest.TestCase):
             ),
         )
         self.task_identity.start()
+        self.runtime_verify_patch = patch.object(
+            paired, "verify_tree", return_value=_runtime_receipt()
+        )
+        self.runtime_verify = self.runtime_verify_patch.start()
 
     def tearDown(self) -> None:
+        self.runtime_verify_patch.stop()
         self.task_identity.stop()
         self.temporary.cleanup()
 
@@ -1525,6 +1601,25 @@ class PairedResultsTest(unittest.TestCase):
             ),
             self.assertRaisesRegex(paired.IntegrityError, "snapshot drifted"),
         ):
+            paired.summarize([screen.root])
+
+    def test_prepared_runtime_is_reverified_during_analysis(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        self.runtime_verify.side_effect = ValueError("runtime drift")
+        with self.assertRaisesRegex(paired.IntegrityError, "runtime drifted"):
+            paired.summarize([screen.root])
+        self.runtime_verify.assert_called_once_with(
+            screen.root / paired.CODEX_RUNTIME_PREPARED_RELATIVE,
+            paired.codex_runtime_spec(),
+        )
+
+    def test_prepared_runtime_receipt_cannot_be_rewritten(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        record_path = screen.root / "run-record.json"
+        record = json.loads(record_path.read_text())
+        record["codexRuntime"]["files"] -= 1
+        _write(record_path, record)
+        with self.assertRaisesRegex(paired.IntegrityError, "receipt drifted"):
             paired.summarize([screen.root])
 
     def test_screen_is_valid_deterministic_and_never_promotable(self) -> None:

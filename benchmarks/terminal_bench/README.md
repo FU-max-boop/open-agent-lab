@@ -4,10 +4,11 @@ This directory freezes the first infrastructure pilot before any outcomes are
 observed. It is not a leaderboard submission or a full-suite score.
 
 The adapter subclasses Harbor's official `Codex` implementation. Harbor still
-owns Codex installation, container execution, session capture, and ATIF
-trajectory conversion; Open Agent Lab only freezes the native Responses
-provider. Codex is pinned to `0.149.0`, Harbor to `0.22.0`, and the dataset to
-the digest in `pilot-v1.selection.json`.
+owns container execution, session capture, and ATIF trajectory conversion.
+Open Agent Lab replaces Harbor's mutable NVM/npm install step with one
+byte-pinned native Codex tree and freezes the native Responses provider. Codex
+is pinned to `0.149.0`, Harbor to `0.22.0`, and the dataset to the digest in
+`pilot-v1.selection.json`.
 
 The adapter resolves no Harbor model connection and receives no durable provider
 credential. Each relay generates its own 256-bit capability; Harbor retrieves
@@ -70,8 +71,11 @@ verification pass or expose a Codex feature with that name.
 It requires a clean commit, creates a self-contained detached clone, validates
 every frozen file there, materializes each exact task package into a private
 non-overwriting run directory, and checks both its Harbor content digest and
-directory hash. It then builds the production and fixture relay images from the
-exact source snapshot. Each generated relay Compose document removes the build
+directory hash. It also requires `OPEN_AGENT_LAB_CODEX_ARCHIVE` to name the
+absolute path of the pinned Linux x64 Codex archive, verifies every archive and
+member byte, and prepares one exact runtime tree shared read-only by all trials.
+It then builds the production and fixture relay images from the exact source
+snapshot. Each generated relay Compose document removes the build
 context, pins the immutable Docker image ID, and sets `pull_policy: never`. A
 deterministic run-owned local tag retains each exact relay image against ordinary
 Docker pruning without becoming the runtime authority. The preflight hash,
@@ -108,12 +112,13 @@ freeze opposite within-provider orders. A screen alone is always
 `not_promotable`; even both repetitions remain a five-task directional
 development result, never a significance, official, or leaderboard claim.
 
-The current frozen policy deliberately sets
-`runtime.hermeticCodexRuntimeReady` to `false`. Provider-free fixture runs are
-enabled, but every production agent fails closed before a provider request until
-the exact native Codex runtime is frozen into the task runtime. Do not create or
-mount provider key files for this experiment yet, and do not report a live score
-from it.
+The current frozen policy deliberately keeps
+`runtime.hermeticCodexRuntimeReady` at `false` while the new byte-frozen runtime
+is proved in hosted provider-free control and treatment trials. Every production
+agent therefore still fails closed before a provider request. Only a reviewed
+follow-up policy change may flip the gate after that proof is green. Do not
+create or mount provider key files for this experiment yet, and do not report a
+live score from it.
 
 After a reviewed policy revision flips that gate, prepare both predeclared
 repetitions **before the first live request**, while the same commit is still
