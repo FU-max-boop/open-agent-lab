@@ -1573,12 +1573,14 @@ class PairedResultsTest(unittest.TestCase):
                     other = next(
                         path
                         for path in trial.parent.iterdir()
-                        if path != trial and path != duplicate
+                        if path.is_dir() and path != trial and path != duplicate
                     )
                     shutil.rmtree(other)
                 else:
                     other = next(
-                        path for path in trial.parent.iterdir() if path != trial
+                        path
+                        for path in trial.parent.iterdir()
+                        if path.is_dir() and path != trial
                     )
                     shutil.rmtree(other)
                     other.symlink_to(trial, target_is_directory=True)
