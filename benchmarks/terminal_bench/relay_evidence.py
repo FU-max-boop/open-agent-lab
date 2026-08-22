@@ -140,6 +140,8 @@ def relay_metadata(journal_path: Path, seal_path: Path) -> dict[str, Any]:
         if record.get("event") == "transport.responses.request"
     }
     reasons: set[str] = set()
+    if provider_id == "synthetic-fixture":
+        reasons.add("synthetic_provider")
     if not _BUILD_ID.fullmatch(build_id):
         reasons.add("unverifiable_relay_build")
     if any(rejected_requests.values()):

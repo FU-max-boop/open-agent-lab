@@ -259,6 +259,18 @@ class OpenAgentLabCodex(Codex):
                 },
                 "error": f"{type(error).__name__}: {error}"[:500],
             }
+        try:
+            trajectory = json.loads((self.logs_dir / "trajectory.json").read_text())
+            trajectory_session_id = trajectory.get("session_id")
+            if not isinstance(trajectory_session_id, str) or not trajectory_session_id:
+                raise ValueError("ATIF session identity is missing")
+        except (AttributeError, OSError, TypeError, ValueError):
+            trajectory_session_id = None
+            reasons = metadata["publication_gate"]["reasons"]
+            metadata["publication_gate"] = {
+                "ok": False,
+                "reasons": sorted({*reasons, "trajectory_session_missing"}),
+            }
         seal = metadata.get("seal", {})
         binding = {
             "schema_version": 1,
@@ -266,6 +278,7 @@ class OpenAgentLabCodex(Codex):
                 str(self.context_id) if self.context_id is not None else None
             ),
             "harbor_session_id": self.session_id,
+            "trajectory_session_id": trajectory_session_id,
             "relay_instance_id": seal.get("relayInstanceId"),
             "relay_build_id": seal.get("buildId"),
             "relay_marker_sha256": seal.get("markerSha256"),

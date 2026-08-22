@@ -5,9 +5,16 @@ import { dirname, resolve } from "node:path";
 
 import { startNativeResponsesRelay, type RelaySealSummary } from "./responses-relay.js";
 
-type RelayProvider = "deepseek" | "zai";
+export interface RelayProfile {
+  readonly envKey: string;
+  readonly endpoint: string;
+  readonly models: readonly string[];
+  readonly evidenceProviderId?: string;
+}
 
-const PROFILES = {
+export type RelayProfiles = Readonly<Record<string, RelayProfile>>;
+
+const PROFILES: RelayProfiles = {
   deepseek: {
     envKey: "DEEPSEEK_API_KEY",
     endpoint: "https://api.deepseek.com/responses",
@@ -110,12 +117,13 @@ export async function runRelayCommand(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
   output: (message: string) => void = (message) => process.stdout.write(`${message}\n`),
+  profiles: RelayProfiles = PROFILES,
 ): Promise<RelaySealSummary> {
-  const provider = option(args, "--provider") as RelayProvider | undefined;
-  if (provider === undefined || !Object.hasOwn(PROFILES, provider)) {
-    throw new Error("--provider must be one of: deepseek, zai.");
+  const provider = option(args, "--provider");
+  const profile = provider === undefined ? undefined : profiles[provider];
+  if (provider === undefined || profile === undefined) {
+    throw new Error(`--provider must be one of: ${Object.keys(profiles).join(", ")}.`);
   }
-  const profile = PROFILES[provider];
   const model = option(args, "--model");
   if (model === undefined || !profile.models.some((candidate) => candidate === model)) {
     throw new Error(`--model must be one of: ${profile.models.join(", ")}.`);
@@ -127,6 +135,7 @@ export async function runRelayCommand(
     option(args, "--client-token-output") ?? `${resolvedSidecar}.client-token`,
   );
   const providerKey = await providerSecret(env, profile.envKey);
+  const evidenceProviderId = profile.evidenceProviderId ?? provider;
   const buildIdPath = option(args, "--build-id-file");
   const buildId =
     buildIdPath === undefined
@@ -141,7 +150,7 @@ export async function runRelayCommand(
   const expiresAtMs = Date.now() + ttlSeconds * 1_000;
   const relay = await startNativeResponsesRelay({
     runId: option(args, "--run-id") ?? `relay-${randomUUID()}`,
-    providerId: provider,
+    providerId: evidenceProviderId,
     buildId,
     expectedModel: model,
     upstreamResponsesUrl: profile.endpoint,
@@ -169,7 +178,7 @@ export async function runRelayCommand(
       sidecarPath: relay.sidecarPath,
       sealPath: relay.sealPath,
       clientTokenPath,
-      provider,
+      provider: evidenceProviderId,
       model,
       expiresAt: new Date(expiresAtMs).toISOString(),
     }),
