@@ -27,6 +27,18 @@ export interface CodexProbeResult {
   output: string;
   sawThreadStart: boolean;
   sawTurnComplete: boolean;
+  sawDeveloperInstruction: boolean;
+}
+
+function instructionPaths(value: unknown, marker: string, path = "$"): string[] {
+  if (typeof value === "string") return value.includes(marker) ? [path] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => instructionPaths(item, marker, `${path}[${index}]`));
+  }
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    instructionPaths(item, marker, `${path}.${key}`),
+  );
 }
 
 function probeToolCommand(): string {
@@ -57,6 +69,7 @@ fi > ${OUTPUT_FILE}`;
 export async function runCodexProbe(
   codexPath = "codex",
   throughRelay = false,
+  developerInstruction?: string,
 ): Promise<CodexProbeResult> {
   const workspace = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-probe-"));
   const sidecarPath = join(workspace, "provider-metadata.ndjson");
@@ -67,6 +80,7 @@ export async function runCodexProbe(
     command: probeToolCommand(),
     finalMessage: "Probe complete.",
     callId: CALL_ID,
+    ...(developerInstruction === undefined ? {} : { instructionMarker: developerInstruction }),
   });
 
   let stdout = "";
@@ -90,6 +104,7 @@ export async function runCodexProbe(
       prompt: "Use the available shell tool exactly once, then report completion.",
       baseUrl: relay?.baseUrl ?? fixture.baseUrl,
       codexPath,
+      ...(developerInstruction === undefined ? {} : { developerInstruction }),
     });
     const code = await runCodexInvocation(
       invocation,
@@ -116,7 +131,39 @@ export async function runCodexProbe(
       );
     }
     const request = snapshot.requests[0];
-    if (request?.body.stream !== true) throw new Error("Codex did not request a streamed response.");
+    if (request?.body.stream !== true) {
+      throw new Error("Codex did not request a streamed response.");
+    }
+    const paths =
+      developerInstruction === undefined
+        ? []
+        : instructionPaths(request?.body, developerInstruction);
+    const input = request?.body.input;
+    const message = Array.isArray(input) ? input[0] : undefined;
+    const messageRecord =
+      typeof message === "object" && message !== null && !Array.isArray(message)
+        ? (message as Record<string, unknown>)
+        : undefined;
+    const content = messageRecord?.content;
+    const part = Array.isArray(content) ? content[0] : undefined;
+    const partRecord =
+      typeof part === "object" && part !== null && !Array.isArray(part)
+        ? (part as Record<string, unknown>)
+        : undefined;
+    const sawDeveloperInstruction =
+      developerInstruction !== undefined &&
+      paths.length === 1 &&
+      paths[0] === "$.input[0].content[0].text" &&
+      messageRecord?.role === "developer" &&
+      partRecord?.type === "input_text" &&
+      typeof partRecord.text === "string" &&
+      partRecord.text.split(developerInstruction).length === 2;
+    if (developerInstruction !== undefined && !sawDeveloperInstruction) {
+      throw new Error(
+        "Codex did not forward the exact developer instruction at the expected path; " +
+          `found ${JSON.stringify(paths)}.`,
+      );
+    }
     return {
       ok: true,
       requests: snapshot.requests.length,
@@ -125,6 +172,7 @@ export async function runCodexProbe(
       output: output.trimEnd(),
       sawThreadStart: stdout.includes('"type":"thread.started"'),
       sawTurnComplete: stdout.includes('"type":"turn.completed"'),
+      sawDeveloperInstruction,
     };
   } finally {
     if (relay !== undefined) {

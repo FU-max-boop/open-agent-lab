@@ -78,3 +78,65 @@ test("Responses fixture completes one real function-tool round", async (t) => {
     toolOutput: "fixture output",
   });
 });
+
+test("Responses fixture binds an exact developer-instruction marker", async (t) => {
+  const marker = "Run one focused verification pass.\n";
+  const fixture = await startResponsesFixture({
+    bearer: "fixture-secret",
+    model: "fixture-model",
+    command: "printf fixture",
+    callId: "call_instruction_test",
+    instructionMarker: marker,
+  });
+  t.after(() => fixture.close());
+  const request = (input: unknown, instructions: string): Promise<Response> =>
+    fetch(`${fixture.baseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer fixture-secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "fixture-model",
+        stream: true,
+        input: [
+          {
+            type: "message",
+            role: "developer",
+            content: [{ type: "input_text", text: instructions }],
+          },
+          ...(Array.isArray(input)
+            ? input
+            : [
+                {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: input }],
+                },
+              ]),
+        ],
+        tools: [{ type: "function", name: "exec_command" }],
+      }),
+    });
+
+  const repeated = await request("run", `${marker}${marker}`);
+  assert.equal(repeated.status, 500);
+  assert.equal(fixture.snapshot().requests.length, 0);
+
+  const instructions = `Codex base instructions.\n${marker}`;
+  const first = await request("run", instructions);
+  assert.equal(first.status, 200);
+  assert.match(await first.text(), /"id":"resp_fixture_verify_instruction_1"/u);
+  const second = await request(
+    [
+      {
+        type: "function_call_output",
+        call_id: "call_instruction_test",
+        output: "fixture output",
+      },
+    ],
+    instructions,
+  );
+  assert.equal(second.status, 200);
+  assert.match(await second.text(), /"id":"resp_fixture_verify_instruction_2"/u);
+});

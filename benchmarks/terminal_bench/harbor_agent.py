@@ -42,6 +42,19 @@ _RELAY_SEAL = f"{_RELAY_SIDECAR}.sealed"
 _RELAY_TOKEN_FILE = f"{_RELAY_SIDECAR}.client-token"
 _RELAY_TOKEN_ENV = "OAL_RELAY_TOKEN"
 _RELAY_URL_ENV = "OAL_RELAY_URL"
+_VERIFY_INSTRUCTION_PATH = Path(__file__).with_name("verify-instruction-v1.txt")
+_VERIFY_INSTRUCTION_SHA256 = (
+    "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
+)
+_VERIFY_INSTRUCTION_BYTES = _VERIFY_INSTRUCTION_PATH.read_bytes()
+if (
+    "sha256:" + hashlib.sha256(_VERIFY_INSTRUCTION_BYTES).hexdigest()
+    != _VERIFY_INSTRUCTION_SHA256
+    or not _VERIFY_INSTRUCTION_BYTES.endswith(b"\n")
+    or _VERIFY_INSTRUCTION_BYTES.endswith(b"\n\n")
+):
+    raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
+_VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
 
 
 def _relay_url(env: dict[str, str]) -> str:
@@ -82,10 +95,15 @@ class OpenAgentLabCodex(Codex):
         *args: Any,
         config: Path | str | dict[str, Any] | None = None,
         extra_env: dict[str, str] | None = None,
+        enable_verify_instruction_v1: bool = False,
         **kwargs: Any,
     ) -> None:
         if config is not None:
             raise ValueError("OpenAgentLabCodex owns its benchmark config.")
+        if type(enable_verify_instruction_v1) is not bool:
+            raise ValueError(
+                "enable_verify_instruction_v1 must be a boolean experiment switch."
+            )
         if (
             model_name is None
             or "/" not in model_name
@@ -139,9 +157,23 @@ class OpenAgentLabCodex(Codex):
                 }
             },
         }
+        if enable_verify_instruction_v1:
+            provider_config["developer_instructions"] = _VERIFY_INSTRUCTION
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
+        self._open_agent_lab_variant = {
+            "schema_version": 1,
+            "variant_id": (
+                "verify-instruction-v1"
+                if enable_verify_instruction_v1
+                else "control-v1"
+            ),
+            "developer_instruction_requested": enable_verify_instruction_v1,
+            "requested_developer_instructions_sha256": (
+                _VERIFY_INSTRUCTION_SHA256 if enable_verify_instruction_v1 else None
+            ),
+        }
         self._provider_evidence_dir = (
             logs_dir.parent / "artifacts" / "provider-evidence"
         )
@@ -300,6 +332,10 @@ class OpenAgentLabCodex(Codex):
             "relay_marker_sha256": seal.get("markerSha256"),
             "provider_id": self._open_agent_lab_provider,
             "requested_model": self._open_agent_lab_model,
+            "variant_id": self._open_agent_lab_variant["variant_id"],
+            "requested_developer_instructions_sha256": self._open_agent_lab_variant[
+                "requested_developer_instructions_sha256"
+            ],
         }
         binding_hash = hashlib.sha256(
             json.dumps(
@@ -314,6 +350,7 @@ class OpenAgentLabCodex(Codex):
             **binding,
             "binding_sha256": f"sha256:{binding_hash}",
         }
+        metadata["agent_variant"] = dict(self._open_agent_lab_variant)
         context.metadata["open_agent_lab_provider"] = metadata
 
     @staticmethod
@@ -328,3 +365,24 @@ class OpenAgentLabCodex(Codex):
         if openai_base_url is not None:
             raise ValueError("Benchmark provider base URLs are frozen by the adapter.")
         return super()._build_effective_config(None)
+
+
+class OpenAgentLabCodexVerifyInstructionV1(OpenAgentLabCodex):
+    """Named Harbor treatment arm for the frozen verification instruction."""
+
+    def __init__(
+        self,
+        *args: Any,
+        enable_verify_instruction_v1: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        if enable_verify_instruction_v1 is not True:
+            raise ValueError(
+                "The treatment agent requires enable_verify_instruction_v1=true."
+            )
+        super().__init__(*args, enable_verify_instruction_v1=True, **kwargs)
+
+    @staticmethod
+    @override
+    def name() -> str:
+        return "open-agent-lab-codex-verify-instruction-v1"

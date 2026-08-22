@@ -11,7 +11,13 @@ import yaml
 from harbor.agents.installed.codex import Codex
 from harbor.models.agent.context import AgentContext
 
-from benchmarks.terminal_bench.harbor_agent import _PROFILES, OpenAgentLabCodex
+from benchmarks.terminal_bench.harbor_agent import (
+    _PROFILES,
+    _VERIFY_INSTRUCTION,
+    _VERIFY_INSTRUCTION_SHA256,
+    OpenAgentLabCodex,
+    OpenAgentLabCodexVerifyInstructionV1,
+)
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 from benchmarks.terminal_bench.validate_harbor_e2e import (
     _assert_isolation_call,
@@ -247,6 +253,33 @@ class RelayMetadataTest(unittest.TestCase):
 
 
 class ProfileDriftTest(unittest.TestCase):
+    def test_verify_experiment_file_hashes_are_frozen(self) -> None:
+        root = Path(__file__).parents[2]
+        manifest = json.loads(
+            (
+                root / "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            manifest["experimentId"], "terminal-bench-2.1-verify-instruction-v1"
+        )
+        self.assertEqual(manifest["runClass"], "development")
+        for relative, expected in manifest["fileSha256"].items():
+            actual = (
+                "sha256:" + hashlib.sha256((root / relative).read_bytes()).hexdigest()
+            )
+            self.assertEqual(actual, expected, relative)
+
+    def test_verify_instruction_bytes_are_frozen(self) -> None:
+        path = Path(__file__).with_name("verify-instruction-v1.txt")
+        content = path.read_bytes()
+        self.assertEqual(content.decode(), _VERIFY_INSTRUCTION)
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(content).hexdigest(), _VERIFY_INSTRUCTION_SHA256
+        )
+        self.assertTrue(content.endswith(b"\n"))
+        self.assertFalse(content.endswith(b"\n\n"))
+
     def test_provider_free_e2e_rejects_a_degraded_isolation_command(self) -> None:
         secret = b"provider-free-test-key"
         _assert_isolation_call({"cmd": _isolation_command(secret)}, secret)
@@ -294,6 +327,36 @@ class ProfileDriftTest(unittest.TestCase):
                     f"{provider}/{selected_model}",
                 )
                 self.assertIn(selected_model, _PROFILES[provider]["models"])
+                paired = yaml.safe_load(
+                    (
+                        root / "benchmarks/terminal_bench" / f"pilot-v2.{provider}.yaml"
+                    ).read_text()
+                )
+                self.assertEqual(paired["n_concurrent_trials"], 1)
+                self.assertEqual(paired["retry"], {"max_retries": 0})
+                self.assertEqual(
+                    paired["environment"]["extra_docker_compose"],
+                    [f"benchmarks/terminal_bench/{compose_name}"],
+                )
+                self.assertEqual(
+                    [agent["model_name"] for agent in paired["agents"]],
+                    [f"{provider}/{selected_model}"] * 2,
+                )
+                self.assertEqual(
+                    [
+                        agent["kwargs"]["enable_verify_instruction_v1"]
+                        for agent in paired["agents"]
+                    ],
+                    [False, True] if provider == "deepseek" else [True, False],
+                )
+                self.assertEqual(
+                    [agent["kwargs"]["reasoning_effort"] for agent in paired["agents"]],
+                    [_PROFILES[provider]["reasoning"]] * 2,
+                )
+                self.assertEqual(
+                    paired["datasets"][0]["task_names"],
+                    pilot["datasets"][0]["task_names"],
+                )
 
     def test_provider_free_e2e_is_exact_and_only_overrides_the_entrypoint(self) -> None:
         root = Path(__file__).parents[2]
@@ -330,11 +393,73 @@ class ProfileDriftTest(unittest.TestCase):
                 }
             },
         )
+        self.assertFalse(config["agents"][0]["kwargs"]["enable_verify_instruction_v1"])
+        treatment = yaml.safe_load(
+            (benchmark / "harbor-verify-instruction-e2e.yaml").read_text()
+        )
+        self.assertEqual(
+            treatment["environment"]["extra_docker_compose"],
+            config["environment"]["extra_docker_compose"],
+        )
+        self.assertTrue(
+            treatment["agents"][0]["kwargs"]["enable_verify_instruction_v1"]
+        )
+        self.assertEqual(
+            treatment["agents"][0]["import_path"],
+            "benchmarks.terminal_bench.harbor_agent:"
+            "OpenAgentLabCodexVerifyInstructionV1",
+        )
 
 
 class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
     def test_sealed_relay_profile_does_not_claim_resume_support(self) -> None:
         self.assertFalse(OpenAgentLabCodex.SUPPORTS_RESUME)
+
+    def test_verify_instruction_is_opt_in_and_uses_real_codex_config(self) -> None:
+        common = {
+            "model_name": "zai/glm-5.3",
+            "version": "0.149.0",
+            "extra_env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            control = OpenAgentLabCodex(Path(raw) / "control", **common)
+            treatment = OpenAgentLabCodexVerifyInstructionV1(
+                Path(raw) / "treatment", **common
+            )
+
+        self.assertNotIn("developer_instructions", control._build_effective_config())
+        self.assertEqual(
+            treatment._build_effective_config()["developer_instructions"],
+            _VERIFY_INSTRUCTION,
+        )
+        self.assertEqual(control._open_agent_lab_variant["variant_id"], "control-v1")
+        self.assertEqual(
+            treatment._open_agent_lab_variant,
+            {
+                "schema_version": 1,
+                "variant_id": "verify-instruction-v1",
+                "developer_instruction_requested": True,
+                "requested_developer_instructions_sha256": _VERIFY_INSTRUCTION_SHA256,
+            },
+        )
+
+    def test_verify_instruction_switch_is_strict(self) -> None:
+        common = {
+            "model_name": "zai/glm-5.3",
+            "version": "0.149.0",
+            "extra_env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                OpenAgentLabCodex(
+                    Path(raw), enable_verify_instruction_v1="true", **common
+                )  # type: ignore[arg-type]
+            with self.assertRaisesRegex(
+                ValueError, "requires enable_verify_instruction_v1=true"
+            ):
+                OpenAgentLabCodexVerifyInstructionV1(
+                    Path(raw), enable_verify_instruction_v1=False, **common
+                )
 
     async def test_setup_fetches_a_per_trial_token_before_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -463,6 +588,17 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 binding["harbor_context_id"],
                 "00000000-0000-0000-0000-000000000001",
+            )
+            self.assertEqual(binding["variant_id"], "control-v1")
+            self.assertIsNone(binding["requested_developer_instructions_sha256"])
+            self.assertEqual(
+                context.metadata["open_agent_lab_provider"]["agent_variant"],
+                {
+                    "schema_version": 1,
+                    "variant_id": "control-v1",
+                    "developer_instruction_requested": False,
+                    "requested_developer_instructions_sha256": None,
+                },
             )
 
 

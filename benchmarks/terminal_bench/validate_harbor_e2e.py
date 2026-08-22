@@ -20,6 +20,26 @@ _DATASET_DIGEST = (
 )
 _TASK_DIGEST = "sha256:38d7a077f07fbee8efc78db5dec9a72f82e727510ad1dcfeac0b55fa845256b7"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_VERIFY_INSTRUCTION_SHA256 = (
+    "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
+)
+_VARIANTS = {
+    "control-v1": {
+        "developer_instruction_requested": False,
+        "requested_developer_instructions_sha256": None,
+        "agent_name": "open-agent-lab-codex",
+        "response_ids": ["resp_fixture_1", "resp_fixture_2"],
+    },
+    "verify-instruction-v1": {
+        "developer_instruction_requested": True,
+        "requested_developer_instructions_sha256": _VERIFY_INSTRUCTION_SHA256,
+        "agent_name": "open-agent-lab-codex-verify-instruction-v1",
+        "response_ids": [
+            "resp_fixture_verify_instruction_1",
+            "resp_fixture_verify_instruction_2",
+        ],
+    },
+}
 _ISOLATION_COMMAND = r"""expected=__SECRET_SHA256__
 for file in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do
   [ -r "$file" ] || continue
@@ -95,7 +115,11 @@ def _assert_secret_absent(job_dir: Path, secret: bytes) -> None:
             _require(not _contains(path, secret), f"Provider key leaked into {path}.")
 
 
-def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
+def validate(
+    job_dir: Path, secret: bytes, variant_id: str = "control-v1"
+) -> dict[str, Any]:
+    expected_variant = _VARIANTS.get(variant_id)
+    _require(expected_variant is not None, f"Unknown E2E variant: {variant_id}.")
     trial_dir = _trial_dir(job_dir)
     job = JobConfig.model_validate_json((job_dir / "config.json").read_text())
     job_result = JobResult.model_validate_json((job_dir / "result.json").read_text())
@@ -136,6 +160,21 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     )
     rewards = result.verifier_result.rewards if result.verifier_result else None
     _require(rewards == {"reward": 1.0}, "Verifier reward is not exactly 1.")
+    _require(len(job.agents) == 1, "Expected one Harbor agent config.")
+    _require(
+        job.agents[0].kwargs.get("enable_verify_instruction_v1")
+        is expected_variant["developer_instruction_requested"],
+        "Job config variant drifted.",
+    )
+    _require(
+        lock.agent.kwargs.get("enable_verify_instruction_v1")
+        is expected_variant["developer_instruction_requested"],
+        "Trial lock variant drifted.",
+    )
+    _require(
+        result.agent_info.name == expected_variant["agent_name"],
+        "Harbor agent identity drifted.",
+    )
 
     _require(trajectory.schema_version == "ATIF-v1.7", "Unexpected ATIF version.")
     _require(trajectory.session_id, "ATIF session identity is missing.")
@@ -200,7 +239,7 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     )
     _require(
         [record.get("responseId") for record in closed]
-        == ["resp_fixture_1", "resp_fixture_2"],
+        == expected_variant["response_ids"],
         "Fixture response binding drifted.",
     )
 
@@ -209,6 +248,20 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
         (context.metadata or {}).get("open_agent_lab_provider") if context else None
     )
     _require(isinstance(provider, dict), "Harbor provider metadata is missing.")
+    _require(
+        provider.get("agent_variant")
+        == {
+            "schema_version": 1,
+            "variant_id": variant_id,
+            "developer_instruction_requested": expected_variant[
+                "developer_instruction_requested"
+            ],
+            "requested_developer_instructions_sha256": expected_variant[
+                "requested_developer_instructions_sha256"
+            ],
+        },
+        "Agent variant metadata drifted.",
+    )
     _require(
         provider.get("publication_gate")
         == {
@@ -251,6 +304,12 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     _require(
         binding.get("requested_model") == "deepseek-v4-pro", "Bound model drifted."
     )
+    _require(binding.get("variant_id") == variant_id, "Bound variant drifted.")
+    _require(
+        binding.get("requested_developer_instructions_sha256")
+        == expected_variant["requested_developer_instructions_sha256"],
+        "Bound developer instruction drifted.",
+    )
     _assert_secret_absent(job_dir, secret)
 
     return {
@@ -259,20 +318,25 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
         "task_digest": lock.task.digest,
         "requests": metadata["event_count"] // 3,
         "synthetic": True,
+        "variant_id": variant_id,
         "trajectory_steps": len(trajectory.steps),
         "seal": seal["markerSha256"],
     }
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in {2, 3}:
         raise SystemExit(
             "usage: PROVIDER_KEY | python -m "
-            "benchmarks.terminal_bench.validate_harbor_e2e JOB_DIR"
+            "benchmarks.terminal_bench.validate_harbor_e2e JOB_DIR [VARIANT_ID]"
         )
     print(
         json.dumps(
-            validate(Path(sys.argv[1]), sys.stdin.buffer.read().strip()),
+            validate(
+                Path(sys.argv[1]),
+                sys.stdin.buffer.read().strip(),
+                sys.argv[2] if len(sys.argv) == 3 else "control-v1",
+            ),
             separators=(",", ":"),
             sort_keys=True,
         )

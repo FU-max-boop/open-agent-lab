@@ -192,6 +192,33 @@ export interface CodexProbeRunSpec {
   prompt: string;
   baseUrl: string;
   codexPath?: string;
+  developerInstruction?: string;
+}
+
+function withDeveloperInstruction(
+  invocation: CodexInvocation,
+  instruction: string | undefined,
+): CodexInvocation {
+  if (instruction === undefined) return invocation;
+  if (
+    instruction.trim() === "" ||
+    instruction.includes("\0") ||
+    Buffer.byteLength(instruction) > 16 * 1024
+  ) {
+    throw new Error("Codex probe developer instruction is invalid.");
+  }
+  if (invocation.args.at(-1) !== "-") {
+    throw new Error("Codex probe invocation no longer reads its prompt from stdin.");
+  }
+  return Object.freeze({
+    ...invocation,
+    args: Object.freeze([
+      ...invocation.args.slice(0, -1),
+      "--config",
+      `developer_instructions=${JSON.stringify(instruction)}`,
+      "-",
+    ]),
+  });
 }
 
 /** Build a deterministic probe invocation; the endpoint must be loopback. */
@@ -205,7 +232,7 @@ export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocat
   ) {
     throw new Error("Codex probe endpoint must be an unauthenticated loopback HTTP URL.");
   }
-  return invocation(spec, {
+  return withDeveloperInstruction(invocation(spec, {
     id: "probe",
     name: "Open Agent Lab loopback probe",
     baseUrl: url.toString().replace(/\/$/, ""),
@@ -217,7 +244,7 @@ export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocat
     scope: "loopback-probe",
     requestRetries: 0,
     streamRetries: 0,
-  });
+  }), spec.developerInstruction);
 }
 
 /** Execute Codex without ever copying the provider secret into argv or config. */

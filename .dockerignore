@@ -18,6 +18,7 @@
 !benchmarks/
 !benchmarks/terminal_bench/
 !benchmarks/terminal_bench/relay.Dockerfile
+!benchmarks/terminal_bench/verify-instruction-v1.txt
 !packages/
 !packages/*/
 !packages/*/package.json

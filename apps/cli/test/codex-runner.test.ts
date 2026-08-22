@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -189,6 +189,7 @@ test(
       output: "codex-native-responses",
       sawThreadStart: true,
       sawTurnComplete: true,
+      sawDeveloperInstruction: false,
     });
   },
 );
@@ -201,5 +202,23 @@ test(
     assert.equal(result.ok, true);
     assert.equal(result.requests, 2);
     assert.equal(result.output, "codex-native-responses");
+  },
+);
+
+test(
+  "installed Codex forwards the frozen verification instruction",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async () => {
+    const instruction = await readFile(
+      new URL("../../../benchmarks/terminal_bench/verify-instruction-v1.txt", import.meta.url),
+      "utf8",
+    );
+    const result = await runCodexProbe(
+      process.env.OPEN_AGENT_LAB_CODEX_BIN,
+      true,
+      instruction,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.sawDeveloperInstruction, true);
   },
 );
