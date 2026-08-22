@@ -118,6 +118,82 @@ jobs:
             benchmarks.terminal_bench.test_harbor_environment \
             benchmarks.terminal_bench.test_paired_results
 
+  task-image-smoke:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare pinned Codex runtime
+        env:
+          OPEN_AGENT_LAB_CODEX_ARCHIVE: /tmp/codex-0.149.0-linux-x64.tgz
+          OPEN_AGENT_LAB_CODEX_RUNTIME: /tmp/open-agent-lab-codex-runtime
+        run: |
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --output "$OPEN_AGENT_LAB_CODEX_ARCHIVE" \
+            https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-x64.tgz
+          python3 - <<'PY'
+          import os
+          from benchmarks.terminal_bench.codex_runtime import (
+              codex_runtime_spec,
+              prepare_tree,
+          )
+
+          prepare_tree(
+              os.environ["OPEN_AGENT_LAB_CODEX_ARCHIVE"],
+              os.environ["OPEN_AGENT_LAB_CODEX_RUNTIME"],
+              codex_runtime_spec(),
+          )
+          PY
+
+      - name: Smoke exact runtime in every frozen task image
+        env:
+          OPEN_AGENT_LAB_CODEX_RUNTIME: /tmp/open-agent-lab-codex-runtime
+        run: |
+          install_root=/installed-agent/open-agent-lab/codex-0.149.0-x86_64-unknown-linux-musl
+          smoke_command="$(python3 - <<'PY'
+          from benchmarks.terminal_bench.codex_runtime import (
+              CODEX_RUNTIME_ENTRYPOINT,
+              CODEX_RUNTIME_INSTALL_ROOT,
+              build_full_tree_verification_command,
+              codex_runtime_spec,
+          )
+
+          root = CODEX_RUNTIME_INSTALL_ROOT
+          commands = [
+              build_full_tree_verification_command(codex_runtime_spec()),
+              'test -n "$BASH_VERSION"',
+              f'test "$({CODEX_RUNTIME_ENTRYPOINT} --version)" = "codex-cli 0.149.0"',
+              f'{root}/vendor/x86_64-unknown-linux-musl/codex-path/rg --version >/dev/null',
+              f'{root}/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap --version >/dev/null',
+              f'if : > {root}/.write-probe 2>/dev/null; then exit 1; fi',
+          ]
+          print("; ".join(commands))
+          PY
+          )"
+          mapfile -t bindings < <(
+            jq --exit-status --raw-output \
+              '.runtime.taskOrder[] as $task | [$task, .taskRuntimeBindings[$task].immutableImage, .taskRuntimeBindings[$task].imageConfigDigest] | @tsv' \
+              benchmarks/terminal_bench/verify-instruction-v1.experiment.json
+          )
+          test "${#bindings[@]}" -eq 5
+          for binding in "${bindings[@]}"; do
+            IFS=$'\t' read -r task image config_digest <<<"$binding"
+            echo "Smoketesting $task in $image"
+            docker pull --platform linux/amd64 "$image"
+            identity="$(docker image inspect --format '{{.Id}}|{{.Os}}/{{.Architecture}}' "$image")"
+            test "$identity" = "$config_digest|linux/amd64"
+            docker run --rm --platform linux/amd64 --pull never --network none \
+              --read-only --cap-drop ALL --security-opt no-new-privileges \
+              --mount "type=bind,source=$OPEN_AGENT_LAB_CODEX_RUNTIME,target=$install_root,readonly" \
+              --entrypoint /bin/bash "$image" -lc "$smoke_command"
+          done
+
   relay-image:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

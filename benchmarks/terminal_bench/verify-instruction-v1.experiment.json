@@ -215,7 +215,7 @@
     "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:1cbf361ed3452c68fe07b9d3e016bdb0416b32d4f8490d58c88933cfa53564b9",
     "benchmarks/terminal_bench/codex_runtime.py": "sha256:b21d780f345fb4e7b42ca476a87f717f3ffa3d2b8a2213e4e06f49abb678eafc",
     "benchmarks/terminal_bench/experiment_contract.py": "sha256:3c208dfd2ac060fac90de53876c59e2db114310507e2e8ec2d90ecfc4b00e8e9",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:d20b672f941af1f6de8ed4d7f0158d3fa805f6c908a806c5af43ab1f1faeb297",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:50126a47eb7585ce90875a56454d12dfe8c7f56afa7d363e6d96031b93c159a2",
     "benchmarks/terminal_bench/harbor_environment.py": "sha256:069b32c7e3c8af4a137eb847137321d5c1a6ab04d22368872344f7be7789ddc4",
     "benchmarks/terminal_bench/paired_results.py": "sha256:65c6eb1e687c59938c90d32321b94c27d8f9a5b20febbf33256acbfe2bb15564",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",

@@ -631,6 +631,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("developer_instructions", control._build_effective_config())
         self.assertEqual(
+            control._build_effective_config()["features"],
+            {"shell_zsh_fork": False, "unified_exec_zsh_fork": False},
+        )
+        self.assertEqual(
             treatment._build_effective_config()["developer_instructions"],
             _VERIFY_INSTRUCTION,
         )
