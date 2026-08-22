@@ -29,6 +29,8 @@ test("DeepSeek invocation is native Responses, isolated, and secret-free", () =>
   assert.match(argv, /env_key = "DEEPSEEK_API_KEY"/);
   assert.match(argv, /shell_environment_policy\.ignore_default_excludes=false/);
   assert.match(argv, /shell_environment_policy\.set\.DEEPSEEK_API_KEY=""/);
+  assert.match(argv, /--sandbox workspace-write/);
+  assert.doesNotMatch(argv, /sandbox_workspace_write\.network_access=true/);
   assert.ok(invocation.args.includes("--ignore-user-config"));
   assert.ok(invocation.args.includes("--ephemeral"));
   assert.ok(!argv.includes(invocation.stdin));
@@ -159,6 +161,8 @@ test("probe configuration is deterministic and restricted to loopback", () => {
   const args = invocation.args.join(" ");
   assert.equal(invocation.provider, "probe");
   assert.equal(invocation.requiredEnv, "OPEN_AGENT_LAB_PROBE_KEY");
+  assert.match(args, /--sandbox workspace-write/);
+  assert.match(args, /sandbox_workspace_write\.network_access=true/);
   assert.match(args, /request_max_retries = 0/);
   assert.match(args, /stream_max_retries = 0/);
   assert.throws(
