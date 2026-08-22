@@ -38,12 +38,16 @@ const PROFILES: RelayProfiles = {
   },
 } as const;
 
-export async function publishFileAtomic(path: string, content: string): Promise<void> {
+export async function publishFileAtomic(
+  path: string,
+  content: string,
+  mode = 0o600,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   let created = false;
   try {
-    const handle = await open(temporary, "wx", 0o600);
+    const handle = await open(temporary, "wx", mode);
     created = true;
     try {
       await handle.writeFile(content, "utf8");
@@ -139,6 +143,7 @@ export async function awaitRelayAuthorization(
     publishFileAtomic(
       readyPath,
       `${JSON.stringify({ schemaVersion: 1, buildId, provider, model, capabilityId })}\n`,
+      0o444,
     ),
   );
   return { buildId, readyPath, provider, model, capabilityId };

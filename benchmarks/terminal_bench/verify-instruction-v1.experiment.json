@@ -79,8 +79,8 @@
     }
   },
   "relayBuildIds": {
-    "production": "sha256:f89459a30bd0c22cc9b48026737452f53941c96c41b4c3db04bc41a95093ac47",
-    "providerFreeFixture": "sha256:fb0fcba301db8f157f60523ae7d41eda21a8f8f0814c8081a49f97596f85cde9"
+    "production": "sha256:715cbf91ad43ce6a7227baf66ccbcea2382bacf0c75c6094377aa7ec7a5c6e34",
+    "providerFreeFixture": "sha256:8b5228c4e8e2d47291022a085702d33ee6d0c68f880fd9be58e103c953922867"
   },
   "arms": [
     {
@@ -157,9 +157,9 @@
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
     "benchmarks/terminal_bench/relay_evidence.py": "sha256:069bd48716be20c51413140b765eb3ad3027d8aa5aa5b58d75f6adf214dda6ca",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:fb89ac0d8f18db88fb1013c1edec78a569d2bfd5b76714fcf87c81ee9f1b30d3",
-    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:fc7bef4db93e22d0a76d7f4d1a624a7264ed80eb9dc45cd77da284aa7fe5034b",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:00c9938e0f3ee44a00cc259d649a1603f7c488c57db84c88c15e62019157ccc6",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:04aec0f94b40d12117934d27cbf1bd2c52d8e54ec2035cadc78b75be4c5484b2",
+    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:f6aaf15960e951ecf06036f4e8afffab446208f251aafe8211cfa874779bf8a5",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:4360320211ea8966e1072ede35f35c7c35055aede5341e5da35526fa04e69d87",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:19b4c0aa13177c798817d306fbb196dfda6fd4835908613e3c3e05dd5443bf7c",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },

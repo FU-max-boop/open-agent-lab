@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -103,6 +103,7 @@ test("relay authorization gates all secret-dependent startup", async () => {
     assert.equal(bootstrap.provider, "deepseek");
     assert.equal(bootstrap.model, "deepseek-v4-pro");
     assert.match(String(bootstrap.capabilityId), /^[a-f0-9]{64}$/u);
+    assert.equal((await stat(`${sidecar}.bootstrap-ready`)).mode & 0o777, 0o444);
     process.emit("SIGUSR1", "SIGUSR1");
     assert.deepEqual(await pending, {
       buildId,
