@@ -381,7 +381,7 @@ export async function startNativeResponsesRelay(
       headersTimeout: 10_000,
       keepAliveTimeout: 5_000,
       maxHeaderSize: 16 * 1024,
-      requestTimeout: limits.idleTimeoutMs,
+      requestTimeout: Math.max(10_000, limits.idleTimeoutMs),
     },
     (request, response) => {
       const task = (async () => {

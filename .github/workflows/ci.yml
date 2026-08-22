@@ -81,7 +81,17 @@ jobs:
           sudo chown 0:0 "$OAL_PROVIDER_API_KEY_FILE"
           sudo chmod 0400 "$OAL_PROVIDER_API_KEY_FILE"
           compose=(docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml)
-          trap '"${compose[@]}" down --volumes' EXIT
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              "${compose[@]}" ps || true
+              "${compose[@]}" logs --no-color open-agent-lab-relay || true
+            fi
+            "${compose[@]}" down --volumes || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          set -x
           "${compose[@]}" up --detach --build --wait open-agent-lab-relay
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
             'test ! -r /run/secrets/provider-api-key && test "$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status)" = 0000000000000000'

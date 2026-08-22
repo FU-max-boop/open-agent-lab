@@ -448,10 +448,13 @@ test("sealing aborts an in-flight stream and writes one complete lifecycle", asy
     upstreamStarted();
   });
   const { relay, sidecarPath } = await fixture(t, upstream);
-  const pending = relayRequest(relay).then(async (response) => response.text());
+  const pending = Promise.allSettled([
+    relayRequest(relay).then(async (response) => response.text()),
+  ]);
   await started;
   const summary = await relay.seal();
-  await assert.rejects(pending);
+  const [outcome] = await pending;
+  assert.equal(outcome?.status, "rejected");
 
   const journal = await readFile(sidecarPath, "utf8");
   assert.equal(summary.eventCount, 3);
@@ -479,7 +482,9 @@ test("the bounded successor queue rejects a third flight and seal never hangs", 
     upstreamStarted();
   });
   const { relay } = await fixture(t, upstream);
-  const first = relayRequest(relay).then(async (response) => response.text());
+  const first = Promise.allSettled([
+    relayRequest(relay).then(async (response) => response.text()),
+  ]);
   await started;
   const contenderA = relayRequest(relay);
   const contenderB = relayRequest(relay);
@@ -496,11 +501,11 @@ test("the bounded successor queue rejects a third flight and seal never hangs", 
     ),
   ]);
   await assertRelayError(rejected.response, 429, "concurrency_exceeded");
-  const summary = await relay.seal();
-  await Promise.allSettled([
-    first,
+  const queued = Promise.allSettled([
     rejected.queued.then(async (response) => response.text()),
   ]);
+  const summary = await relay.seal();
+  await Promise.all([first, queued]);
 
   assert.equal(summary.eventCount, 3);
   assert.deepEqual(summary.rejectedRequests, {
@@ -515,8 +520,9 @@ test("upstream timeouts and response cap fail closed with complete evidence", as
     response.end("x".repeat(64));
   });
   const capped = await fixture(t, oversized, { maxResponseBytes: 32 });
-  const cappedResponse = await relayRequest(capped.relay);
-  await assert.rejects(cappedResponse.text());
+  await assert.rejects(
+    relayRequest(capped.relay).then(async (response) => response.text()),
+  );
   assert.equal(records(await readFile(capped.sidecarPath, "utf8"))[2]?.errorCategory, "response_too_large");
 
   const unused = await listen((_request, response) => response.end());
@@ -540,8 +546,9 @@ test("upstream timeouts and response cap fail closed with complete evidence", as
     response.flushHeaders();
   });
   const idle = await fixture(t, stalled, { idleTimeoutMs: 10 });
-  const idleResponse = await relayRequest(idle.relay);
-  await assert.rejects(idleResponse.text());
+  await assert.rejects(
+    relayRequest(idle.relay).then(async (response) => response.text()),
+  );
   assert.equal(
     records(await readFile(idle.sidecarPath, "utf8"))[2]?.errorCategory,
     "upstream_idle_timeout",
