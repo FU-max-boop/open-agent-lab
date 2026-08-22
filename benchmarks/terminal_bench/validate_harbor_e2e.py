@@ -179,7 +179,8 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     _require(
         metadata["publication_gate"]
         == {"ok": False, "reasons": ["synthetic_provider"]},
-        "Synthetic relay evidence was not quarantined.",
+        f"Synthetic relay evidence was not quarantined: "
+        f"{metadata['publication_gate']!r}.",
     )
     seal = metadata["seal"]
     _require(seal["providerId"] == "synthetic-fixture", "Relay provenance drifted.")

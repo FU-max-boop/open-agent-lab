@@ -43,6 +43,7 @@ def _write_evidence(
     build_id: str = "sha256:" + "b" * 64,
     schema_version: object = 1,
     requests: tuple[tuple[int, str, object], ...] | None = None,
+    rejected_requests: dict[str, int] | None = None,
 ) -> None:
     events = []
     for ordinal, (status, transport_state, usage) in enumerate(
@@ -110,7 +111,7 @@ def _write_evidence(
         "sealedAt": "2026-08-22T00:00:00.000Z",
         "eventCount": len(events),
         "chainHead": previous,
-        "rejectedRequests": {},
+        "rejectedRequests": rejected_requests or {},
     }
     seal = {**marker, "markerSha256": _digest(_canonical(marker))}
     (directory / "provider-metadata.ndjson.sealed").write_text(_canonical(seal) + "\n")
@@ -138,6 +139,36 @@ class RelayMetadataTest(unittest.TestCase):
             self.assertEqual(
                 metadata["publication_gate"],
                 {"ok": False, "reasons": ["synthetic_provider"]},
+            )
+
+    def test_post_terminal_disconnect_is_audited_but_not_a_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(
+                directory,
+                provider_id="synthetic-fixture",
+                rejected_requests={"client_disconnected_after_close": 1},
+            )
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["synthetic_provider"]},
+            )
+
+    def test_pre_accept_rejection_prevents_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(directory, rejected_requests={"invalid_json": 1})
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["relay_rejected_requests"]},
             )
 
     def test_incomplete_or_wrong_model_evidence_cannot_publish(self) -> None:
