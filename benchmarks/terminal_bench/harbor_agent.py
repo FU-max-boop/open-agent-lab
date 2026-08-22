@@ -362,6 +362,10 @@ class OpenAgentLabCodex(Codex):
             "model_auto_compact_token_limit": context_window * 9 // 10,
             "model_reasoning_effort": profile["reasoning"],
             "model_reasoning_summary": "none",
+            "features": {
+                "shell_zsh_fork": False,
+                "unified_exec_zsh_fork": False,
+            },
             "shell_environment_policy": {
                 "ignore_default_excludes": False,
                 "set": {_RELAY_TOKEN_ENV: ""},
