@@ -26,6 +26,7 @@ test("smoke run creates an independently verifiable and replayable bundle", asyn
   const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-cli-test-"));
   t.after(async () => rm(parent, { force: true, recursive: true }));
   const bundle = join(parent, "bundle");
+  const repeatedBundle = join(parent, "bundle-repeat");
 
   const summary = await runSmoke({
     outputDirectory: bundle,
@@ -33,12 +34,20 @@ test("smoke run creates an independently verifiable and replayable bundle", asyn
   });
   const verified = await verifyEvidenceBundle(bundle);
   const replayed = await replaySmokeEvidence(bundle);
+  const repeated = await runSmoke({
+    outputDirectory: repeatedBundle,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
 
   assert.equal(summary.result.success, true);
+  assert.equal(summary.kernelState.lifecycle, "succeeded");
+  assert.equal(summary.kernelState.completed.length, 2);
   assert.equal(verified.manifest.manifestId, summary.manifest.manifestId);
-  assert.equal(verified.fileCount, 7);
+  assert.equal(repeated.manifest.manifestId, summary.manifest.manifestId);
+  assert.equal(verified.fileCount, 9);
   assert.equal(replayed.success, true);
-  assert.equal(replayed.eventCount, 9);
+  assert.equal(replayed.eventCount, 6);
+  assert.equal(replayed.kernelEventCount, 6);
 });
 
 test("evidence verification rejects a modified payload", async (t) => {

@@ -21,7 +21,7 @@ export interface DoctorReport {
 
 function supportsRequiredNode(version: string): boolean {
   const [major = 0, minor = 0] = version.split(".").map((part) => Number.parseInt(part, 10));
-  return major > 20 || (major === 20 && minor >= 19);
+  return major === 20 && minor >= 19;
 }
 
 export function doctor(): DoctorReport {
@@ -30,7 +30,7 @@ export function doctor(): DoctorReport {
     ok: supported,
     node: {
       actual: process.versions.node,
-      required: ">=20.19.0",
+      required: ">=20.19.0 <21",
       supported,
     },
     host: {

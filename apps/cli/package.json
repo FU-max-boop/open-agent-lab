@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "@open-agent-lab/contracts": "workspace:*",
-    "@open-agent-lab/evidence": "workspace:*"
+    "@open-agent-lab/evidence": "workspace:*",
+    "@open-agent-lab/kernel": "workspace:*",
+    "@open-agent-lab/tool-broker": "workspace:*"
   }
 }

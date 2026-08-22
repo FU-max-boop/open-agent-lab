@@ -179,10 +179,11 @@ systems. Tools declare an effect class:
 - **external non-idempotent:** never automatically repeated after an uncertain
   boundary; transition to `needs_review`.
 
-On resume, the kernel reconstructs state from the last valid checkpoint and
-subsequent events, validates workspace fingerprints, then either continues,
-reconciles a known postcondition, or asks for review. Missing or corrupt evidence
-fails closed.
+On resume, Gate 1 reconstructs state from the authoritative journal and repairs
+the disposable checkpoint when needed. It validates workspace fingerprints,
+then either continues, reconciles a known postcondition, or asks for review.
+Missing or corrupt journal history fails closed; a corrupt derived checkpoint
+is rebuilt.
 
 ## Trust boundaries and threat model
 
