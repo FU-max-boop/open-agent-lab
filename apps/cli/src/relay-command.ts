@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, link, mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { startNativeResponsesRelay, type RelaySealSummary } from "./responses-relay.js";
@@ -14,6 +14,17 @@ export interface RelayProfile {
 
 export type RelayProfiles = Readonly<Record<string, RelayProfile>>;
 
+export interface RelayIdentity {
+  readonly provider: string;
+  readonly model: string;
+}
+
+export interface RelayAuthorization extends RelayIdentity {
+  readonly buildId: string;
+  readonly readyPath: string;
+  readonly capabilityId: string;
+}
+
 const PROFILES: RelayProfiles = {
   deepseek: {
     envKey: "DEEPSEEK_API_KEY",
@@ -26,6 +37,29 @@ const PROFILES: RelayProfiles = {
     models: ["glm-5.3"],
   },
 } as const;
+
+export async function publishFileAtomic(
+  path: string,
+  content: string,
+  mode = 0o600,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let created = false;
+  try {
+    const handle = await open(temporary, "wx", mode);
+    created = true;
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await link(temporary, path);
+  } finally {
+    if (created) await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -42,6 +76,77 @@ function integer(args: readonly string[], name: string, fallback: number): numbe
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be an integer.`);
   return value;
+}
+
+export async function readVerifiedBuildId(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const path = option(args, "--build-id-file");
+  if (path === undefined) throw new Error("--build-id-file is required.");
+  const buildId = (await readFile(path, "utf8")).trim();
+  const expected = env.OAL_EXPECTED_RELAY_BUILD_ID;
+  if (expected === undefined || !/^sha256:[a-f0-9]{64}$/u.test(expected) || buildId !== expected) {
+    throw new Error("Relay build identity does not match the expected preflight.");
+  }
+  return buildId;
+}
+
+async function authorizationSignal(ready: () => Promise<void>): Promise<void> {
+  const keepAlive = setInterval(() => undefined, 60_000);
+  let authorize = (): void => undefined;
+  let abort = (): void => undefined;
+  const cleanup = (): void => {
+    process.off("SIGUSR1", authorize);
+    process.off("SIGINT", abort);
+    process.off("SIGTERM", abort);
+    clearInterval(keepAlive);
+  };
+  const signal = new Promise<void>((resolveSignal, rejectSignal) => {
+    authorize = (): void => {
+      cleanup();
+      resolveSignal();
+    };
+    abort = (): void => {
+      cleanup();
+      rejectSignal(new Error("Relay authorization was interrupted."));
+    };
+    process.once("SIGUSR1", authorize);
+    process.once("SIGINT", abort);
+    process.once("SIGTERM", abort);
+  });
+  try {
+    await ready();
+    await signal;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+export async function awaitRelayAuthorization(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  expected: RelayIdentity,
+): Promise<RelayAuthorization> {
+  const provider = option(args, "--provider");
+  const model = option(args, "--model");
+  if (provider !== expected.provider || model !== expected.model) {
+    throw new Error("Relay identity does not match the expected provider and model.");
+  }
+  const sidecarPath = option(args, "--output");
+  if (sidecarPath === undefined) throw new Error("--output is required.");
+  const buildId = await readVerifiedBuildId(args, env);
+  const readyPath = resolve(`${sidecarPath}.bootstrap-ready`);
+  const capabilityId = randomBytes(32).toString("hex");
+  await authorizationSignal(async () =>
+    publishFileAtomic(
+      readyPath,
+      `${JSON.stringify({ schemaVersion: 1, buildId, provider, model, capabilityId })}\n`,
+      0o444,
+    ),
+  );
+  return { buildId, readyPath, provider, model, capabilityId };
 }
 
 async function providerSecret(
@@ -71,21 +176,27 @@ async function assertSecretFileUnreadable(path: string | undefined): Promise<voi
   throw new Error("Provider key file remains readable after dropping relay privileges.");
 }
 
-async function shutdownSignal(): Promise<void> {
+function shutdownSignal(): { readonly wait: Promise<void>; readonly cancel: () => void } {
   const keepAlive = setInterval(() => undefined, 60_000);
-  try {
-    await new Promise<void>((resolveSignal) => {
-      const done = (): void => {
-        process.off("SIGINT", done);
-        process.off("SIGTERM", done);
-        resolveSignal();
-      };
-      process.once("SIGINT", done);
-      process.once("SIGTERM", done);
-    });
-  } finally {
-    clearInterval(keepAlive);
-  }
+  let done = (): void => undefined;
+  const wait = new Promise<void>((resolveSignal) => {
+    done = (): void => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      clearInterval(keepAlive);
+      resolveSignal();
+    };
+    process.once("SIGINT", done);
+    process.once("SIGTERM", done);
+  });
+  return {
+    wait,
+    cancel: (): void => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      clearInterval(keepAlive);
+    },
+  };
 }
 
 function dropPrivileges(env: NodeJS.ProcessEnv): void {
@@ -118,6 +229,7 @@ export async function runRelayCommand(
   env: NodeJS.ProcessEnv = process.env,
   output: (message: string) => void = (message) => process.stdout.write(`${message}\n`),
   profiles: RelayProfiles = PROFILES,
+  authorization?: RelayAuthorization,
 ): Promise<RelaySealSummary> {
   const provider = option(args, "--provider");
   const profile = provider === undefined ? undefined : profiles[provider];
@@ -134,18 +246,23 @@ export async function runRelayCommand(
   const clientTokenPath = resolve(
     option(args, "--client-token-output") ?? `${resolvedSidecar}.client-token`,
   );
+  const grant =
+    authorization ?? (await awaitRelayAuthorization(args, env, { provider, model }));
+  const buildId = await readVerifiedBuildId(args, env);
+  if (
+    grant.buildId !== buildId ||
+    grant.readyPath !== resolve(`${resolvedSidecar}.bootstrap-ready`) ||
+    grant.provider !== provider ||
+    grant.model !== model ||
+    !/^[a-f0-9]{64}$/u.test(grant.capabilityId)
+  ) {
+    throw new Error("Relay authorization does not match this process.");
+  }
   const providerKey = await providerSecret(env, profile.envKey);
   const evidenceProviderId = profile.evidenceProviderId ?? provider;
-  const buildIdPath = option(args, "--build-id-file");
-  const buildId =
-    buildIdPath === undefined
-      ? (env.OAL_RELAY_BUILD_ID ?? "development")
-      : (await readFile(buildIdPath, "utf8")).trim();
   dropPrivileges(env);
   await assertSecretFileUnreadable(providerKey.path);
   const clientBearer = randomBytes(32).toString("hex");
-  await mkdir(dirname(clientTokenPath), { recursive: true });
-  await writeFile(clientTokenPath, `${clientBearer}\n`, { flag: "wx", mode: 0o600 });
   const ttlSeconds = integer(args, "--ttl-seconds", 14_400);
   const expiresAtMs = Date.now() + ttlSeconds * 1_000;
   const relay = await startNativeResponsesRelay({
@@ -170,23 +287,36 @@ export async function runRelayCommand(
     });
   };
   const shutdown = shutdownSignal();
+  let tokenPublished = false;
   process.on("SIGUSR2", seal);
-  output(
-    JSON.stringify({
-      ok: true,
-      baseUrl: relay.baseUrl,
-      sidecarPath: relay.sidecarPath,
-      sealPath: relay.sealPath,
-      clientTokenPath,
-      provider: evidenceProviderId,
-      model,
-      expiresAt: new Date(expiresAtMs).toISOString(),
-    }),
-  );
   try {
-    await shutdown;
+    await publishFileAtomic(
+      clientTokenPath,
+      `${JSON.stringify({ schemaVersion: 1, capabilityId: grant.capabilityId, bearer: clientBearer })}\n`,
+    );
+    tokenPublished = true;
+    output(
+      JSON.stringify({
+        ok: true,
+        baseUrl: relay.baseUrl,
+        sidecarPath: relay.sidecarPath,
+        sealPath: relay.sealPath,
+        clientTokenPath,
+        provider: evidenceProviderId,
+        model,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+      }),
+    );
+    await shutdown.wait;
     return await relay.close();
+  } catch (error) {
+    await relay.close().catch(() => undefined);
+    if (tokenPublished) {
+      await rm(clientTokenPath, { force: true }).catch(() => undefined);
+    }
+    throw error;
   } finally {
+    shutdown.cancel();
     process.off("SIGUSR2", seal);
   }
 }

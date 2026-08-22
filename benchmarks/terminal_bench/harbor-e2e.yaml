@@ -11,6 +11,14 @@ orchestrator:
 retry:
   max_retries: 0
 
+artifacts:
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson
+    destination: provider-metadata.ndjson
+    service: open-agent-lab-relay
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson.sealed
+    destination: provider-metadata.ndjson.sealed
+    service: open-agent-lab-relay
+
 environment:
   type: docker
   delete: true

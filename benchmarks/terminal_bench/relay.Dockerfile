@@ -1,5 +1,6 @@
 FROM node:20.19.0-bookworm-slim@sha256:5cfa999422613d3b34f766cbb814d964cbfcb76aaf3607e805da21cccb352bac AS build
 
+ARG OAL_DOCKERIGNORE_SHA256
 WORKDIR /src
 RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -18,23 +19,30 @@ COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/rela
 COPY apps/cli/tsconfig.relay.json apps/cli/
 COPY benchmarks/terminal_bench/relay.Dockerfile benchmarks/terminal_bench/relay.Dockerfile
 COPY benchmarks/terminal_bench/verify-instruction-v1.txt benchmarks/terminal_bench/verify-instruction-v1.txt
-RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
-      apps/cli packages benchmarks/terminal_bench \
-      -type f \
-      ! -path apps/cli/src/relay-fixture-entry.ts \
-      ! -path apps/cli/src/responses-fixture.ts \
-      ! -path benchmarks/terminal_bench/verify-instruction-v1.txt \
-      -print0 \
-    | LC_ALL=C sort -z \
-    | xargs -0 sha256sum \
+RUN printf '%s' "$OAL_DOCKERIGNORE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+RUN { \
+      find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
+        apps/cli packages benchmarks/terminal_bench \
+        -type f \
+        ! -path apps/cli/src/relay-fixture-entry.ts \
+        ! -path apps/cli/src/responses-fixture.ts \
+        ! -path benchmarks/terminal_bench/verify-instruction-v1.txt \
+        -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 sha256sum; \
+      printf '%s  .dockerignore\n' "$OAL_DOCKERIGNORE_SHA256"; \
+    } | LC_ALL=C sort -k2 \
     | sha256sum \
     | awk '{print "sha256:" $1}' > /src/relay-build-id
-RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
-      apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
-      benchmarks/terminal_bench/verify-instruction-v1.txt \
-      -type f -print0 \
-    | LC_ALL=C sort -z \
-    | xargs -0 sha256sum \
+RUN { \
+      find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
+        apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
+        benchmarks/terminal_bench/verify-instruction-v1.txt \
+        -type f -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 sha256sum; \
+      printf '%s  .dockerignore\n' "$OAL_DOCKERIGNORE_SHA256"; \
+    } | LC_ALL=C sort -k2 \
     | sha256sum \
     | awk '{print "sha256:" $1}' > /src/relay-fixture-build-id
 RUN pnpm exec tsc -b packages/contracts packages/evidence \

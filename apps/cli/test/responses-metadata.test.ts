@@ -72,3 +72,38 @@ test("non-canonical ignored fields and terminal frames without response fail clo
   assert.equal(missingTerminalResponse.terminalEvent, null);
   assert.equal(missingTerminalResponse.usage, null);
 });
+
+test("conflicting flat and nested token aliases fail closed", () => {
+  const metadata = observe(
+    `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_input_tokens":9,"reasoning_output_tokens":4,"input_tokens_details":{"cached_tokens":1},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n`,
+  );
+
+  assert.equal(metadata.parseErrors, 1);
+  assert.equal(metadata.usage, null);
+});
+
+test("model source saturation always reserves a terminal source", () => {
+  const observer = new SseMetadataObserver(MODEL);
+  for (let index = 0; index < 8; index += 1) {
+    observer.feed(
+      Buffer.from(
+        `data: {"type":"response.created","response":{"id":"created-${index}","model":"${MODEL}","headers":{"openai-model":"${MODEL}"}}}\n\n`,
+      ),
+    );
+  }
+  observer.feed(
+    Buffer.from(
+      `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`,
+    ),
+  );
+
+  const metadata = observer.finish();
+  assert.equal(Object.keys(metadata.modelSources).length, 16);
+  assert.ok(
+    Object.keys(metadata.modelSources).some((source) =>
+      source.startsWith("event.response.completed.response.model."),
+    ),
+  );
+  assert.equal(metadata.returnedModel, MODEL);
+  assert.equal(metadata.terminalEvent, "response.completed");
+});

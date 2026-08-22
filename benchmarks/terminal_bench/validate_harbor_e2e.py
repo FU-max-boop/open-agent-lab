@@ -4,9 +4,12 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+from harbor.environments.docker.docker import _sanitize_docker_compose_project_name
 from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import JobLock, TrialLock
 from harbor.models.job.result import JobResult
@@ -19,7 +22,27 @@ _DATASET_DIGEST = (
     "sha256:d10e96e201d6816b22553504e06e7de0153a26381e808d11404cbca530b9d388"
 )
 _TASK_DIGEST = "sha256:38d7a077f07fbee8efc78db5dec9a72f82e727510ad1dcfeac0b55fa845256b7"
-_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MANIFEST = Path(__file__).with_name("verify-instruction-v1.experiment.json")
+_MANIFEST_BYTES = _MANIFEST.read_bytes()
+_MANIFEST_DATA = json.loads(_MANIFEST_BYTES)
+_MANIFEST_SHA256 = "sha256:" + hashlib.sha256(_MANIFEST_BYTES).hexdigest()
+_FIXTURE_BUILD_ID = _MANIFEST_DATA["relayBuildIds"]["providerFreeFixture"]
+_ENVIRONMENT_IMPORT = (
+    "benchmarks.terminal_bench.harbor_environment:PinnedRelayDockerEnvironment"
+)
+_RUN_BINDING_KEYS = {
+    "schema_version",
+    "experiment_id",
+    "replication_id",
+    "source_revision",
+    "experiment_manifest_sha256",
+    "relay_build_sha256",
+    "relay_image_sha256",
+    "preflight_sha256",
+    "task_snapshots_sha256",
+}
 _VERIFY_INSTRUCTION_SHA256 = (
     "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
 )
@@ -115,6 +138,168 @@ def _assert_secret_absent(job_dir: Path, secret: bytes) -> None:
             _require(not _contains(path, secret), f"Provider key leaked into {path}.")
 
 
+def _assert_collected_relay_evidence(trial_dir: Path, evidence_dir: Path) -> None:
+    artifacts = trial_dir / "artifacts"
+    manifest = json.loads((artifacts / "manifest.json").read_text())
+    expected_manifest = [
+        {
+            "source": "/logs/artifacts",
+            "destination": "artifacts/logs/artifacts",
+            "type": "directory",
+            "status": "empty",
+            "service": None,
+        },
+        *[
+            {
+                "source": f"/var/lib/open-agent-lab/{name}",
+                "destination": f"artifacts/{name}",
+                "type": "file",
+                "status": "ok",
+                "service": "open-agent-lab-relay",
+            }
+            for name in (
+                "provider-metadata.ndjson",
+                "provider-metadata.ndjson.sealed",
+            )
+        ],
+    ]
+    _require(
+        manifest == expected_manifest,
+        "Harbor artifact manifest does not match the frozen three entries.",
+    )
+    for name in ("provider-metadata.ndjson", "provider-metadata.ndjson.sealed"):
+        _require(
+            (artifacts / name).read_bytes() == (evidence_dir / name).read_bytes(),
+            f"Harbor and adapter copies of {name} differ.",
+        )
+
+
+def _assert_fixture_preflight(
+    job_dir: Path, result: TrialResult, run_binding: dict[str, Any]
+) -> None:
+    preflight = json.loads(
+        (job_dir.parents[2] / "fixtures" / "preflight.json").read_text()
+    )
+    _require(
+        preflight
+        == {
+            "schemaVersion": 1,
+            "experimentId": run_binding["experiment_id"],
+            "replicationId": run_binding["replication_id"],
+            "sourceRevision": run_binding["source_revision"],
+            "experimentManifestSha256": run_binding["experiment_manifest_sha256"],
+            "relayBuildSha256": run_binding["relay_build_sha256"],
+            "relayImageSha256": run_binding["relay_image_sha256"],
+            "taskSnapshotsSha256": run_binding["task_snapshots_sha256"],
+            "cleanTree": True,
+            "createdAt": preflight.get("createdAt"),
+        },
+        "Fixture preflight fields drifted.",
+    )
+    _require(
+        run_binding["experiment_manifest_sha256"] == _MANIFEST_SHA256,
+        "Fixture manifest binding drifted.",
+    )
+    preflight_sha = "sha256:" + hashlib.sha256(_canonical(preflight)).hexdigest()
+    _require(
+        run_binding["preflight_sha256"] == preflight_sha,
+        "Fixture preflight hash drifted.",
+    )
+    try:
+        created_at = datetime.fromisoformat(
+            str(preflight["createdAt"]).replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise RuntimeError("Fixture preflight time is invalid.") from error
+    _require(
+        created_at.tzinfo is not None
+        and result.started_at is not None
+        and created_at <= result.started_at,
+        "Fixture was not prepared before the trial started.",
+    )
+
+
+def _assert_cleanup_receipt(
+    trial_dir: Path, result: TrialResult, run_binding: dict[str, Any]
+) -> None:
+    receipt = json.loads((trial_dir / "environment-cleanup.json").read_text())
+    session_id = f"{result.trial_name}__env"
+    try:
+        stopped_at = datetime.fromisoformat(
+            str(receipt.get("stoppedAt", "")).replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise RuntimeError("Cleanup receipt time is invalid.") from error
+    expected = {
+        "schemaVersion": 1,
+        "experimentId": run_binding["experiment_id"],
+        "replicationId": run_binding["replication_id"],
+        "sourceRevision": run_binding["source_revision"],
+        "experimentManifestSha256": run_binding["experiment_manifest_sha256"],
+        "preflightSha256": run_binding["preflight_sha256"],
+        "runBindingSha256": "sha256:"
+        + hashlib.sha256(_canonical(run_binding)).hexdigest(),
+        "relayImageSha256": run_binding["relay_image_sha256"],
+        "fullComposeSha256": receipt.get("fullComposeSha256"),
+        "taskId": None,
+        "taskDigest": None,
+        "taskChecksum": None,
+        "sessionId": session_id,
+        "projectName": _sanitize_docker_compose_project_name(session_id),
+        "stoppedAt": receipt.get("stoppedAt"),
+    }
+    _require(receipt == expected, "Cleanup receipt identity drifted.")
+    _require(
+        _DIGEST.fullmatch(str(receipt["fullComposeSha256"])),
+        "Cleanup Compose digest is invalid.",
+    )
+    _require(
+        result.verifier is not None
+        and result.verifier.finished_at is not None
+        and result.finished_at is not None
+        and result.verifier.finished_at <= stopped_at <= result.finished_at,
+        "Cleanup receipt time is outside the completed verifier lifecycle.",
+    )
+
+
+def _assert_pinned_environment(
+    job_dir: Path,
+    job: JobConfig,
+    lock: TrialLock,
+    run_binding: dict[str, Any],
+) -> None:
+    path = (job_dir.parents[2] / "overlays" / "relay.fixture.compose.yaml").resolve()
+    data = path.read_bytes()
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    expected_kwargs = {
+        "relay_compose_sha256": digest,
+        "run_binding": run_binding,
+    }
+    for environment in (job.environment, lock.environment):
+        _require(
+            environment.import_path == _ENVIRONMENT_IMPORT
+            and environment.kwargs == expected_kwargs
+            and [item.resolve() for item in environment.extra_docker_compose] == [path],
+            "Pinned Harbor environment binding drifted.",
+        )
+    compose = yaml.safe_load(data)
+    relay = compose.get("services", {}).get("open-agent-lab-relay", {})
+    _require(
+        isinstance(relay, dict)
+        and "build" not in relay
+        and relay.get("image") == run_binding["relay_image_sha256"]
+        and relay.get("pull_policy") == "never",
+        "Fixture relay Compose is not pinned to the prepared image.",
+    )
+    compose_locks = lock.extra_docker_compose or []
+    _require(
+        len(compose_locks) == 1
+        and compose_locks[0].path.resolve() == path
+        and compose_locks[0].digest == digest,
+        "Harbor did not lock the exact prepared Compose bytes.",
+    )
+
+
 def validate(
     job_dir: Path, secret: bytes, variant_id: str = "control-v1"
 ) -> dict[str, Any]:
@@ -171,6 +356,22 @@ def validate(
         is expected_variant["developer_instruction_requested"],
         "Trial lock variant drifted.",
     )
+    run_binding = job.agents[0].kwargs.get("run_binding")
+    _require(
+        isinstance(run_binding, dict)
+        and set(run_binding) == _RUN_BINDING_KEYS
+        and run_binding == lock.agent.kwargs.get("run_binding")
+        and run_binding.get("schema_version") == 1
+        and run_binding.get("experiment_id")
+        == "terminal-bench-2.1-verify-instruction-v1"
+        and run_binding.get("replication_id") == "screen-v1"
+        and _SOURCE_REVISION.fullmatch(str(run_binding.get("source_revision", "")))
+        and run_binding.get("relay_build_sha256") == _FIXTURE_BUILD_ID,
+        "Provider-free E2E source binding drifted.",
+    )
+    _assert_fixture_preflight(job_dir, result, run_binding)
+    _assert_cleanup_receipt(trial_dir, result, run_binding)
+    _assert_pinned_environment(job_dir, job, lock, run_binding)
     _require(
         result.agent_info.name == expected_variant["agent_name"],
         "Harbor agent identity drifted.",
@@ -208,6 +409,7 @@ def validate(
     )
 
     evidence_dir = trial_dir / "artifacts" / "provider-evidence"
+    _assert_collected_relay_evidence(trial_dir, evidence_dir)
     metadata = relay_metadata(
         evidence_dir / "provider-metadata.ndjson",
         evidence_dir / "provider-metadata.ndjson.sealed",
@@ -224,9 +426,7 @@ def validate(
     seal = metadata["seal"]
     _require(seal["providerId"] == "synthetic-fixture", "Relay provenance drifted.")
     _require(seal["expectedModel"] == "deepseek-v4-pro", "Relay model drifted.")
-    _require(
-        _SHA256.fullmatch(seal["buildId"]), "Relay build identity is not immutable."
-    )
+    _require(seal["buildId"] == _FIXTURE_BUILD_ID, "Relay build identity drifted.")
     closed = [
         record
         for record in metadata["records"]
@@ -296,6 +496,10 @@ def validate(
         "Relay binding drifted.",
     )
     _require(binding.get("relay_build_id") == seal["buildId"], "Build binding drifted.")
+    _require(
+        binding.get("run_binding") == run_binding,
+        "Preflight binding was not retained.",
+    )
     _require(
         binding.get("relay_marker_sha256") == seal["markerSha256"],
         "Seal binding drifted.",

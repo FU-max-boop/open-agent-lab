@@ -60,9 +60,34 @@ jobs:
       - name: Validate Harbor 0.22 adapter
         run: |
           python3 -m pip install --disable-pip-version-check harbor==0.22.0 ruff==0.16.4
-          python3 -m ruff format --check benchmarks/terminal_bench/harbor_agent.py benchmarks/terminal_bench/relay_evidence.py benchmarks/terminal_bench/test_harbor_agent.py benchmarks/terminal_bench/validate_harbor_e2e.py
-          python3 -m ruff check benchmarks/terminal_bench/harbor_agent.py benchmarks/terminal_bench/relay_evidence.py benchmarks/terminal_bench/test_harbor_agent.py benchmarks/terminal_bench/validate_harbor_e2e.py
-          python3 -m unittest benchmarks.terminal_bench.test_harbor_agent
+          python3 -m ruff format --check \
+            benchmarks/terminal_bench/harbor_agent.py \
+            benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/paired_results.py \
+            benchmarks/terminal_bench/relay_evidence.py \
+            benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_harbor_environment.py \
+            benchmarks/terminal_bench/test_paired_results.py \
+            benchmarks/terminal_bench/validate_harbor_e2e.py
+          python3 -m ruff check \
+            benchmarks/terminal_bench/harbor_agent.py \
+            benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/paired_results.py \
+            benchmarks/terminal_bench/relay_evidence.py \
+            benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_harbor_environment.py \
+            benchmarks/terminal_bench/test_paired_results.py \
+            benchmarks/terminal_bench/validate_harbor_e2e.py
+          python3 -m ruff check --select C901 \
+            benchmarks/terminal_bench/harbor_agent.py \
+            benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/paired_results.py \
+            benchmarks/terminal_bench/relay_evidence.py \
+            benchmarks/terminal_bench/validate_harbor_e2e.py
+          python3 -m unittest \
+            benchmarks.terminal_bench.test_harbor_agent \
+            benchmarks.terminal_bench.test_harbor_environment \
+            benchmarks.terminal_bench.test_paired_results
 
   relay-image:
     runs-on: ubuntu-24.04
@@ -77,10 +102,12 @@ jobs:
       - name: Validate Compose overlays
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
-          OAL_PROVIDER_API_KEY_FILE: /tmp/provider-key
+          OAL_DEEPSEEK_API_KEY_FILE: /tmp/deepseek-provider-key
+          OAL_ZAI_API_KEY_FILE: /tmp/zai-provider-key
         run: |
           printf 'services:\n  main:\n    image: busybox:1.37.0\n' > /tmp/base-compose.yaml
-          install -m 0600 /dev/null "$OAL_PROVIDER_API_KEY_FILE"
+          install -m 0600 /dev/null "$OAL_DEEPSEEK_API_KEY_FILE"
+          install -m 0600 /dev/null "$OAL_ZAI_API_KEY_FILE"
           docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml config --quiet
           docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml -f benchmarks/terminal_bench/relay.fixture.compose.yaml config --quiet
           docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.zai.compose.yaml config --quiet
@@ -88,11 +115,11 @@ jobs:
       - name: Exercise isolated relay lifecycle
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
-          OAL_PROVIDER_API_KEY_FILE: /tmp/provider-key
+          OAL_DEEPSEEK_API_KEY_FILE: /tmp/deepseek-provider-key
         run: |
-          printf 'provider-free-ci-key\n' > "$OAL_PROVIDER_API_KEY_FILE"
-          sudo chown 0:0 "$OAL_PROVIDER_API_KEY_FILE"
-          sudo chmod 0400 "$OAL_PROVIDER_API_KEY_FILE"
+          printf 'provider-free-ci-key\n' > "$OAL_DEEPSEEK_API_KEY_FILE"
+          sudo chown 0:0 "$OAL_DEEPSEEK_API_KEY_FILE"
+          sudo chmod 0400 "$OAL_DEEPSEEK_API_KEY_FILE"
           compose=(docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml)
           archive=""
           cleanup() {
@@ -119,9 +146,11 @@ jobs:
             exit 1
           fi
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
-            'test ! -r /run/secrets/provider-api-key && test "$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status)" = 0000000000000000'
+            'test ! -r /run/secrets/provider-api-key'
+          "${compose[@]}" exec --no-TTY open-agent-lab-relay sh -c \
+            'node -e "const fs=require(\"node:fs\");const value=JSON.parse(fs.readFileSync(\"/var/lib/open-agent-lab/provider-metadata.ndjson.bootstrap-ready\",\"utf8\"));const keys=Object.keys(value).sort().join(\",\");if(keys!==\"buildId,capabilityId,model,provider,schemaVersion\"||value.schemaVersion!==1||value.buildId!==process.env.OAL_EXPECTED_RELAY_BUILD_ID||value.provider!==\"deepseek\"||value.model!==\"deepseek-v4-pro\"||!/^[a-f0-9]{64}$/.test(value.capabilityId))process.exit(1)" && kill -USR1 1'
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
-            'test "$(wc -c < /var/lib/open-agent-lab/provider-metadata.ndjson.client-token)" -eq 65'
+            'i=0; while [ ! -f /var/lib/open-agent-lab/provider-metadata.ndjson.client-token ]; do i=$((i+1)); [ "$i" -lt 200 ] || exit 1; sleep 0.1; done; node -e "const fs=require(\"node:fs\");const root=\"/var/lib/open-agent-lab/provider-metadata.ndjson\";const ready=JSON.parse(fs.readFileSync(root+\".bootstrap-ready\",\"utf8\"));const token=JSON.parse(fs.readFileSync(root+\".client-token\",\"utf8\"));if(Object.keys(token).sort().join(\",\")!==\"bearer,capabilityId,schemaVersion\"||token.schemaVersion!==1||token.capabilityId!==ready.capabilityId||!/^[a-f0-9]{64}$/.test(token.bearer))process.exit(1)" && test "$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status)" = 0000000000000000'
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
             'kill -USR2 1; i=0; while [ ! -f /var/lib/open-agent-lab/provider-metadata.ndjson.sealed ]; do i=$((i+1)); [ "$i" -lt 150 ] || exit 1; sleep 0.1; done'
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay node --input-type=module -e \
@@ -143,17 +172,44 @@ jobs:
       - name: Run provider-free Harbor control and treatment trials
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
-          OAL_PROVIDER_API_KEY_FILE: /tmp/open-agent-lab-harbor-provider-key
+          OAL_DEEPSEEK_API_KEY_FILE: /tmp/open-agent-lab-harbor-provider-key
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          sudo install -o 0 -g 0 -m 0400 /dev/null "$OAL_PROVIDER_API_KEY_FILE"
-          openssl rand -hex 32 | sudo tee "$OAL_PROVIDER_API_KEY_FILE" >/dev/null
-          harbor jobs start --config benchmarks/terminal_bench/harbor-e2e.yaml --yes
-          sudo cat "$OAL_PROVIDER_API_KEY_FILE" | \
+          sudo install -o 0 -g 0 -m 0400 /dev/null "$OAL_DEEPSEEK_API_KEY_FILE"
+          openssl rand -hex 32 | sudo tee "$OAL_DEEPSEEK_API_KEY_FILE" >/dev/null
+          prepared_parent="$(mktemp -d)"
+          prepared_run="$prepared_parent/source-bound-e2e"
+          python3 -m benchmarks.terminal_bench.paired_results prepare \
+            "$prepared_run" --replication screen-v1
+          export OPEN_AGENT_LAB_REPO_ROOT="$prepared_run/source"
+          export PYTHONPATH="$prepared_run/source"
+          export PYTHONSAFEPATH=1
+          unset PYTHONHOME DEEPSEEK_API_KEY ZAI_API_KEY
+          test "$(git -C "$OPEN_AGENT_LAB_REPO_ROOT" rev-parse HEAD)" = "$(git rev-parse HEAD)"
+          test -z "$(git -C "$OPEN_AGENT_LAB_REPO_ROOT" status --porcelain=v1 --untracked-files=all)"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from benchmarks.terminal_bench import harbor_agent, harbor_environment
+          root = Path(os.environ["OPEN_AGENT_LAB_REPO_ROOT"])
+          assert Path(harbor_agent.__file__).resolve() == root / "benchmarks/terminal_bench/harbor_agent.py"
+          assert Path(harbor_environment.__file__).resolve() == root / "benchmarks/terminal_bench/harbor_environment.py"
+          PY
+          cd "$OPEN_AGENT_LAB_REPO_ROOT"
+          harbor jobs start --config "$prepared_run/fixtures/harbor-e2e.yaml" --yes
+          control_job="$prepared_run/fixture-jobs/harbor-e2e/open-agent-lab-harbor-provider-free-e2e"
+          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+            python3 -m benchmarks.terminal_bench.validate_harbor_e2e "$control_job"; then
+            cat "$control_job"/*/artifacts/manifest.json
+            exit 1
+          fi
+          harbor jobs start \
+            --config "$prepared_run/fixtures/harbor-verify-instruction-e2e.yaml" \
+            --yes
+          treatment_job="$prepared_run/fixture-jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e"
+          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
-            jobs/harbor-provider-free-e2e/open-agent-lab-harbor-provider-free-e2e
-          harbor jobs start --config benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml --yes
-          sudo cat "$OAL_PROVIDER_API_KEY_FILE" | \
-            python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
-            jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e \
-            verify-instruction-v1
+            "$treatment_job" verify-instruction-v1; then
+            cat "$treatment_job"/*/artifacts/manifest.json
+            exit 1
+          fi

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { runRelayCommand } from "./relay-command.js";
+import { awaitRelayAuthorization, runRelayCommand } from "./relay-command.js";
 import { startResponsesFixture } from "./responses-fixture.js";
 
 const MODEL = "deepseek-v4-pro";
@@ -29,6 +29,11 @@ printf 'Hello, world!\\n' > /app/hello.txt`;
 }
 
 async function main(): Promise<void> {
+  const authorization = await awaitRelayAuthorization(
+    process.argv.slice(2),
+    process.env,
+    { provider: "deepseek", model: MODEL },
+  );
   const path = process.env.DEEPSEEK_API_KEY_FILE;
   if (path === undefined || process.env.DEEPSEEK_API_KEY !== undefined) {
     throw new Error("Fixture relay requires only DEEPSEEK_API_KEY_FILE.");
@@ -45,14 +50,20 @@ async function main(): Promise<void> {
     instructionMarker,
   });
   try {
-    await runRelayCommand(process.argv.slice(2), process.env, undefined, {
-      deepseek: {
-        envKey: "DEEPSEEK_API_KEY",
-        endpoint: `${fixture.baseUrl}/responses`,
-        models: [MODEL],
-        evidenceProviderId: "synthetic-fixture",
+    await runRelayCommand(
+      process.argv.slice(2),
+      process.env,
+      undefined,
+      {
+        deepseek: {
+          envKey: "DEEPSEEK_API_KEY",
+          endpoint: `${fixture.baseUrl}/responses`,
+          models: [MODEL],
+          evidenceProviderId: "synthetic-fixture",
+        },
       },
-    });
+      authorization,
+    );
   } finally {
     await fixture.close();
   }

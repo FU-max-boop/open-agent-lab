@@ -356,6 +356,13 @@ test("invalid requests and exhausted quota never reach the upstream", async (t) 
       "unsupported_response_mode",
     ],
     [
+      await relayRequest(relay, {
+        body: `{"model":"${MODEL}","stream":true,"store":false,"input":[1e20,1e20,1e20,1e20]}`,
+      }),
+      413,
+      "request_too_large",
+    ],
+    [
       await relayRequest(relay, { body: requestBody({ input: "x".repeat(256) }) }),
       413,
       "request_too_large",
@@ -376,7 +383,7 @@ test("invalid requests and exhausted quota never reach the upstream", async (t) 
     invalid_json: 2,
     model_mismatch: 1,
     request_quota_exceeded: 1,
-    request_too_large: 1,
+    request_too_large: 2,
     unsupported_content_type: 2,
     unsupported_response_mode: 2,
   });

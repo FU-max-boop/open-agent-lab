@@ -8,6 +8,8 @@ services:
     build:
       context: ${OPEN_AGENT_LAB_REPO_ROOT:?Set OPEN_AGENT_LAB_REPO_ROOT}
       dockerfile: benchmarks/terminal_bench/relay.Dockerfile
+      args:
+        OAL_DOCKERIGNORE_SHA256: "92f7b031b96a1eb4b9898ec77be2638a66f626a720ed64db94919892ee87918c"
     command:
       - --provider
       - zai
@@ -28,6 +30,7 @@ services:
       - --build-id-file
       - /app/relay-build-id
     environment:
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:715cbf91ad43ce6a7227baf66ccbcea2382bacf0c75c6094377aa7ec7a5c6e34"
       OAL_RELAY_GID: "1000"
       OAL_RELAY_UID: "1000"
       ZAI_API_KEY_FILE: /run/secrets/provider-api-key
@@ -35,16 +38,16 @@ services:
       - provider-api-key
     read_only: true
     tmpfs:
-      - /var/lib/open-agent-lab:mode=0700,uid=1000,gid=1000
+      - /var/lib/open-agent-lab:mode=0770,uid=1000,gid=0
     cap_drop: [ALL]
     cap_add: [DAC_READ_SEARCH, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      test: [CMD-SHELL, "test -f /var/lib/open-agent-lab/provider-metadata.ndjson.bootstrap-ready || node -e \"fetch('http://127.0.0.1:8080/').then(()=>process.exit(0)).catch(()=>process.exit(1))\""]
       interval: 1s
       timeout: 1s
       retries: 30
 
 secrets:
   provider-api-key:
-    file: ${OAL_PROVIDER_API_KEY_FILE:?Set OAL_PROVIDER_API_KEY_FILE}
+    file: ${OAL_ZAI_API_KEY_FILE:?Set OAL_ZAI_API_KEY_FILE}

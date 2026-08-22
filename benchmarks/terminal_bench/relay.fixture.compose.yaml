@@ -2,6 +2,8 @@ services:
   open-agent-lab-relay:
     build:
       target: fixture
+    environment:
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:8b5228c4e8e2d47291022a085702d33ee6d0c68f880fd9be58e103c953922867"
     entrypoint:
       - node
       - /app/apps/cli/relay-dist/relay-fixture-entry.js
