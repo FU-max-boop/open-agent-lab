@@ -1,6 +1,7 @@
 """A minimal isolated-Responses profile layered on Harbor's Codex agent."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -198,6 +199,8 @@ class OpenAgentLabCodex(Codex):
                     "Failed to retain provider metadata%s",
                     " after agent failure" if primary_error is not None else "",
                 )
+                if primary_error is None:
+                    raise
 
     async def _seal_and_retain(self, environment: BaseEnvironment) -> None:
         command = (
@@ -217,16 +220,29 @@ class OpenAgentLabCodex(Codex):
             self._provider_evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             journal_path = self._provider_evidence_dir / "provider-metadata.ndjson"
             seal_path = self._provider_evidence_dir / "provider-metadata.ndjson.sealed"
-            await environment.service_download_file(
-                _RELAY_SIDECAR,
-                journal_path,
-                service=_RELAY_SERVICE,
-            )
-            await environment.service_download_file(
-                _RELAY_SEAL,
-                seal_path,
-                service=_RELAY_SERVICE,
-            )
+
+            async def retain(source: str, target: Path) -> None:
+                encoded = await environment.service_exec(
+                    f"base64 -w0 {source}",
+                    service=_RELAY_SERVICE,
+                    timeout_sec=10,
+                    user="1000",
+                )
+                if encoded.return_code != 0:
+                    detail = encoded.stderr or encoded.stdout or "no output"
+                    raise RuntimeError(f"Relay evidence read failed: {detail[-500:]}")
+                try:
+                    content = base64.b64decode(
+                        (encoded.stdout or "").strip(), validate=True
+                    )
+                except ValueError as error:
+                    raise RuntimeError(
+                        "Relay evidence was not valid base64."
+                    ) from error
+                target.write_bytes(content)
+
+            await retain(_RELAY_SIDECAR, journal_path)
+            await retain(_RELAY_SEAL, seal_path)
             journal_path.chmod(0o600)
             seal_path.chmod(0o600)
 
@@ -259,6 +275,18 @@ class OpenAgentLabCodex(Codex):
                 },
                 "error": f"{type(error).__name__}: {error}"[:500],
             }
+        try:
+            trajectory = json.loads((self.logs_dir / "trajectory.json").read_text())
+            trajectory_session_id = trajectory.get("session_id")
+            if not isinstance(trajectory_session_id, str) or not trajectory_session_id:
+                raise ValueError("ATIF session identity is missing")
+        except (AttributeError, OSError, TypeError, ValueError):
+            trajectory_session_id = None
+            reasons = metadata["publication_gate"]["reasons"]
+            metadata["publication_gate"] = {
+                "ok": False,
+                "reasons": sorted({*reasons, "trajectory_session_missing"}),
+            }
         seal = metadata.get("seal", {})
         binding = {
             "schema_version": 1,
@@ -266,6 +294,7 @@ class OpenAgentLabCodex(Codex):
                 str(self.context_id) if self.context_id is not None else None
             ),
             "harbor_session_id": self.session_id,
+            "trajectory_session_id": trajectory_session_id,
             "relay_instance_id": seal.get("relayInstanceId"),
             "relay_build_id": seal.get("buildId"),
             "relay_marker_sha256": seal.get("markerSha256"),

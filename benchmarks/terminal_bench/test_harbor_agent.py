@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import yaml
 from harbor.agents.installed.codex import Codex
@@ -12,6 +13,10 @@ from harbor.models.agent.context import AgentContext
 
 from benchmarks.terminal_bench.harbor_agent import _PROFILES, OpenAgentLabCodex
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
+from benchmarks.terminal_bench.validate_harbor_e2e import (
+    _assert_isolation_call,
+    _isolation_command,
+)
 
 _DEFAULT_USAGE = object()
 
@@ -33,10 +38,12 @@ def _digest(value: str) -> str:
 def _write_evidence(
     directory: Path,
     *,
+    provider_id: str = "zai",
     returned_model: str = "glm-5.3",
     build_id: str = "sha256:" + "b" * 64,
     schema_version: object = 1,
     requests: tuple[tuple[int, str, object], ...] | None = None,
+    rejected_requests: dict[str, int] | None = None,
 ) -> None:
     events = []
     for ordinal, (status, transport_state, usage) in enumerate(
@@ -47,7 +54,7 @@ def _write_evidence(
             "relayVersion": "native-responses-relay-v1",
             "runId": "relay-test",
             "relayInstanceId": "instance-test",
-            "providerId": "zai",
+            "providerId": provider_id,
             "buildId": build_id,
             "ordinal": ordinal,
             "relayRequestId": f"request-test-{ordinal}",
@@ -97,14 +104,14 @@ def _write_evidence(
         "relayVersion": "native-responses-relay-v1",
         "runId": "relay-test",
         "relayInstanceId": "instance-test",
-        "providerId": "zai",
+        "providerId": provider_id,
         "buildId": build_id,
         "state": "sealed",
         "expectedModel": "glm-5.3",
         "sealedAt": "2026-08-22T00:00:00.000Z",
         "eventCount": len(events),
         "chainHead": previous,
-        "rejectedRequests": {},
+        "rejectedRequests": rejected_requests or {},
     }
     seal = {**marker, "markerSha256": _digest(_canonical(marker))}
     (directory / "provider-metadata.ndjson.sealed").write_text(_canonical(seal) + "\n")
@@ -120,6 +127,55 @@ class RelayMetadataTest(unittest.TestCase):
                 directory / "provider-metadata.ndjson.sealed",
             )
             self.assertEqual(metadata["publication_gate"], {"ok": True, "reasons": []})
+
+    def test_synthetic_provider_can_validate_transport_but_never_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(directory, provider_id="synthetic-fixture")
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["synthetic_provider"]},
+            )
+
+    def test_post_terminal_disconnect_is_audited_but_not_a_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(
+                directory,
+                provider_id="synthetic-fixture",
+                rejected_requests={"client_disconnected_after_close": 1},
+            )
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["synthetic_provider"]},
+            )
+
+    def test_real_rejection_still_blocks_with_a_post_terminal_disconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(
+                directory,
+                rejected_requests={
+                    "client_disconnected_after_close": 1,
+                    "invalid_json": 1,
+                },
+            )
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["relay_rejected_requests"]},
+            )
 
     def test_incomplete_or_wrong_model_evidence_cannot_publish(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -159,6 +215,7 @@ class RelayMetadataTest(unittest.TestCase):
                     (200, "completed", _DEFAULT_USAGE),
                     (429, "failed", _DEFAULT_USAGE),
                 ),
+                rejected_requests={"client_disconnected_after_close": 1},
             )
             metadata = relay_metadata(
                 directory / "provider-metadata.ndjson",
@@ -190,6 +247,14 @@ class RelayMetadataTest(unittest.TestCase):
 
 
 class ProfileDriftTest(unittest.TestCase):
+    def test_provider_free_e2e_rejects_a_degraded_isolation_command(self) -> None:
+        secret = b"provider-free-test-key"
+        _assert_isolation_call({"cmd": _isolation_command(secret)}, secret)
+        with self.assertRaisesRegex(RuntimeError, "isolation command drifted"):
+            _assert_isolation_call(
+                {"cmd": "printf 'Hello, world!\\n' > /app/hello.txt"}, secret
+            )
+
     def test_typescript_compose_and_pilot_profiles_are_aligned(self) -> None:
         root = Path(__file__).parents[2]
         relay_command = (root / "apps/cli/src/relay-command.ts").read_text()
@@ -229,6 +294,42 @@ class ProfileDriftTest(unittest.TestCase):
                     f"{provider}/{selected_model}",
                 )
                 self.assertIn(selected_model, _PROFILES[provider]["models"])
+
+    def test_provider_free_e2e_is_exact_and_only_overrides_the_entrypoint(self) -> None:
+        root = Path(__file__).parents[2]
+        benchmark = root / "benchmarks/terminal_bench"
+        config = yaml.safe_load((benchmark / "harbor-e2e.yaml").read_text())
+        self.assertEqual(
+            config["datasets"],
+            [
+                {
+                    "name": "harbor/hello-world",
+                    "ref": "sha256:d10e96e201d6816b22553504e06e7de0153a26381e808d11404cbca530b9d388",
+                }
+            ],
+        )
+        self.assertEqual(
+            config["environment"]["extra_docker_compose"],
+            [
+                "benchmarks/terminal_bench/relay.deepseek.compose.yaml",
+                "benchmarks/terminal_bench/relay.fixture.compose.yaml",
+            ],
+        )
+        fixture = yaml.safe_load((benchmark / "relay.fixture.compose.yaml").read_text())
+        self.assertEqual(
+            fixture,
+            {
+                "services": {
+                    "open-agent-lab-relay": {
+                        "build": {"target": "fixture"},
+                        "entrypoint": [
+                            "node",
+                            "/app/apps/cli/relay-dist/relay-fixture-entry.js",
+                        ],
+                    }
+                }
+            },
+        )
 
 
 class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
@@ -272,15 +373,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             )
 
             class Environment:
-                async def service_exec(
-                    self, *_args: object, **_kwargs: object
-                ) -> object:
-                    return SimpleNamespace(return_code=0, stdout="", stderr="")
-
-                async def service_download_file(
-                    self, _source: str, target: Path, **_kwargs: object
-                ) -> None:
-                    target.write_text("retained")
+                async def service_exec(self, command: str, **_kwargs: object) -> object:
+                    stdout = "cmV0YWluZWQ=" if command.startswith("base64 ") else ""
+                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
             await agent._seal_and_retain(Environment())  # type: ignore[arg-type]
             evidence = trial / "artifacts" / "provider-evidence"
@@ -291,6 +386,27 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (evidence / "provider-metadata.ndjson").read_text(), "retained"
             )
+
+    async def test_evidence_failure_fails_an_otherwise_successful_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            agent = OpenAgentLabCodex(
+                Path(raw),
+                model_name="zai/glm-5.3",
+                version="0.149.0",
+                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            )
+            agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
+            agent.logger.disabled = True
+            with (
+                patch.object(Codex, "run", new=AsyncMock()),
+                patch.object(
+                    agent,
+                    "_seal_and_retain",
+                    new=AsyncMock(side_effect=RuntimeError("evidence failed")),
+                ),
+                self.assertRaisesRegex(RuntimeError, "evidence failed"),
+            ):
+                await agent.run("instruction", object(), AgentContext())  # type: ignore[arg-type]
 
     def test_invalid_metadata_never_raises_into_the_official_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -311,8 +427,42 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 gate,
                 {
                     "ok": False,
-                    "reasons": ["provider_metadata_unavailable_or_invalid"],
+                    "reasons": [
+                        "provider_metadata_unavailable_or_invalid",
+                        "trajectory_session_missing",
+                    ],
                 },
+            )
+
+    def test_binding_keeps_harbor_and_atif_session_namespaces_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            trial = Path(raw)
+            logs = trial / "agent"
+            logs.mkdir()
+            agent = OpenAgentLabCodex(
+                logs,
+                model_name="zai/glm-5.3",
+                version="0.149.0",
+                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            )
+            agent._provider_evidence_dir.mkdir(parents=True)
+            _write_evidence(agent._provider_evidence_dir)
+            (logs / "trajectory.json").write_text(
+                json.dumps({"session_id": "codex-rollout-id"})
+            )
+            agent.session_id = "harbor-trial__agent"
+            agent.context_id = UUID("00000000-0000-0000-0000-000000000001")
+            context = AgentContext()
+
+            with patch.object(Codex, "populate_context_post_run"):
+                agent.populate_context_post_run(context)
+
+            binding = context.metadata["open_agent_lab_provider"]["harbor_binding"]
+            self.assertEqual(binding["harbor_session_id"], "harbor-trial__agent")
+            self.assertEqual(binding["trajectory_session_id"], "codex-rollout-id")
+            self.assertEqual(
+                binding["harbor_context_id"],
+                "00000000-0000-0000-0000-000000000001",
             )
 
 

@@ -140,9 +140,17 @@ def relay_metadata(journal_path: Path, seal_path: Path) -> dict[str, Any]:
         if record.get("event") == "transport.responses.request"
     }
     reasons: set[str] = set()
+    if provider_id == "synthetic-fixture":
+        reasons.add("synthetic_provider")
     if not _BUILD_ID.fullmatch(build_id):
         reasons.add("unverifiable_relay_build")
-    if any(rejected_requests.values()):
+    # Responses clients may close after the terminal SSE event instead of waiting
+    # for EOF. The complete lifecycle remains auditable in the journal.
+    if any(
+        count
+        for code, count in rejected_requests.items()
+        if code != "client_disconnected_after_close"
+    ):
         reasons.add("relay_rejected_requests")
     completed = 0
     for record in records:

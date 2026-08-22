@@ -1,0 +1,7 @@
+services:
+  open-agent-lab-relay:
+    build:
+      target: fixture
+    entrypoint:
+      - node
+      - /app/apps/cli/relay-dist/relay-fixture-entry.js

@@ -14,25 +14,38 @@ COPY packages/contracts/src packages/contracts/src
 COPY packages/contracts/tsconfig.json packages/contracts/
 COPY packages/evidence/src packages/evidence/src
 COPY packages/evidence/tsconfig.json packages/evidence/
-COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/relay-evidence.ts apps/cli/src/responses-metadata.ts apps/cli/src/responses-relay.ts apps/cli/src/
+COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/relay-fixture-entry.ts apps/cli/src/relay-evidence.ts apps/cli/src/responses-fixture.ts apps/cli/src/responses-metadata.ts apps/cli/src/responses-relay.ts apps/cli/src/
 COPY apps/cli/tsconfig.relay.json apps/cli/
 COPY benchmarks/terminal_bench/relay.Dockerfile benchmarks/terminal_bench/relay.Dockerfile
+RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
+      apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
+      -type f \
+      ! -path apps/cli/src/relay-fixture-entry.ts \
+      ! -path apps/cli/src/responses-fixture.ts \
+      -print0 \
+    | LC_ALL=C sort -z \
+    | xargs -0 sha256sum \
+    | sha256sum \
+    | awk '{print "sha256:" $1}' > /src/relay-build-id
 RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
       apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
       -type f -print0 \
     | LC_ALL=C sort -z \
     | xargs -0 sha256sum \
     | sha256sum \
-    | awk '{print "sha256:" $1}' > /src/relay-build-id
+    | awk '{print "sha256:" $1}' > /src/relay-fixture-build-id
 RUN pnpm exec tsc -b packages/contracts packages/evidence \
-    && pnpm exec tsc -p apps/cli/tsconfig.relay.json
+    && pnpm exec tsc -p apps/cli/tsconfig.relay.json \
+    && rm -f apps/cli/relay-dist/.tsbuildinfo \
+    && cp -a apps/cli/relay-dist apps/cli/relay-production-dist \
+    && rm -f \
+      apps/cli/relay-production-dist/relay-fixture-entry.* \
+      apps/cli/relay-production-dist/responses-fixture.*
 
-FROM node:20.19.0-bookworm-slim@sha256:5cfa999422613d3b34f766cbb814d964cbfcb76aaf3607e805da21cccb352bac
+FROM node:20.19.0-bookworm-slim@sha256:5cfa999422613d3b34f766cbb814d964cbfcb76aaf3607e805da21cccb352bac AS runtime-base
 
 WORKDIR /app
 COPY --from=build /src/apps/cli/package.json ./apps/cli/package.json
-COPY --from=build /src/apps/cli/relay-dist ./apps/cli/relay-dist
-COPY --from=build /src/relay-build-id ./relay-build-id
 COPY --from=build /src/packages/contracts/package.json ./node_modules/@open-agent-lab/contracts/package.json
 COPY --from=build /src/packages/contracts/dist ./node_modules/@open-agent-lab/contracts/dist
 COPY --from=build /src/packages/evidence/package.json ./node_modules/@open-agent-lab/evidence/package.json
@@ -40,3 +53,11 @@ COPY --from=build /src/packages/evidence/dist ./node_modules/@open-agent-lab/evi
 RUN mkdir -p /var/lib/open-agent-lab && chown node:node /var/lib/open-agent-lab
 
 ENTRYPOINT ["node", "/app/apps/cli/relay-dist/relay-entry.js"]
+
+FROM runtime-base AS fixture
+COPY --from=build /src/apps/cli/relay-dist ./apps/cli/relay-dist
+COPY --from=build /src/relay-fixture-build-id ./relay-build-id
+
+FROM runtime-base AS production
+COPY --from=build /src/apps/cli/relay-production-dist ./apps/cli/relay-dist
+COPY --from=build /src/relay-build-id ./relay-build-id

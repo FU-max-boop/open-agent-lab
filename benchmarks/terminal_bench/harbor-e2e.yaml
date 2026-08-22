@@ -1,0 +1,33 @@
+job_name: open-agent-lab-harbor-provider-free-e2e
+jobs_dir: jobs/harbor-provider-free-e2e
+n_attempts: 1
+timeout_multiplier: 1.0
+
+orchestrator:
+  type: local
+  n_concurrent_trials: 1
+  quiet: false
+
+retry:
+  max_retries: 0
+
+environment:
+  type: docker
+  delete: true
+  extra_docker_compose:
+    - benchmarks/terminal_bench/relay.deepseek.compose.yaml
+    - benchmarks/terminal_bench/relay.fixture.compose.yaml
+
+agents:
+  - name: open-agent-lab-codex
+    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodex
+    model_name: deepseek/deepseek-v4-pro
+    kwargs:
+      version: "0.149.0"
+      reasoning_effort: high
+    env:
+      OAL_RELAY_URL: http://open-agent-lab-relay:8080/v1
+
+datasets:
+  - name: harbor/hello-world
+    ref: "sha256:d10e96e201d6816b22553504e06e7de0153a26381e808d11404cbca530b9d388"

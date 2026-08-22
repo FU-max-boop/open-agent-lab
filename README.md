@@ -17,7 +17,11 @@ endpoint. The benchmark path adds a single-endpoint byte relay so durable
 provider credentials stay outside the task container while returned-model and
 request metadata remain auditable.
 The older Chat Completions driver remains a diagnostic fallback, not the primary
-agent path. Linux container isolation, live-provider conformance, and the
+agent path. A provider-free Linux CI gate now exercises the complete Harbor
+0.22/Codex 0.149.0 relay path against Harbor's official `hello-world` task,
+including real tool execution, credential-isolation probes, retained relay
+evidence, ATIF validation, and Harbor result/lock validation. This is an
+infrastructure proof, not a model score. Live-provider conformance and the
 Terminal-Bench pilot are still pending execution. There is no installable
 release or public benchmark result yet.
 
