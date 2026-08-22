@@ -17,11 +17,13 @@ COPY packages/evidence/tsconfig.json packages/evidence/
 COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/relay-fixture-entry.ts apps/cli/src/relay-evidence.ts apps/cli/src/responses-fixture.ts apps/cli/src/responses-metadata.ts apps/cli/src/responses-relay.ts apps/cli/src/
 COPY apps/cli/tsconfig.relay.json apps/cli/
 COPY benchmarks/terminal_bench/relay.Dockerfile benchmarks/terminal_bench/relay.Dockerfile
+COPY benchmarks/terminal_bench/verify-instruction-v1.txt benchmarks/terminal_bench/verify-instruction-v1.txt
 RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
-      apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
+      apps/cli packages benchmarks/terminal_bench \
       -type f \
       ! -path apps/cli/src/relay-fixture-entry.ts \
       ! -path apps/cli/src/responses-fixture.ts \
+      ! -path benchmarks/terminal_bench/verify-instruction-v1.txt \
       -print0 \
     | LC_ALL=C sort -z \
     | xargs -0 sha256sum \
@@ -29,6 +31,7 @@ RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
     | awk '{print "sha256:" $1}' > /src/relay-build-id
 RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
       apps/cli packages benchmarks/terminal_bench/relay.Dockerfile \
+      benchmarks/terminal_bench/verify-instruction-v1.txt \
       -type f -print0 \
     | LC_ALL=C sort -z \
     | xargs -0 sha256sum \
@@ -56,6 +59,7 @@ ENTRYPOINT ["node", "/app/apps/cli/relay-dist/relay-entry.js"]
 
 FROM runtime-base AS fixture
 COPY --from=build /src/apps/cli/relay-dist ./apps/cli/relay-dist
+COPY --from=build /src/benchmarks/terminal_bench/verify-instruction-v1.txt ./benchmarks/terminal_bench/verify-instruction-v1.txt
 COPY --from=build /src/relay-fixture-build-id ./relay-build-id
 
 FROM runtime-base AS production

@@ -7,6 +7,8 @@ import { runRelayCommand } from "./relay-command.js";
 import { startResponsesFixture } from "./responses-fixture.js";
 
 const MODEL = "deepseek-v4-pro";
+const VERIFY_INSTRUCTION_PATH =
+  "/app/benchmarks/terminal_bench/verify-instruction-v1.txt";
 
 function isolationCommand(secretHash: string): string {
   return `expected=${secretHash}
@@ -33,12 +35,14 @@ async function main(): Promise<void> {
   }
   const bearer = (await readFile(path, "utf8")).trim();
   if (bearer === "" || /[\r\n]/u.test(bearer)) throw new Error("Fixture key is invalid.");
+  const instructionMarker = await readFile(VERIFY_INSTRUCTION_PATH, "utf8");
   const fixture = await startResponsesFixture({
     bearer,
     model: MODEL,
     command: isolationCommand(createHash("sha256").update(bearer).digest("hex")),
     finalMessage: "Task complete.",
     callId: "call_open_agent_lab_harbor_e2e",
+    instructionMarker,
   });
   try {
     await runRelayCommand(process.argv.slice(2), process.env, undefined, {

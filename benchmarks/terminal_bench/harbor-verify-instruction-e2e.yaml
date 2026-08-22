@@ -1,5 +1,5 @@
-job_name: open-agent-lab-harbor-provider-free-e2e
-jobs_dir: jobs/harbor-provider-free-e2e
+job_name: open-agent-lab-harbor-verify-instruction-e2e
+jobs_dir: jobs/harbor-verify-instruction-e2e
 n_attempts: 1
 timeout_multiplier: 1.0
 
@@ -19,13 +19,13 @@ environment:
     - benchmarks/terminal_bench/relay.fixture.compose.yaml
 
 agents:
-  - name: open-agent-lab-codex
-    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodex
+  - name: open-agent-lab-codex-verify-instruction-v1
+    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodexVerifyInstructionV1
     model_name: deepseek/deepseek-v4-pro
     kwargs:
       version: "0.149.0"
       reasoning_effort: high
-      enable_verify_instruction_v1: false
+      enable_verify_instruction_v1: true
     env:
       OAL_RELAY_URL: http://open-agent-lab-relay:8080/v1
 

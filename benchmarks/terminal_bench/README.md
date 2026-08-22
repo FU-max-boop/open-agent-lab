@@ -21,15 +21,20 @@ ATIF trajectory remains unchanged.
 
 ## Gates before a publishable run
 
-The provider-free CI gate in `harbor-e2e.yaml` runs the complete Compose topology
-on Linux with Harbor 0.22 and Codex 0.149.0. A deterministic native Responses
-fixture makes Codex issue one real `exec_command` inside Harbor's official
-`hello-world` task. The command probes task-visible files, `/proc`, and mounted
-secrets for the fixture credential's hash before completing the task. The gate
-then requires the official reward, two linked relay requests, a valid seal,
-retained metadata, matching Harbor result/lock records, and a matching ATIF
-trajectory. The production relay image is also scanned as an OCI archive to
-ensure fixture code is absent from every image layer.
+The provider-free CI gates in `harbor-e2e.yaml` and
+`harbor-verify-instruction-e2e.yaml` run the complete Compose topology on Linux
+with Harbor 0.22 and Codex 0.149.0. A deterministic native Responses fixture
+makes Codex issue one real `exec_command` inside Harbor's official `hello-world`
+task. The treatment gate also fails unless the exact frozen instruction appears
+once in Codex's developer-message request envelope. The JobLock preserves the
+named arm and strict opt-in switch; the instruction hash is bound separately by
+the frozen experiment manifest, result metadata, and Harbor binding. The command
+probes task-visible files, `/proc`, and mounted secrets for the fixture
+credential's hash before completing the task. Both gates require the official
+reward, two linked relay requests, a valid seal, retained metadata, matching
+Harbor result/lock records, and a matching ATIF trajectory. The production relay
+image is also scanned as an OCI archive to ensure fixture code is absent from
+every image layer.
 
 That green gate proves the adapter and isolation machinery, not DeepSeek, GLM,
 or Terminal-Bench capability. Fixture metadata is labeled `synthetic-fixture`
@@ -46,6 +51,21 @@ official verifier. This sealed-relay adapter is deliberately single-step and
 does not advertise Codex resume support; a future multi-step run needs one relay
 per step or a separate trial-end seal hook.
 
+`pilot-v2.deepseek.yaml` and `pilot-v2.zai.yaml` run the same five tasks with
+adjacent control and `verify-instruction-v1` arms. The only intended difference
+is the frozen `developer_instructions` value. This is a directional development
+experiment: five pairs cannot support a significance or leaderboard claim. The
+switch only requests the frozen instruction; it does not assert that Codex
+performed a verification pass or expose a Codex feature with that name.
+DeepSeek runs control first and Z.AI runs treatment first, so provider-aggregate
+order is balanced; provider-specific results still require a later mirrored
+replication before promotion.
+
+Do not make the first live provider request until the paired-result analyzer is
+implemented, tested, and frozen. It must reject missing pairs and apply the
+reward, cost, and mirrored-replication rules in the experiment manifest; this
+prevents result-aware metric selection.
+
 After installing Harbor 0.22.0 and a supported container runtime, set the
 repository root and a provider key file **outside this repository**. Inside the
 relay container the file must be owned by a different uid than 1000 and be
@@ -57,7 +77,7 @@ every trial. Do not export the provider key itself into Harbor:
 export OPEN_AGENT_LAB_REPO_ROOT="$PWD"
 export OAL_PROVIDER_API_KEY_FILE="/absolute/path/to/deepseek-key"
 harbor jobs start \
-  --config benchmarks/terminal_bench/pilot-v1.deepseek.yaml \
+  --config benchmarks/terminal_bench/pilot-v2.deepseek.yaml \
   --yes
 ```
 
@@ -65,7 +85,7 @@ harbor jobs start \
 export OPEN_AGENT_LAB_REPO_ROOT="$PWD"
 export OAL_PROVIDER_API_KEY_FILE="/absolute/path/to/zai-key"
 harbor jobs start \
-  --config benchmarks/terminal_bench/pilot-v1.zai.yaml \
+  --config benchmarks/terminal_bench/pilot-v2.zai.yaml \
   --yes
 ```
 

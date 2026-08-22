@@ -21,6 +21,7 @@ export interface ResponsesFixtureOptions {
   readonly command: string;
   readonly finalMessage?: string;
   readonly callId?: string;
+  readonly instructionMarker?: string;
   readonly host?: string;
   readonly port?: number;
 }
@@ -99,6 +100,49 @@ function toolResult(body: Record<string, unknown>, callId: string): string | und
     : undefined;
 }
 
+function instructionPaths(value: unknown, marker: string, path = "$"): string[] {
+  if (typeof value === "string") return value.includes(marker) ? [path] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => instructionPaths(item, marker, `${path}[${index}]`));
+  }
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    instructionPaths(item, marker, `${path}.${key}`),
+  );
+}
+
+function hasInstructionMarker(body: Record<string, unknown>, marker: string): boolean {
+  const paths = instructionPaths(body, marker);
+  if (paths.length === 0) return false;
+  if (paths.length !== 1 || paths[0] !== "$.input[0].content[0].text") {
+    throw new Error("Codex placed the frozen developer instruction at an invalid path.");
+  }
+  const input = body.input;
+  const message = Array.isArray(input) ? input[0] : undefined;
+  const messageRecord =
+    typeof message === "object" && message !== null && !Array.isArray(message)
+      ? (message as Record<string, unknown>)
+      : undefined;
+  const content = messageRecord?.content;
+  const part = Array.isArray(content) ? content[0] : undefined;
+  const partRecord =
+    typeof part === "object" && part !== null && !Array.isArray(part)
+      ? (part as Record<string, unknown>)
+      : undefined;
+  if (
+    messageRecord?.role !== "developer" ||
+    partRecord?.type !== "input_text" ||
+    typeof partRecord?.text !== "string"
+  ) {
+    throw new Error("Codex developer instruction envelope drifted.");
+  }
+  const first = partRecord.text.indexOf(marker);
+  if (partRecord.text.indexOf(marker, first + marker.length) >= 0) {
+    throw new Error("Codex repeated the frozen developer instruction.");
+  }
+  return true;
+}
+
 /** Deterministic two-response fixture for real Codex shell-tool probes. */
 export async function startResponsesFixture(
   options: ResponsesFixtureOptions,
@@ -108,6 +152,9 @@ export async function startResponsesFixture(
     throw new Error("Fixture model must be a safe provider model ID.");
   }
   if (options.command.trim() === "") throw new Error("Fixture command must be non-empty.");
+  if (options.instructionMarker !== undefined && options.instructionMarker.trim() === "") {
+    throw new Error("Fixture instruction marker must be non-empty.");
+  }
 
   const callId = options.callId ?? DEFAULT_CALL_ID;
   const requests: ResponsesFixtureRequest[] = [];
@@ -115,6 +162,7 @@ export async function startResponsesFixture(
   let toolOutput = "";
   let toolIssued = false;
   let completed = false;
+  let instructionMarkerPresent: boolean | undefined;
   const server = createServer(async (request, response) => {
     try {
       if (request.method !== "POST" || request.url !== "/responses") {
@@ -129,6 +177,16 @@ export async function startResponsesFixture(
       if (body.model !== options.model || body.stream !== true) {
         throw new Error("Codex fixture request did not preserve the frozen model and stream.");
       }
+      if (options.instructionMarker !== undefined) {
+        const present = hasInstructionMarker(body, options.instructionMarker);
+        if (
+          instructionMarkerPresent !== undefined &&
+          present !== instructionMarkerPresent
+        ) {
+          throw new Error("Codex developer instructions changed during the fixture run.");
+        }
+        instructionMarkerPresent = present;
+      }
       if (completed) throw new Error("Codex sent a request after fixture completion.");
       requests.push({ method: request.method, url: request.url, body });
 
@@ -139,7 +197,10 @@ export async function startResponsesFixture(
         "openai-model": options.model,
         "x-request-id": `provider-fixture-${requests.length}`,
       });
-      const id = `resp_fixture_${requests.length}`;
+      const idPrefix = instructionMarkerPresent
+        ? "resp_fixture_verify_instruction_"
+        : "resp_fixture_";
+      const id = `${idPrefix}${requests.length}`;
       event(response, { type: "response.created", response: { id, model: options.model } });
       const output = toolResult(body, callId);
       if (output === undefined) {

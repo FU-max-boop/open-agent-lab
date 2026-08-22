@@ -1,0 +1,53 @@
+job_name: open-agent-lab-tbench-2-1-verify-instruction-v1-deepseek
+jobs_dir: jobs/terminal-bench-verify-instruction-v1/deepseek
+n_attempts: 1
+n_concurrent_trials: 1
+quiet: false
+timeout_multiplier: 1.0
+
+retry:
+  max_retries: 0
+
+artifacts:
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson
+    destination: provider-metadata.ndjson
+    service: open-agent-lab-relay
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson.sealed
+    destination: provider-metadata.ndjson.sealed
+    service: open-agent-lab-relay
+
+environment:
+  type: docker
+  delete: true
+  extra_docker_compose:
+    - benchmarks/terminal_bench/relay.deepseek.compose.yaml
+
+agents:
+  - name: open-agent-lab-codex
+    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodex
+    model_name: deepseek/deepseek-v4-pro
+    kwargs:
+      version: "0.149.0"
+      reasoning_effort: high
+      enable_verify_instruction_v1: false
+    env:
+      OAL_RELAY_URL: http://open-agent-lab-relay:8080/v1
+  - name: open-agent-lab-codex-verify-instruction-v1
+    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodexVerifyInstructionV1
+    model_name: deepseek/deepseek-v4-pro
+    kwargs:
+      version: "0.149.0"
+      reasoning_effort: high
+      enable_verify_instruction_v1: true
+    env:
+      OAL_RELAY_URL: http://open-agent-lab-relay:8080/v1
+
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+    task_names:
+      - model-extraction-relu-logits
+      - multi-source-data-merger
+      - feal-differential-cryptanalysis
+      - video-processing
+      - large-scale-text-editing

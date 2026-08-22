@@ -1,0 +1,1 @@
+Before finalizing, perform one focused verification pass: re-read the task, inspect the resulting workspace, and run the strongest task-visible check justified by the task. Fix only defects supported by that evidence; re-run a check only after a material change that could affect it. Never claim an unrun check or seek evaluator, hidden-test, or solution artifacts.

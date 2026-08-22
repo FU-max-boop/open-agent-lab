@@ -113,8 +113,9 @@ jobs:
           archive="$(mktemp)"
           image_id="$("${compose[@]}" images -q open-agent-lab-relay)"
           docker save --output "$archive" "$image_id"
-          if grep -aEq 'relay-fixture-entry|responses-fixture|startResponsesFixture' "$archive"; then
-            echo 'Fixture code is recoverable from the production image layers.' >&2
+          forbidden='relay-fixture-entry|responses-fixture|startResponsesFixture|verify-instruction-v1|Before finalizing, perform one focused verification pass'
+          if grep -aEq "$forbidden" "$archive"; then
+            echo 'Fixture code or experiment instructions are recoverable from the production image layers.' >&2
             exit 1
           fi
           "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
@@ -139,7 +140,7 @@ jobs:
       - name: Install Harbor
         run: python3 -m pip install --disable-pip-version-check harbor==0.22.0
 
-      - name: Run provider-free Harbor trial
+      - name: Run provider-free Harbor control and treatment trials
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
           OAL_PROVIDER_API_KEY_FILE: /tmp/open-agent-lab-harbor-provider-key
@@ -151,3 +152,8 @@ jobs:
           sudo cat "$OAL_PROVIDER_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
             jobs/harbor-provider-free-e2e/open-agent-lab-harbor-provider-free-e2e
+          harbor jobs start --config benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml --yes
+          sudo cat "$OAL_PROVIDER_API_KEY_FILE" | \
+            python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
+            jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e \
+            verify-instruction-v1

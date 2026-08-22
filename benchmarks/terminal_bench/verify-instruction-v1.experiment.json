@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "terminal-bench-2.1-verify-instruction-v1",
+  "frozenAt": "2026-08-22",
+  "runClass": "development",
+  "selection": {
+    "manifest": "benchmarks/terminal_bench/pilot-v1.selection.json",
+    "sha256": "sha256:411583fe59c9497cec211545beabc1c0885fa5bfc023a3d78026e14f3883df2d",
+    "tasks": 5,
+    "attemptsPerArm": 1
+  },
+  "runtime": {
+    "harborVersion": "0.22.0",
+    "harborTagCommit": "4407eb5227a2ff4f0d3f16b2eb48849382fdf276",
+    "harborAuditCommit": "39b85872597ea710077d8c93095059bca3ca4ed2",
+    "codexVersion": "0.149.0",
+    "datasetDigest": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+    "concurrency": 1,
+    "harborRetries": 0,
+    "relayRequestCapPerTrial": 256,
+    "sourceRevisionRule": "run from a clean committed tree and record its git SHA before any provider request"
+  },
+  "arms": [
+    {
+      "variantId": "control-v1",
+      "developerInstructionRequested": false,
+      "requestedDeveloperInstructionsSha256": null
+    },
+    {
+      "variantId": "verify-instruction-v1",
+      "developerInstructionRequested": true,
+      "codexConfigKey": "developer_instructions",
+      "developerInstructionsPath": "benchmarks/terminal_bench/verify-instruction-v1.txt",
+      "requestedDeveloperInstructionsSha256": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a",
+      "developerInstructionsBytes": 366
+    }
+  ],
+  "pairedConfigs": [
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "reasoningEffort": "high",
+      "armOrder": ["control-v1", "verify-instruction-v1"],
+      "path": "benchmarks/terminal_bench/pilot-v2.deepseek.yaml"
+    },
+    {
+      "provider": "zai",
+      "model": "glm-5.3",
+      "reasoningEffort": "max",
+      "armOrder": ["verify-instruction-v1", "control-v1"],
+      "path": "benchmarks/terminal_bench/pilot-v2.zai.yaml"
+    }
+  ],
+  "fileSha256": {
+    "apps/cli/src/codex-probe.ts": "sha256:6afa31fd5dc8ef7da253c7d60ec103b9636132b9b828de55d40b142e912c4cd1",
+    "apps/cli/src/codex-runner.ts": "sha256:85a5926864ce0a863fc511bf3c64b008d9cef708ab50dce071795be1a7949c3e",
+    "apps/cli/src/relay-fixture-entry.ts": "sha256:d399fa73496654b808fccca16143dff789d3391b49d3e078060a65f1caae3d4e",
+    "apps/cli/src/responses-fixture.ts": "sha256:ec5bcea7905db7b4ac15adf0ed3ba919f50c87978b625d7b1d5de94b6e68c478",
+    "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:95138dc905a02a4a9136d90223f3561725b1d73fea1a055b88e7994d95636c05",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:10c1a2e39bfd0b8c393e1f0f6eef19fd80246c762c8d418674dd4e051e894b2d",
+    "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:c99f0228d0fb4b3f675ee42e24dba7c0cf0b6824ed4a9a0e7943414966752151",
+    "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:254b038a36d66b01f497537fa72c20d1ae7832b62a3e63a3a63f74eaa38a91a6",
+    "benchmarks/terminal_bench/relay.Dockerfile": "sha256:66317a03ba1efd09e27119ccb33087da788efbe96b2bef564af38699b5fc630f",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:e0664892b43d662d542793503606cae355260e12359dc5fa4cfbe48b54ffb61e",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:8613ad1ddb01324a89246bcfdd2bcd366f0934c27a4f44c9d92139ef4347e53f",
+    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:45bcfd5a23b7e726d4de1eb994756bac6e13f16981743a89556d92e983004f84",
+    "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
+  },
+  "metrics": [
+    "official_reward",
+    "paired_reward_delta",
+    "win_tie_loss",
+    "input_cache_output_reasoning_tokens",
+    "responses_requests",
+    "tool_calls",
+    "wall_time",
+    "exceptions_timeouts",
+    "publication_integrity_gate"
+  ],
+  "claimRule": "directional five-task development result only; never a full, significant, official, or leaderboard score",
+  "promotionRule": {
+    "requiresBothProviders": true,
+    "requiresMirroredWithinProviderReplication": true,
+    "meanPairedRewardDeltaMustExceed": 0,
+    "noMissingPairs": true,
+    "maximumMedianTokenOrWallTimeIncrease": 0.5,
+    "minimumRewardGainIfOverheadLimitExceeded": 0.2
+  },
+  "liveStartGate": "a tested paired-result analyzer must be merged and frozen before the first provider request; exact provider conformance, matching requested/returned model, disposable low-limit credentials, and all provider-free control/treatment gates must also pass"
+}

@@ -25,28 +25,34 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
   per-trial relay token to Codex, seals the listener after the agent phase, and
   validates a host-only copy while retaining the journal and seal as separate
   Harbor artifacts.
+- Linux CI completes Harbor's official `hello-world` task through the real
+  Harbor 0.22, Codex 0.149.0, isolated relay, tool, verifier, ATIF, result, and
+  lock path. Synthetic evidence remains publication-ineligible by design.
 
-## Current slice — Codex provider conformance
+## Current slice — attributable open-model strategy
 
-- Pin one exact Codex release/commit and record it in every run variant.
-- Exercise Codex against a fake Responses server for text, function/shell calls,
-  `apply_patch`, usage, terminal errors, and cut streams.
+- Keep Codex 0.149.0 and Harbor 0.22.0 fixed for the first paired experiment.
+- Verify that the opt-in `verify-instruction-v1` bytes travel through the real
+  Codex developer-message path; it is an Open Agent Lab variant, not a Codex
+  feature.
+- Before the first provider request, freeze a paired-result analyzer that rejects
+  missing pairs and applies the declared reward, cost, and replication gates.
 - Run opt-in live conformance for exact GLM and DeepSeek routes; retain redacted
   raw event fixtures and actual returned model identity.
-- Prove the sidecar boundary with a Linux task-container filesystem,
-  environment, argv, and `/proc` sentinel scan.
 - Run the relay against live GLM and DeepSeek Responses routes with disposable,
   provider-budget-capped credentials.
-- Add a minimal Harbor subclass of its official Codex adapter; do not rewrite
-  installation, container execution, session capture, or ATIF conversion.
-- Freeze a five-task Terminal-Bench 2.1 pilot before observing outcomes.
+- Run the frozen five-task control/treatment pair once per provider as a
+  directional screen. Promotion also requires a mirrored within-provider
+  replication and acceptable token and wall-time cost.
+- Design clean-boundary native resume separately using relay capability epochs;
+  do not wrap or duplicate Codex's internal tool loop.
 
 ## Next slice — Terminal-Bench 2.1 pilot
 
 - Pin Harbor `v0.22.0` and the official Terminal-Bench 2.1 dataset digest.
-- Run the predeclared five-task infrastructure pilot once per provider, then
-  expand to roughly 15 tasks x 3 attempts only after trajectory integrity is
-  proven.
+- Run the predeclared five-task control/treatment pilot once per provider, then
+  expand to roughly 15 tasks x 3 attempts only after trajectory integrity and a
+  positive directional signal are proven.
 - Run the same tasks and resource envelope on exact GLM and DeepSeek routes.
 - Publish every attempt and denominator as a reproducible pilot, not an official
   leaderboard score while community submissions remain closed.
@@ -62,9 +68,11 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
 - Fake-server probes cover the Responses events Codex actually consumes.
 - Live text, tool, patch, truncation, and error probes pass or produce a narrow,
   documented compatibility gap.
-- Harbor's hello-world task completes with a valid ATIF trajectory once a
-  container runtime is available.
+- Harbor's hello-world task completes with a valid ATIF trajectory for both the
+  control and exact-instruction treatment paths in Linux CI.
 - No successful run exists without an official verifier record.
+- The frozen analyzer rejects incomplete pairs and reports every attempt in the
+  denominator before any experiment decision is made.
 - Exact requested and returned model identities are preserved for every live
   model call.
 - `pnpm check` and `pnpm build` pass from a clean checkout.
