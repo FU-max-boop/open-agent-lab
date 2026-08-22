@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "terminal-bench-2.1-pilot-v1",
+  "frozenAt": "2026-08-22",
+  "harbor": {
+    "version": "0.22.0",
+    "commit": "39b85872597ea710077d8c93095059bca3ca4ed2"
+  },
+  "benchmark": {
+    "name": "terminal-bench/terminal-bench-2-1",
+    "commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+    "digest": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+  },
+  "selection": {
+    "population": "sorted immediate directory names under the pinned tasks/ tree",
+    "seed": "open-agent-lab:tbench-2.1:pilot-v1",
+    "algorithm": "sort ascending by sha256(seed + NUL + task_id), take first 5",
+    "selectedBeforeOutcomes": true,
+    "tasks": [
+      {
+        "id": "model-extraction-relu-logits",
+        "selectionHash": "041fee58620ad1a823889ace8d3e18b486a3245b089e8b405a0b1ec9a4d228f5"
+      },
+      {
+        "id": "multi-source-data-merger",
+        "selectionHash": "097bbdeaa9e4d80639ac196ee1192579bbb6eea194f8d874bc8354707f23b2bf"
+      },
+      {
+        "id": "feal-differential-cryptanalysis",
+        "selectionHash": "0c05a11011d84195a780cf4dd6fea1800f3e5983ffc7b18986a0d95e32eddfd5"
+      },
+      {
+        "id": "video-processing",
+        "selectionHash": "0c9dacd321cb0bdbb2dda591689df7660e663fa127ec750aea7fec56e0aa2ac1"
+      },
+      {
+        "id": "large-scale-text-editing",
+        "selectionHash": "109340f4a319f85ccbb7b9bf35723e91355e0e88a7f5bcc4471c4fc6ab3e82e1"
+      }
+    ]
+  },
+  "runPolicy": {
+    "attemptsPerTask": 1,
+    "concurrency": 1,
+    "harborRetries": 0,
+    "taskResourcesAndTimeouts": "official defaults",
+    "primaryOutcome": "unmodified official verifier reward",
+    "claim": "infrastructure pilot only; not a full or official leaderboard score"
+  }
+}

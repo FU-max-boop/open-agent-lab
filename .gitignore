@@ -3,6 +3,8 @@ dist/
 coverage/
 .DS_Store
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 .env
 .env.*
 !.env.example
