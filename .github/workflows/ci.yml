@@ -84,7 +84,7 @@ jobs:
           cleanup() {
             status=$?
             if [ "$status" -ne 0 ]; then
-              "${compose[@]}" ps || true
+              "${compose[@]}" ps --all || true
               "${compose[@]}" logs --no-color open-agent-lab-relay || true
             fi
             "${compose[@]}" down --volumes || true

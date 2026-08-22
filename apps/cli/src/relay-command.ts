@@ -65,15 +65,20 @@ async function assertSecretFileUnreadable(path: string | undefined): Promise<voi
 }
 
 async function shutdownSignal(): Promise<void> {
-  await new Promise<void>((resolveSignal) => {
-    const done = (): void => {
-      process.off("SIGINT", done);
-      process.off("SIGTERM", done);
-      resolveSignal();
-    };
-    process.once("SIGINT", done);
-    process.once("SIGTERM", done);
-  });
+  const keepAlive = setInterval(() => undefined, 60_000);
+  try {
+    await new Promise<void>((resolveSignal) => {
+      const done = (): void => {
+        process.off("SIGINT", done);
+        process.off("SIGTERM", done);
+        resolveSignal();
+      };
+      process.once("SIGINT", done);
+      process.once("SIGTERM", done);
+    });
+  } finally {
+    clearInterval(keepAlive);
+  }
 }
 
 function dropPrivileges(env: NodeJS.ProcessEnv): void {
@@ -148,6 +153,15 @@ export async function runRelayCommand(
     port: integer(args, "--port", 8080),
     maxRequests: integer(args, "--max-requests", 256),
   });
+  const seal = (): void => {
+    void relay.seal().catch((error: unknown) => {
+      process.stderr.write(
+        `Failed to seal relay: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+  };
+  const shutdown = shutdownSignal();
+  process.on("SIGUSR2", seal);
   output(
     JSON.stringify({
       ok: true,
@@ -160,16 +174,8 @@ export async function runRelayCommand(
       expiresAt: new Date(expiresAtMs).toISOString(),
     }),
   );
-  const seal = (): void => {
-    void relay.seal().catch((error: unknown) => {
-      process.stderr.write(
-        `Failed to seal relay: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    });
-  };
-  process.on("SIGUSR2", seal);
   try {
-    await shutdownSignal();
+    await shutdown;
     return await relay.close();
   } finally {
     process.off("SIGUSR2", seal);
