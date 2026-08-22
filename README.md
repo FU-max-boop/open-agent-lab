@@ -1,30 +1,31 @@
 # Open Agent Lab
 
-> An open-model-first, browser-native, recoverable, and verifiable agent runtime.
+> An open-model optimization, recovery, and evidence layer for open-source Codex.
 
-Open Agent Lab is an early-stage effort to build a Codex-class software and
-computer-use agent without making a closed model or a single provider a product
-dependency. The intended system combines repository work, terminal execution,
-and browser interaction in one resumable task runtime, with machine-checkable
-outcomes and auditable evidence.
+Open Agent Lab is an early-stage effort to make the open-source Codex agent work
+exceptionally well with open-model providers. Codex supplies the inner coding
+agent and tool loop; this project supplies native GLM/DeepSeek profiles,
+compatibility probes, controlled benchmark variants, outer-run recovery, and
+auditable evidence. The target is a competitive, reproducible Terminal-Bench
+agent rather than a second implementation of the same loop.
 
-**Status: recoverable-kernel and model-gateway bootstrap.** The repository now contains versioned
-run/event contracts, a strict content-addressed evidence bundle, a provider-free
-`run -> verify -> replay` smoke path, and a SQLite-backed recoverable task
-kernel. A single strict OpenAI-compatible Chat Completions driver now covers the
-documented common subset of GLM and DeepSeek, with offline wire-contract tests;
-live-provider conformance is still pending. The provider-free smoke runs through
-the kernel, broker, independent verifier, and evidence writer. There is still no
-installable release or public benchmark result. This repository must not be
-cited as outperforming another agent, appearing on an official leaderboard, or
-completing OSWorld. Those are targets, not current claims.
+**Status: native Codex/open-model bootstrap.** The repository contains a
+recoverable SQLite kernel, strict evidence bundles, and a provider-free
+`run -> verify -> replay` smoke path. It also has a credential-hardened Codex
+runner for DeepSeek's standard Responses API and the Z.AI Coding Plan Responses
+endpoint.
+The older Chat Completions driver remains a diagnostic fallback, not the primary
+agent path. Live-provider conformance and a Terminal-Bench pilot are still
+pending execution. There is no installable release or public benchmark result
+yet.
 
-"Codex-class" describes the intended breadth of the workflow; it does not imply
-affiliation with or equivalence to OpenAI Codex.
+Open Agent Lab is independent from OpenAI and is not an official Codex
+distribution.
 
 ## Quick start
 
-Requirements: Node.js 20.19 or later within Node 20, and pnpm 10.34.5.
+Requirements: Node.js 20.19 or later within Node 20, pnpm 10.34.5, and Codex
+0.149.0 on `PATH` for the Codex commands.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -36,15 +37,33 @@ smoke_dir="$(mktemp -d)/bundle"
 node apps/cli/dist/index.js run-smoke --output "$smoke_dir"
 node apps/cli/dist/index.js verify-evidence "$smoke_dir"
 node apps/cli/dist/index.js replay-smoke "$smoke_dir"
+
+# Verify an installed Codex against a provider-free native Responses tool round.
+node apps/cli/dist/index.js codex-probe
+
+# Inspect the exact secret-free Codex route before a live call.
+node apps/cli/dist/index.js codex-run \
+  --provider deepseek \
+  --workspace . \
+  --prompt "Inspect the repository and report one concrete issue." \
+  --dry-run
 ```
 
 `run-smoke --output` intentionally refuses to overwrite an existing path. The
 smoke task is deterministic and provider-free; it is a protocol check, not a
-capability benchmark.
+capability benchmark. A live `codex-run` reads `DEEPSEEK_API_KEY` or
+`ZAI_API_KEY` from the environment. The key is never placed in argv or generated
+configuration. The Z.AI profile uses Coding Plan quota, not the ordinary
+pay-as-you-go Chat Completions route.
+
+The frozen, provider-paired Terminal-Bench pilot and its integrity rules live in
+[benchmarks/terminal_bench](benchmarks/terminal_bench/README.md). It is an
+infrastructure pilot, not a leaderboard score.
 
 ## Product thesis
 
-The model should make judgments; the runtime should make execution dependable.
+Codex should drive the task; the lab should make open-model behavior measurable
+and dependable.
 
 - **Open-model-first:** GLM, DeepSeek, Qwen, and other openly available model
   families are first-class targets. The runtime remains provider-neutral, and
@@ -98,19 +117,19 @@ protocol, uncertainty analysis, complete denominators, and artifacts defined in
 ## Intended system
 
 ```text
-CLI / Desktop / CI
+CLI / Harbor / CI
         |
-Task kernel -- model gateway -- policy and tool broker
-        |                 |
-Code workspace       Browser workspace
-        \                 /
-         journal -> verifier -> evidence bundle
+experiment + recovery controller
+        |
+open-source Codex -- native Responses API -- GLM / DeepSeek
+        |
+code workspace -> official verifier -> evidence bundle
 ```
 
-The implementation is expected to provide typed model and tool interfaces,
-shell/file/patch/git/test operations, browser inspection and interaction,
-checkpoint/resume, deterministic verification where possible, and benchmark
-adapters that do not leak evaluator state into the agent.
+Codex remains upstream rather than becoming a long-lived fork. Provider-specific
+code is added only for a measured compatibility gap. The existing kernel and
+broker remain useful at the outer run boundary for resume, ambiguous effects,
+verification, and publication; they do not duplicate Codex's inner tool loop.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the proposed boundaries. The design is
 deliberately modular: no model family, inference server, browser driver, or
@@ -146,6 +165,8 @@ Detailed exit criteria live in [CHARTER.md](CHARTER.md).
 - [ROADMAP.md](ROADMAP.md): current two-week gate and its exit criteria
 - [docs/model-drivers.md](docs/model-drivers.md): GLM/DeepSeek adapter contract,
   limitations, and live-conformance gate
+- [benchmarks/terminal_bench](benchmarks/terminal_bench/README.md): pinned Harbor
+  adapter and predeclared Terminal-Bench 2.1 pilot
 - [docs/decisions](docs/decisions): accepted persistence and recovery decisions
 
 ## License

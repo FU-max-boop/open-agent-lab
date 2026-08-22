@@ -1,6 +1,6 @@
 # ADR-004: One portable Chat Completions driver
 
-Status: accepted for Gate 1.
+Status: accepted for Gate 1; retained as a diagnostic fallback after ADR-005.
 
 ## Decision
 

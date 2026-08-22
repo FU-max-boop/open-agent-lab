@@ -9,17 +9,15 @@ implemented; the diagram is not an implementation-status claim.
 ```text
                        operator / evaluator
                                 |
-                     CLI / Desktop / CI API
+                       CLI / Harbor / CI
                                 |
-                      task runtime kernel
-              _________/       |        \_________
-             /                 |                  \
-      model gateway      policy + tool broker     verifier
-             |             /             \            |
-      model endpoints   code workspace   browser    evidence
-                                         runtime      bundle
-                              \             /
-                               durable journal
+                experiment + recovery controller
+                       /                 \
+          open-source Codex              verifier
+             /          \                   |
+     native Responses   code workspace    evidence
+       GLM/DeepSeek           |             bundle
+                       durable journal
 ```
 
 The task—not the chat turn—is the unit of work. Every task has an immutable run
@@ -38,25 +36,28 @@ human takeover. CI uses the same API in non-interactive mode.
 Clients may render task state and submit decisions; they do not own task
 semantics or persistence.
 
-### Task runtime kernel
+### Experiment and recovery controller
 
-The kernel owns:
+The outer controller owns:
 
 - lifecycle states such as `created`, `running`, `waiting_for_approval`,
   `needs_review`, `verifying`, `succeeded`, `failed`, and `cancelled`;
-- model/tool turn orchestration and resource accounting;
+- variant selection, resource accounting, and Codex process/session lifecycle;
 - write-ahead event recording, checkpoints, cancellation, and resume;
-- context construction from durable state rather than UI chat history;
 - termination only after the configured verifier returns an outcome.
 
-The kernel accepts capabilities through interfaces. It must not import
-provider-specific, browser-driver-specific, or benchmark-specific policy into
-its core loop.
+Codex owns the inner model/tool turn loop. The controller may resume or restart a
+pinned Codex session, but it does not reinterpret tool calls or maintain a
+second planning state machine. The existing recoverable kernel remains the
+authority for outer-run state and uncertain effects.
 
-### Model gateway
+### Codex engine and open-model profiles
 
-The gateway normalizes messages, tool schemas, streaming events, usage, and
-errors while preserving provider-specific facts needed for audit.
+The primary model path is an unmodified, pinned open-source Codex release using
+its supported custom-provider configuration and the Responses wire protocol.
+DeepSeek and Z.AI connect directly to their documented native Responses
+endpoints. A protocol shim is permitted only for a concrete failing probe and
+must stay narrower than the missing behavior.
 
 Each model variant records at least:
 
@@ -71,6 +72,10 @@ Each model variant records at least:
 Capability profiles adapt mechanics, not benchmark answers. A router may choose
 models in product mode, but benchmark harness-isolation runs use the predeclared
 route and may not silently fall back to another model.
+
+The legacy Chat Completions driver is retained for provider diagnostics and
+future endpoints that genuinely lack Responses. It is not an alternative agent
+loop and is not used in the first Codex Terminal-Bench track.
 
 ### Policy and tool broker
 
@@ -165,9 +170,9 @@ and machine-readable so absence is not mistaken for missing telemetry.
 ## Execution and recovery
 
 ```text
-create -> pin inputs -> checkpoint -> model decision -> validate action
-   -> record intent -> authorize -> execute -> record result -> checkpoint
-   -> repeat -> verify -> emit evidence -> terminal state
+create -> pin Codex/provider/benchmark variant -> checkpoint -> run Codex
+   -> journal trajectory and process outcome -> reconcile interruption
+   -> verify official task outcome -> emit evidence -> terminal state
 ```
 
 Recovery does not promise exactly-once effects across arbitrary external
@@ -209,9 +214,11 @@ boundaries must be tested independently before unattended operation is promoted.
 ## Benchmark integration
 
 Each benchmark adapter is a thin boundary that maps the official task lifecycle
-to the kernel and returns the official evaluator output. It may configure the
-workspace and budgets but may not add task-specific reasoning, expose hidden
-state, or rewrite scores.
+to Codex and returns the official evaluator output. Terminal-Bench integration
+inherits Harbor's Codex adapter so installation, session capture, ATIF
+conversion, and container interaction stay upstream-owned. Our subclass may
+select a native provider profile and add variant metadata; it may not add
+task-specific reasoning, expose hidden state, or rewrite scores.
 
 Benchmark adapters, product skills, and site-specific automations remain separate
 packages. Results from a general harness and a skill-augmented harness are
@@ -221,6 +228,8 @@ separate tracks.
 
 - No terminal success state without a verifier record.
 - No model or provider identity hidden from a published run.
+- No long-lived Codex fork when a supported provider profile is sufficient.
+- No protocol shim without a failing, retained compatibility probe.
 - No silent model fallback in a controlled evaluation.
 - No replay of an uncertain non-idempotent action.
 - No browser element reference reused after its observation expires.

@@ -1,77 +1,95 @@
-# GLM and DeepSeek model driver
+# Codex profiles for GLM and DeepSeek
 
-The model gateway currently contains one strict OpenAI-compatible Chat
-Completions adapter with two wire dialects: `glm` and `deepseek`. It is designed
-for controlled, recoverable runs rather than maximum compatibility with every
-parameter a provider might accept.
+The primary agent path is a pinned upstream Codex binary connected directly to
+provider-native Responses endpoints. The repository's Chat Completions driver
+is retained for diagnostics and future providers that genuinely lack Responses;
+it is not the Terminal-Bench agent loop.
 
-## Routes
+## Native routes
 
-| Dialect          | Base URL                                      | Notes                                                                       |
-| ---------------- | --------------------------------------------- | --------------------------------------------------------------------------- |
-| GLM standard API | `https://open.bigmodel.cn/api/paas/v4`        | Uses the standard API key and quota.                                        |
-| GLM Coding Plan  | `https://open.bigmodel.cn/api/coding/paas/v4` | A distinct route and key scope; record it as a different benchmark variant. |
-| DeepSeek         | `https://api.deepseek.com`                    | Record the returned model and system fingerprint because aliases may move.  |
+| Profile | Responses base URL | Credential | Scope |
+| --- | --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com/` | `DEEPSEEK_API_KEY` | Standard pay-as-you-go API |
+| Z.AI | `https://api.z.ai/api/v1` | `ZAI_API_KEY` | GLM Coding Plan only |
 
-The configured base URL must use HTTPS, except for an explicit loopback test
-server. Credentials, query strings, fragments, and a pre-appended
-`/chat/completions` path are rejected.
+DeepSeek documents Codex, function tools, web search, and the custom
+`apply_patch` tool on its Responses API. Z.AI documents Codex and the Coding
+Plan Responses endpoint but does not yet publish a complete Responses feature
+matrix. The ordinary Z.AI pay-as-you-go endpoint is documented for Chat
+Completions, not Responses, and is not silently substituted.
 
-## Supported contract
+`codex-run` uses Codex's supported custom-provider configuration, disables
+WebSocket transport, and sends the prompt on stdin. It ignores personal Codex
+configuration and exec-policy rules, runs ephemerally, and emits Codex JSONL.
+Credentials stay in their environment variable: neither argv nor a generated
+file contains the value. The child process receives a minimal environment and
+uses one temporary empty home/`CODEX_HOME`; Codex's shell policy removes
+key/secret/token variables and blanks the selected provider key before tool
+execution.
 
-- text and inline base64 images according to the explicit capability profile;
-- OpenAI function-tool definitions and tool results;
-- `auto` tool choice, or `none` by omitting current tool definitions;
-- thinking enable/disable, reasoning effort, and replay of assistant
-  `reasoning_content`;
-- normalized usage, cancellation, and sanitized provider errors;
-- actual response ID, request ID, returned model, and system fingerprint.
+Examples:
 
-All provider calls are deliberately non-streaming in this first version. The
-driver still returns normalized events through the shared `AsyncIterable`
-interface. This avoids provider-specific streamed-tool behavior, guarantees a
-complete usage record, and keeps the pinned SDK's SSE diagnostics outside the
-credential boundary. Provider streaming requires a bounded parser and its own
-live conformance evidence.
+```bash
+export DEEPSEEK_API_KEY="..."
+node apps/cli/dist/index.js codex-run \
+  --provider deepseek \
+  --model deepseek-v4-pro \
+  --reasoning high \
+  --workspace /path/to/repository \
+  --prompt-file /path/to/instruction.md
+```
 
-The portable profile rejects required/named tool choice, parallel tool calls,
-response schemas, and strict schemas. A future provider-specific beta profile
-may add one of these only after it has its own explicit capability and live
-conformance evidence.
+```bash
+export ZAI_API_KEY="..."
+node apps/cli/dist/index.js codex-run \
+  --provider zai \
+  --model glm-5.3 \
+  --reasoning max \
+  --workspace /path/to/repository \
+  --prompt-file /path/to/instruction.md
+```
 
-## Reliability boundary
+Use `--dry-run` first to inspect the exact route, model, reasoning setting,
+context limit, and required environment variable without making a request.
 
-The adapter performs no retries (`maxRetries: 0`). A timed-out or disconnected
-request may already have consumed tokens, so only the journaled kernel can make
-an auditable retry decision. HTTP bodies and provider messages are not copied
-into normalized errors, and local `ModelRequest.metadata` is never sent over the
-wire.
+## Conformance gate
 
-If a tool failed, callers must encode a structured failure envelope in its text
-content. Chat Completions has no portable `isError` field, so silently dropping
-that bit is forbidden.
+An HTTP success is not proof that a parameter works: providers may ignore
+unsupported Responses fields. Before a route enters a benchmark, retain
+redacted evidence for:
 
-## Live-conformance gate
+1. text streaming and exactly one terminal event;
+2. function/shell call, tool result, and final answer with stable `call_id`;
+3. freeform `apply_patch` input and result;
+4. multiple tool calls and their ordering;
+5. each advertised reasoning effort across a tool round;
+6. output truncation and `incomplete`/`failed` handling;
+7. usage, cached-input, and reasoning-token fields when supplied;
+8. 400, 401, 429, 5xx, disconnect, and retry behavior;
+9. one real repository task through the actual Codex binary.
 
-Offline tests currently prove request and complete-response decoding, reasoning
-replay, tool normalization, usage accounting, identity capture, preflight and
-in-flight cancellation, error sanitization, and zero internal retries. They do
-not prove a live account or model route.
+Every record includes the Codex version/commit, requested and returned model,
+provider route, UTC time, retry policy, context setting, response/request IDs,
+system fingerprint when supplied, and a hash of the redacted raw event stream.
+Missing usage stays missing rather than becoming zero. Private reasoning and API
+keys are never published.
 
-Before a route is used in a benchmark, run and record all four cases against one
-exact configured model:
+The current Harbor adapter does not yet meet that publication gate: Harbor 0.22
+does not preserve provider-returned model/request metadata in its ATIF output,
+and its unsandboxed same-UID Linux process layout needs a credential relay or
+tested OS boundary. The frozen pilot remains an infrastructure configuration
+until both gaps have retained regression evidence.
 
-1. text plus usage;
-2. thinking plus returned identity;
-3. one tool call followed by one tool result, with reasoning replayed;
-4. cancellation or interrupted transport without an automatic replay.
+## Diagnostic Chat driver
 
-The conformance record must include date, requested model, returned model,
-system fingerprint when supplied, route label, SDK version, and redacted fixture
-hash. It must not contain an API key or raw private reasoning.
+`@open-agent-lab/model-driver` still implements a conservative, non-streaming
+Chat Completions subset for GLM and DeepSeek. It normalizes reasoning replay,
+tool calls, usage, identity, cancellation, and sanitized errors with SDK retries
+disabled. This path is useful for differential probes or a future narrow shim.
+It must not be described as Codex compatibility or substituted into a benchmark
+variant without a new preregistration.
 
-Provider references: [GLM OpenAI compatibility](https://docs.bigmodel.cn/cn/guide/develop/openai/introduction),
-[GLM Chat Completions](https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E5%AF%B9%E8%AF%9D%E8%A1%A5%E5%85%A8),
-[GLM thinking mode](https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode),
-[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion),
-and [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode).
+Provider references: [DeepSeek Codex integration](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/),
+[DeepSeek Responses API](https://api-docs.deepseek.com/guides/responses_api/),
+[Z.AI tool integration](https://docs.z.ai/devpack/tool/others), and
+[Z.AI GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3).

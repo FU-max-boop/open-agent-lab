@@ -1,0 +1,36 @@
+job_name: open-agent-lab-tbench-2-1-pilot-v1-deepseek
+jobs_dir: jobs/terminal-bench-pilot-v1/deepseek
+n_attempts: 1
+timeout_multiplier: 1.0
+
+orchestrator:
+  type: local
+  n_concurrent_trials: 1
+  quiet: false
+
+retry:
+  max_retries: 0
+
+environment:
+  type: docker
+  delete: true
+
+agents:
+  - name: open-agent-lab-codex
+    import_path: benchmarks.terminal_bench.harbor_agent:OpenAgentLabCodex
+    model_name: deepseek/deepseek-v4-pro
+    kwargs:
+      version: "0.149.0"
+      reasoning_effort: high
+    env:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+    task_names:
+      - model-extraction-relu-logits
+      - multi-source-data-merger
+      - feal-differential-cryptanalysis
+      - video-processing
+      - large-scale-text-editing

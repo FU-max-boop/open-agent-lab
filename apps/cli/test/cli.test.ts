@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { verifyEvidenceBundle } from "@open-agent-lab/evidence";
@@ -61,4 +61,51 @@ test("evidence verification rejects a modified payload", async (t) => {
   await writeFile(outputPath, original.replace("alpha", "tampered"), "utf8");
 
   await assert.rejects(verifyEvidenceBundle(bundle));
+});
+
+test("codex-run dry-run exposes exact routing without requiring or printing a key", async () => {
+  const output: string[] = [];
+  const errors: string[] = [];
+  const exitCode = await runCli(
+    [
+      "codex-run",
+      "--provider",
+      "zai",
+      "--workspace",
+      ".",
+      "--model",
+      "glm-5.3",
+      "--prompt",
+      "fix the task",
+      "--dry-run",
+    ],
+    {
+      stdout: (message) => output.push(message),
+      stderr: (message) => errors.push(message),
+    },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(errors, []);
+  const report = JSON.parse(output.join("\n")) as {
+    command: string;
+    args: string[];
+    cwd: string;
+    provider: string;
+    model: string;
+    reasoning: string;
+    requiredEnv: string;
+    apiScope: string;
+    promptBytes: number;
+  };
+  assert.equal(report.command, "codex");
+  assert.equal(report.cwd, resolve("."));
+  assert.equal(report.provider, "zai");
+  assert.equal(report.model, "glm-5.3");
+  assert.equal(report.reasoning, "max");
+  assert.equal(report.requiredEnv, "ZAI_API_KEY");
+  assert.equal(report.apiScope, "coding-plan");
+  assert.equal(report.promptBytes, 12);
+  assert.ok(report.args.includes("--ignore-user-config"));
+  assert.ok(!output.join("\n").includes("fix the task"));
 });
