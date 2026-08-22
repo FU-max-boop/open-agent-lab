@@ -42,6 +42,18 @@ jobs:
       - name: Probe pinned Codex through native Responses relay
         run: |
           npm install --prefix /tmp/open-agent-lab-codex --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
+          userns_clone="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          apparmor_userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          restore_userns() {
+            status=$?
+            trap - EXIT
+            [ "$apparmor_userns" != 1 ] || sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=1 || true
+            [ "$userns_clone" != 0 ] || sudo sysctl -q -w kernel.unprivileged_userns_clone=0 || true
+            exit "$status"
+          }
+          trap restore_userns EXIT
+          [ "$userns_clone" != 0 ] || sudo sysctl -q -w kernel.unprivileged_userns_clone=1
+          [ "$apparmor_userns" != 1 ] || sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
           OPEN_AGENT_LAB_CODEX_BIN=/tmp/open-agent-lab-codex/node_modules/.bin/codex \
             node --import tsx --test --test-name-pattern="installed Codex" apps/cli/test/codex-runner.test.ts
 
