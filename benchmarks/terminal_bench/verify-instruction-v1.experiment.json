@@ -157,9 +157,9 @@
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
     "benchmarks/terminal_bench/relay_evidence.py": "sha256:069bd48716be20c51413140b765eb3ad3027d8aa5aa5b58d75f6adf214dda6ca",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:30b896ee157bd515143d275f3d3061aaa7724f5cdb21cb5893df34ca14fef9d4",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:28e0b7feeb979bcaf0cebccf1846ca1e73f85f9507e0ab69dc44d0cafa7e6ba6",
     "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:7b8e085eda952739c2b0694884e992c3f80f9fbd215caaa563cbbc4650fc8abd",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:db43c927ede6618d2da7eacc0db89037e8c868c637edee158d8743b665ced465",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:b414be1a9ba23d6838ebe108f7d25d0845c52d8826672dfc2ccb3477f8060d92",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:19b4c0aa13177c798817d306fbb196dfda6fd4835908613e3c3e05dd5443bf7c",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },

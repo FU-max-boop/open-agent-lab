@@ -43,7 +43,7 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 _EXPERIMENT = "terminal-bench-2.1-verify-instruction-v1"
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:bbd42fcf6a68aad733842998e0ecd5441f3988bae6583eeaac2ee735c2cf119d"
+    "sha256:4f59f8af1e006539e106850f5b73678b83255e538d637c74353de017e012d7f2"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = "0.149.0"

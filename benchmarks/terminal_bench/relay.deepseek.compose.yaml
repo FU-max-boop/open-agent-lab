@@ -38,7 +38,7 @@ services:
       - provider-api-key
     read_only: true
     tmpfs:
-      - /var/lib/open-agent-lab:mode=0700,uid=1000,gid=1000
+      - /var/lib/open-agent-lab:mode=0770,uid=1000,gid=0
     cap_drop: [ALL]
     cap_add: [DAC_READ_SEARCH, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
