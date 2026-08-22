@@ -9,14 +9,26 @@ import re
 import subprocess
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from typing import Any, TypedDict, override
+from typing import Any, TypedDict, cast, override
 from urllib.parse import urlsplit
 
 from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from . import experiment_contract as _experiment_contract
 from . import harbor_environment as _harbor_environment
+from .experiment_contract import (
+    EXPERIMENT_ID,
+    RELAY_BUILD_ID_PATH,
+    RELAY_JOURNAL_PATH,
+    RELAY_SEAL_PATH,
+    RELAY_SERVICE,
+    RUN_BINDING_KEYS,
+    is_digest,
+    is_revision,
+    is_strict_int,
+)
 from .harbor_environment import (
     PinnedRelayDockerEnvironment as _PinnedRelayDockerEnvironment,
 )
@@ -43,12 +55,8 @@ _PROFILES: dict[str, _Profile] = {
 }
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _EMPTY_AUTH = Path(__file__).with_name("empty-auth.json")
-_RELAY_SERVICE = "open-agent-lab-relay"
-_RELAY_SIDECAR = "/var/lib/open-agent-lab/provider-metadata.ndjson"
-_RELAY_SEAL = f"{_RELAY_SIDECAR}.sealed"
-_RELAY_TOKEN_FILE = f"{_RELAY_SIDECAR}.client-token"
-_RELAY_BOOTSTRAP_FILE = f"{_RELAY_SIDECAR}.bootstrap-ready"
-_RELAY_BUILD_ID_FILE = "/app/relay-build-id"
+_RELAY_TOKEN_FILE = f"{RELAY_JOURNAL_PATH}.client-token"
+_RELAY_BOOTSTRAP_FILE = f"{RELAY_JOURNAL_PATH}.bootstrap-ready"
 _RELAY_AUTHORIZE_COMMAND = "kill -USR1 1"
 _RELAY_BOOTSTRAP_COMMAND = f"cat {_RELAY_BOOTSTRAP_FILE}"
 _RELAY_TOKEN_COMMAND = (
@@ -70,42 +78,37 @@ if (
 ):
     raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
 _VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
-_EXPERIMENT_ID = "terminal-bench-2.1-verify-instruction-v1"
 _HARBOR_VERSION = "0.22.0"
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CAPABILITY = re.compile(r"^[0-9a-f]{64}$")
-_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_RUN_BINDING_KEYS = {
-    "schema_version",
-    "experiment_id",
-    "replication_id",
-    "source_revision",
-    "experiment_manifest_sha256",
-    "relay_build_sha256",
-    "relay_image_sha256",
-    "preflight_sha256",
-    "task_snapshots_sha256",
-}
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _EXPERIMENT_MANIFEST = (
     _REPOSITORY_ROOT / "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 )
 
 
+def _pinned_environment(
+    environment: BaseEnvironment,
+) -> _PinnedRelayDockerEnvironment:
+    if type(environment) is not _PinnedRelayDockerEnvironment:
+        raise TypeError(
+            "OpenAgentLabCodex requires the exact PinnedRelayDockerEnvironment runtime."
+        )
+    return cast(_PinnedRelayDockerEnvironment, environment)
+
+
 def _run_binding(value: dict[str, Any] | None) -> dict[str, Any] | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != _RUN_BINDING_KEYS:
+    if not isinstance(value, dict) or set(value) != RUN_BINDING_KEYS:
         raise ValueError("run_binding has an invalid schema.")
     if (
-        type(value["schema_version"]) is not int
+        not is_strict_int(value["schema_version"])
         or value["schema_version"] != 1
-        or value["experiment_id"] != _EXPERIMENT_ID
+        or value["experiment_id"] != EXPERIMENT_ID
         or value["replication_id"] not in {"screen-v1", "mirror-v1"}
-        or not isinstance(value["source_revision"], str)
-        or not _SOURCE_REVISION.fullmatch(value["source_revision"])
+        or not is_revision(value["source_revision"])
         or any(
-            not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key])
+            not is_digest(value[key])
             for key in (
                 "experiment_manifest_sha256",
                 "relay_build_sha256",
@@ -137,10 +140,9 @@ def _bootstrap_identity(raw: str) -> dict[str, Any]:
         not isinstance(value, dict)
         or set(value)
         != {"schemaVersion", "buildId", "provider", "model", "capabilityId"}
-        or type(value["schemaVersion"]) is not int
+        or not is_strict_int(value["schemaVersion"])
         or value["schemaVersion"] != 1
-        or not isinstance(value["buildId"], str)
-        or not _DIGEST.fullmatch(value["buildId"])
+        or not is_digest(value["buildId"])
         or not isinstance(value["provider"], str)
         or not isinstance(value["model"], str)
         or not isinstance(value["capabilityId"], str)
@@ -175,7 +177,7 @@ def _relay_capability(raw: str, capability_id: str) -> str:
     if (
         not isinstance(value, dict)
         or set(value) != {"schemaVersion", "capabilityId", "bearer"}
-        or type(value["schemaVersion"]) is not int
+        or not is_strict_int(value["schemaVersion"])
         or value["schemaVersion"] != 1
         or value["capabilityId"] != capability_id
         or not isinstance(value["bearer"], str)
@@ -215,8 +217,7 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
             raise TypeError("relayBuildIds has an invalid schema")
         allowed_relay_build_ids = set(relay_build_ids.values())
         if len(allowed_relay_build_ids) != 2 or any(
-            not isinstance(value, str) or not _DIGEST.fullmatch(value)
-            for value in allowed_relay_build_ids
+            not is_digest(value) for value in allowed_relay_build_ids
         ):
             raise ValueError("relayBuildIds has invalid values")
         if (
@@ -238,6 +239,8 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
         != configured_root / "benchmarks/terminal_bench/harbor_agent.py"
         or Path(_harbor_environment.__file__).resolve(strict=True)
         != configured_root / "benchmarks/terminal_bench/harbor_environment.py"
+        or Path(_experiment_contract.__file__).resolve(strict=True)
+        != configured_root / "benchmarks/terminal_bench/experiment_contract.py"
         or _PinnedRelayDockerEnvironment.__module__
         != "benchmarks.terminal_bench.harbor_environment"
     ):
@@ -263,7 +266,7 @@ def _relay_url(env: dict[str, str]) -> str:
     ):
         raise ValueError(f"{_RELAY_URL_ENV} must be one fixed /v1 endpoint.")
     if parsed.scheme == "http" and parsed.hostname not in {
-        _RELAY_SERVICE,
+        RELAY_SERVICE,
         "127.0.0.1",
         "localhost",
         "::1",
@@ -389,11 +392,12 @@ class OpenAgentLabCodex(Codex):
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
+        environment = _pinned_environment(environment)
         binding = self._validate_request_source()
         await super().setup(environment)
         build_result = await environment.service_exec(
-            f"cat {_RELAY_BUILD_ID_FILE}",
-            service=_RELAY_SERVICE,
+            f"cat {RELAY_BUILD_ID_PATH}",
+            service=RELAY_SERVICE,
             timeout_sec=10,
             user="1000",
         )
@@ -404,7 +408,7 @@ class OpenAgentLabCodex(Codex):
             raise RuntimeError("Relay build identity does not match the preflight.")
         bootstrap_result = await environment.service_exec(
             _RELAY_BOOTSTRAP_COMMAND,
-            service=_RELAY_SERVICE,
+            service=RELAY_SERVICE,
             timeout_sec=10,
             user="0",
         )
@@ -424,7 +428,7 @@ class OpenAgentLabCodex(Codex):
         self._validate_request_source()
         authorization = await environment.service_exec(
             _RELAY_AUTHORIZE_COMMAND,
-            service=_RELAY_SERVICE,
+            service=RELAY_SERVICE,
             timeout_sec=10,
             user="0",
         )
@@ -432,7 +436,7 @@ class OpenAgentLabCodex(Codex):
             raise RuntimeError("Relay refused post-validation authorization.")
         token_result = await environment.service_exec(
             _RELAY_TOKEN_COMMAND,
-            service=_RELAY_SERVICE,
+            service=RELAY_SERVICE,
             timeout_sec=25,
             user="1000",
         )
@@ -452,6 +456,7 @@ class OpenAgentLabCodex(Codex):
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
+        environment = _pinned_environment(environment)
         primary_error: BaseException | None = None
         try:
             self._validate_request_source()
@@ -486,14 +491,15 @@ class OpenAgentLabCodex(Codex):
         return self._open_agent_lab_run_binding
 
     async def _seal_and_retain(self, environment: BaseEnvironment) -> None:
+        environment = _pinned_environment(environment)
         command = (
-            f"kill -USR2 1 && i=0; while [ ! -f {_RELAY_SEAL} ]; do "
+            f"kill -USR2 1 && i=0; while [ ! -f {RELAY_SEAL_PATH} ]; do "
             'i=$((i+1)); [ "$i" -lt 150 ] || exit 1; sleep 0.1; done'
         )
         async with asyncio.timeout(20):
             result = await environment.service_exec(
                 command,
-                service=_RELAY_SERVICE,
+                service=RELAY_SERVICE,
                 timeout_sec=20,
                 user="1000",
             )
@@ -507,7 +513,7 @@ class OpenAgentLabCodex(Codex):
             async def retain(source: str, target: Path) -> None:
                 encoded = await environment.service_exec(
                     f"base64 -w0 {source}",
-                    service=_RELAY_SERVICE,
+                    service=RELAY_SERVICE,
                     timeout_sec=10,
                     user="1000",
                 )
@@ -524,8 +530,8 @@ class OpenAgentLabCodex(Codex):
                     ) from error
                 target.write_bytes(content)
 
-            await retain(_RELAY_SIDECAR, journal_path)
-            await retain(_RELAY_SEAL, seal_path)
+            await retain(RELAY_JOURNAL_PATH, journal_path)
+            await retain(RELAY_SEAL_PATH, seal_path)
             journal_path.chmod(0o600)
             seal_path.chmod(0o600)
 

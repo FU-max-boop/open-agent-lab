@@ -16,6 +16,10 @@ from harbor.models.job.result import JobResult, JobStats
 from harbor.models.trial.result import TrialResult
 
 from benchmarks.terminal_bench import paired_results as paired
+from benchmarks.terminal_bench.experiment_contract import (
+    ENVIRONMENT_IMPORT,
+    EXPERIMENT_ID,
+)
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 
 
@@ -321,7 +325,7 @@ def _trial_lock(
         "skills": [],
         "environment": {
             "type": "docker",
-            "import_path": paired._ENVIRONMENT_IMPORT,
+            "import_path": ENVIRONMENT_IMPORT,
             "force_build": False,
             "delete": True,
             "cpu_enforcement_policy": "auto",
@@ -673,7 +677,7 @@ class RunFixture:
             (task_path / "task.toml").write_text("[task]\n")
         self.preflight = {
             "schemaVersion": 1,
-            "experimentId": paired._EXPERIMENT,
+            "experimentId": EXPERIMENT_ID,
             "replicationId": replication,
             "sourceRevision": source,
             "experimentManifestSha256": manifest_sha,
@@ -686,7 +690,7 @@ class RunFixture:
         preflight_sha = paired._digest(self.preflight)
         self.binding = {
             "schema_version": 1,
-            "experiment_id": paired._EXPERIMENT,
+            "experiment_id": EXPERIMENT_ID,
             "replication_id": replication,
             "source_revision": source,
             "experiment_manifest_sha256": manifest_sha,
@@ -743,7 +747,7 @@ class RunFixture:
             compose_path.write_text(compose_text)
             compose_sha256 = paired._digest_bytes(compose_text.encode())
             config["environment"]["extra_docker_compose"] = [str(compose_path)]
-            config["environment"]["import_path"] = paired._ENVIRONMENT_IMPORT
+            config["environment"]["import_path"] = ENVIRONMENT_IMPORT
             config["environment"]["kwargs"] = {
                 "relay_compose_sha256": compose_sha256,
                 "run_binding": self.binding,
@@ -952,7 +956,7 @@ class RunFixture:
                         trial_dir / "environment-cleanup.json",
                         {
                             "schemaVersion": 1,
-                            "experimentId": paired._EXPERIMENT,
+                            "experimentId": EXPERIMENT_ID,
                             "replicationId": replication,
                             "sourceRevision": source,
                             "experimentManifestSha256": manifest_sha,
