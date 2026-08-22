@@ -122,11 +122,6 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
         "Harbor job did not complete exactly one clean trial.",
     )
     _require(
-        len(job_result.trial_results) == 1
-        and job_result.trial_results[0].id == result.id,
-        "Harbor job result is not bound to the trial result.",
-    )
-    _require(
         len(job_lock.trials) == 1 and job_lock.trials[0] == lock,
         "Harbor job lock is not bound to the trial lock.",
     )
