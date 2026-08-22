@@ -18,6 +18,9 @@ import {
   verifyEvidenceBundle,
   writeEvidenceBundle,
 } from "@open-agent-lab/evidence";
+import type { KernelEventV1, KernelStateSnapshotV1 } from "@open-agent-lab/kernel";
+
+import { runSmokeKernel, smokeWorkspaceDigest, sortLines } from "./smoke-kernel.js";
 
 interface SmokeTask {
   id: string;
@@ -52,6 +55,7 @@ export interface SmokeRunSummary {
   outputDirectory: string;
   manifest: EvidenceManifestV1;
   result: SmokeResult;
+  kernelState: Readonly<KernelStateSnapshotV1>;
 }
 
 export interface SmokeReplaySummary {
@@ -60,6 +64,7 @@ export interface SmokeReplaySummary {
   taskId: string;
   success: true;
   eventCount: number;
+  kernelEventCount: number;
 }
 
 const taskUrl = new URL("../../../benchmarks/smoke/task.json", import.meta.url);
@@ -101,12 +106,6 @@ async function loadSmokeTask(): Promise<SmokeTask> {
   return parseSmokeTask(JSON.parse(raw) as unknown);
 }
 
-function sortLines(input: string): string {
-  const lines = input.split("\n").filter((line) => line.length > 0);
-  lines.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
-  return `${lines.join("\n")}\n`;
-}
-
 function timestampAt(createdAt: string, sequence: number): string {
   const epoch = Date.parse(createdAt);
   if (!Number.isFinite(epoch)) {
@@ -115,20 +114,14 @@ function timestampAt(createdAt: string, sequence: number): string {
   return new Date(epoch + sequence).toISOString();
 }
 
-function event(
-  runId: string,
-  createdAt: string,
-  sequence: number,
-  type: string,
-  data: JsonObject,
-): RunEventV1 {
+function projectKernelEvent(entry: KernelEventV1): RunEventV1 {
   return {
     schemaVersion: RUN_EVENT_VERSION,
-    runId,
-    sequence,
-    timestamp: timestampAt(createdAt, sequence),
-    type,
-    data,
+    runId: entry.runId,
+    sequence: entry.sequence,
+    timestamp: entry.timestamp,
+    type: entry.type,
+    data: entry.data,
   };
 }
 
@@ -147,20 +140,25 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
 
   try {
     const inputPath = join(workspace, "input.txt");
-    const outputPath = join(workspace, "output.txt");
     await writeFile(inputPath, task.input, { encoding: "utf8", flag: "wx" });
-    const observedInput = await readFile(inputPath, "utf8");
-    const output = sortLines(observedInput);
-    await writeFile(outputPath, output, { encoding: "utf8", flag: "wx" });
-    const observedOutput = await readFile(outputPath, "utf8");
+    let kernelSequence = 0;
+    const kernel = await runSmokeKernel({
+      workspace,
+      runId,
+      taskDigest: taskIdentity,
+      expectedOutput: task.expectedOutput,
+      createdAt,
+      clock: () => timestampAt(createdAt, kernelSequence++),
+    });
+    const observedInput = kernel.input;
+    const observedOutput = kernel.output;
 
     const inputSha256 = sha256(observedInput);
     const outputSha256 = sha256(observedOutput);
     const expectedOutputSha256 = sha256(task.expectedOutput);
-    const exactBytes = observedOutput === task.expectedOutput;
-    const trailingNewline = observedOutput.endsWith("\n");
-    const sorted = observedOutput === sortLines(observedOutput);
+    const { exactBytes, trailingNewline, sorted } = kernel.checks;
     const success = exactBytes && trailingNewline && sorted;
+    const events = kernel.journal.map(projectKernelEvent);
 
     const spec: RunSpecV1 = {
       schemaVersion: RUN_SPEC_VERSION,
@@ -176,9 +174,9 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
         },
       },
       agent: {
-        name: "open-agent-lab-scripted-driver",
+        name: "open-agent-lab-recoverable-kernel",
         version: "0.0.0",
-        revision: "sort-lines-bytewise-v1",
+        revision: "sqlite-kernel-sort-lines-v1",
       },
       model: {
         provider: "scripted",
@@ -186,7 +184,7 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
         parameters: { temperature: 0 },
       },
       limits: {
-        maxSteps: 9,
+        maxSteps: events.length,
         wallTimeMs: 10_000,
         maxInputTokens: 0,
         maxOutputTokens: 0,
@@ -194,35 +192,10 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
       },
       metadata: {
         network: "disabled",
+        recoverableKernel: true,
         taskRevision: task.revision,
       },
     };
-
-    const events: RunEventV1[] = [
-      event(runId, createdAt, 0, "run.started", { taskId: task.id }),
-      event(runId, createdAt, 1, "model.requested", { instruction: task.instruction }),
-      event(runId, createdAt, 2, "model.responded", {
-        plan: ["read input.txt", "sort non-empty lines", "write output.txt", "verify exact bytes"],
-      }),
-      event(runId, createdAt, 3, "tool.started", { tool: "workspace.read", path: "input.txt" }),
-      event(runId, createdAt, 4, "tool.completed", {
-        tool: "workspace.read",
-        path: "input.txt",
-        sha256: inputSha256,
-      }),
-      event(runId, createdAt, 5, "tool.started", { tool: "workspace.write", path: "output.txt" }),
-      event(runId, createdAt, 6, "tool.completed", {
-        tool: "workspace.write",
-        path: "output.txt",
-        sha256: outputSha256,
-      }),
-      event(runId, createdAt, 7, "verification.completed", {
-        exactBytes,
-        trailingNewline,
-        sorted,
-      }),
-      event(runId, createdAt, 8, "run.completed", { status: success ? "succeeded" : "failed" }),
-    ];
 
     const result: SmokeResult = {
       schemaVersion: "smoke-result/v1",
@@ -275,6 +248,20 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
           role: "result",
         },
         {
+          path: "kernel-state.json",
+          content: json(kernel.state as unknown as JsonValue),
+          mediaType: "application/json",
+          role: "kernel-state",
+        },
+        {
+          path: "kernel-events.jsonl",
+          content: kernel.journal
+            .map((entry) => canonicalJson(entry as unknown as JsonValue))
+            .join("\n") + "\n",
+          mediaType: "application/x-ndjson",
+          role: "kernel-event-log",
+        },
+        {
           path: "replay.json",
           content: json(replay as unknown as JsonValue),
           mediaType: "application/json",
@@ -294,13 +281,13 @@ export async function runSmoke(options: RunSmokeOptions): Promise<SmokeRunSummar
         },
       ],
       metadata: {
-        profile: "deterministic-smoke/v1",
+        profile: "deterministic-smoke/v2",
         network: "disabled",
         success: true,
       },
     });
 
-    return { outputDirectory: options.outputDirectory, manifest, result };
+    return { outputDirectory: options.outputDirectory, manifest, result, kernelState: kernel.state };
   } finally {
     await rm(workspace, { force: true, recursive: true });
   }
@@ -311,9 +298,16 @@ export async function replaySmokeEvidence(directory: string): Promise<SmokeRepla
   const task = parseSmokeTask(JSON.parse(await readFile(join(directory, "task.json"), "utf8")) as unknown);
   const spec = parseJsonObject<RunSpecV1>(await readFile(join(directory, "run-spec.json"), "utf8"), "Run spec");
   const result = parseJsonObject<SmokeResult>(await readFile(join(directory, "result.json"), "utf8"), "Smoke result");
+  const kernelState = parseJsonObject<KernelStateSnapshotV1>(
+    await readFile(join(directory, "kernel-state.json"), "utf8"),
+    "Kernel state",
+  );
   const input = await readFile(join(directory, "workspace/input.txt"), "utf8");
   const output = await readFile(join(directory, "workspace/output.txt"), "utf8");
   const eventLines = (await readFile(join(directory, "events.jsonl"), "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0);
+  const kernelEventLines = (await readFile(join(directory, "kernel-events.jsonl"), "utf8"))
     .split("\n")
     .filter((line) => line.length > 0);
 
@@ -322,6 +316,24 @@ export async function replaySmokeEvidence(directory: string): Promise<SmokeRepla
   }
   if (spec.task.id !== task.id || result.taskId !== task.id) {
     throw new Error("Smoke evidence task IDs do not agree.");
+  }
+  const taskDigest = sha256(canonicalJson(task as unknown as JsonValue));
+  if (
+    kernelState.runId !== spec.runId ||
+    kernelState.taskDigest !== taskDigest ||
+    kernelState.lifecycle !== "succeeded" ||
+    !Array.isArray(kernelState.completed) ||
+    kernelState.completed.length !== 2 ||
+    kernelState.completed[0]?.invocation.toolName !== "workspace.read" ||
+    kernelState.completed[1]?.invocation.toolName !== "workspace.create" ||
+    kernelState.verification?.passed !== true ||
+    kernelState.verification.runId !== spec.runId ||
+    kernelState.verification.taskDigest !== taskDigest ||
+    kernelState.verification.verifierId !== "deterministic-smoke" ||
+    kernelState.verification.verifierVersion !== "1" ||
+    kernelState.verification.workspaceDigest !== smokeWorkspaceDigest(input, output)
+  ) {
+    throw new Error("Smoke kernel state is incomplete or not bound to the evidence.");
   }
   if (input !== task.input || output !== sortLines(input) || output !== task.expectedOutput) {
     throw new Error("Smoke replay output does not match the deterministic task contract.");
@@ -342,8 +354,37 @@ export async function replaySmokeEvidence(directory: string): Promise<SmokeRepla
     }
     return parsed;
   });
-  if (events.length !== spec.limits.maxSteps || events.at(-1)?.type !== "run.completed") {
+  if (events.length !== spec.limits.maxSteps) {
     throw new Error("Smoke event log is incomplete.");
+  }
+  let previousEventHash: string | null = null;
+  const kernelEvents = kernelEventLines.map((line, index) => {
+    const parsed = parseJsonObject<KernelEventV1>(line, `Kernel event ${index}`);
+    const { eventHash, ...body } = parsed;
+    if (
+      parsed.runId !== spec.runId ||
+      parsed.sequence !== index ||
+      parsed.previousEventHash !== previousEventHash ||
+      eventHash !== sha256(canonicalJson(body as unknown as JsonValue))
+    ) {
+      throw new Error(`Kernel event ${index} is not a valid hash-chain entry.`);
+    }
+    previousEventHash = eventHash;
+    return parsed;
+  });
+  if (
+    kernelEvents.map((entry) => entry.type).join(",") !==
+      "run.created,tool.intent,tool.completed,tool.intent,tool.completed,verification.completed"
+  ) {
+    throw new Error("Smoke kernel journal is incomplete.");
+  }
+  if (
+    events.length !== kernelEvents.length ||
+    events.some((entry, index) =>
+      canonicalJson(entry as unknown as JsonValue) !==
+      canonicalJson(projectKernelEvent(kernelEvents[index]!) as unknown as JsonValue))
+  ) {
+    throw new Error("Smoke event log is not a projection of the kernel journal.");
   }
 
   return {
@@ -352,6 +393,7 @@ export async function replaySmokeEvidence(directory: string): Promise<SmokeRepla
     taskId: task.id,
     success: true,
     eventCount: events.length,
+    kernelEventCount: kernelEvents.length,
   };
 }
 

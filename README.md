@@ -8,19 +8,21 @@ dependency. The intended system combines repository work, terminal execution,
 and browser interaction in one resumable task runtime, with machine-checkable
 outcomes and auditable evidence.
 
-**Status: kernel bootstrap.** The repository now contains versioned run/event
-contracts, a strict content-addressed evidence bundle, and a provider-free
-`run -> verify -> replay` smoke path. There is still no installable release or
-public benchmark result. This repository must not be cited as outperforming
-another agent, appearing on an official leaderboard, or completing OSWorld.
-Those are targets, not current claims.
+**Status: recoverable-kernel bootstrap.** The repository now contains versioned
+run/event contracts, a strict content-addressed evidence bundle, a provider-free
+`run -> verify -> replay` smoke path, and a SQLite-backed recoverable task
+kernel. The provider-free smoke now runs through the kernel, broker, independent
+verifier, and evidence writer. There is still no installable release or public
+benchmark result. This repository must not be cited as outperforming another
+agent, appearing on an official leaderboard, or completing OSWorld. Those are
+targets, not current claims.
 
 "Codex-class" describes the intended breadth of the workflow; it does not imply
 affiliation with or equivalence to OpenAI Codex.
 
 ## Quick start
 
-Requirements: Node.js 20.19 or newer and pnpm 10.34.5.
+Requirements: Node.js 20.19 or later within Node 20, and pnpm 10.34.5.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -139,6 +141,8 @@ Detailed exit criteria live in [CHARTER.md](CHARTER.md).
 - [BENCHMARK_PROTOCOL.md](BENCHMARK_PROTOCOL.md): fair-comparison and publication
   rules
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution and benchmark-integrity rules
+- [ROADMAP.md](ROADMAP.md): current two-week gate and its exit criteria
+- [docs/decisions](docs/decisions): accepted persistence and recovery decisions
 
 ## License
 

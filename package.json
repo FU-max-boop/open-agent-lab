@@ -6,16 +6,17 @@
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=20.19.0 <21"
   },
   "scripts": {
-    "build": "tsc -b packages/contracts packages/evidence packages/model-driver apps/cli",
-    "clean": "tsc -b --clean packages/contracts packages/evidence packages/model-driver apps/cli",
-    "typecheck": "tsc -b --pretty false packages/contracts packages/evidence packages/model-driver apps/cli && tsc -p packages/model-driver/tsconfig.test.json --pretty false",
+    "build": "tsc -b packages/contracts packages/evidence packages/model-driver packages/tool-broker packages/kernel apps/cli",
+    "clean": "tsc -b --clean packages/contracts packages/evidence packages/model-driver packages/tool-broker packages/kernel apps/cli",
+    "typecheck": "tsc -b --pretty false packages/contracts packages/evidence packages/model-driver packages/tool-broker packages/kernel apps/cli && tsc -p packages/model-driver/tsconfig.test.json --pretty false && tsc -p packages/tool-broker/tsconfig.test.json --pretty false && tsc -p packages/kernel/tsconfig.test.json --pretty false && tsc -p apps/cli/tsconfig.test.json --pretty false",
     "test": "tsx --test packages/*/test/*.test.ts apps/*/test/*.test.ts",
     "check": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "^20.19.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"

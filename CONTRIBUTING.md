@@ -14,7 +14,8 @@ tasks, hidden tests, model weights, or vendor code into this repository.
 
 ## Development setup
 
-Use Node.js 20.19 or newer and pnpm 10.34.5. From the repository root:
+Use Node.js 20.19 or later within Node 20, and pnpm 10.34.5. From the
+repository root:
 
 ```bash
 pnpm install --frozen-lockfile
