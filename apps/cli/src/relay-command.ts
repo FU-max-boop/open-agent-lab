@@ -89,14 +89,16 @@ export async function readVerifiedBuildId(
 }
 
 async function authorizationSignal(ready: () => Promise<void>): Promise<void> {
+  const keepAlive = setInterval(() => undefined, 60_000);
   let authorize = (): void => undefined;
   let abort = (): void => undefined;
+  const cleanup = (): void => {
+    process.off("SIGUSR1", authorize);
+    process.off("SIGINT", abort);
+    process.off("SIGTERM", abort);
+    clearInterval(keepAlive);
+  };
   const signal = new Promise<void>((resolveSignal, rejectSignal) => {
-    const cleanup = (): void => {
-      process.off("SIGUSR1", authorize);
-      process.off("SIGINT", abort);
-      process.off("SIGTERM", abort);
-    };
     authorize = (): void => {
       cleanup();
       resolveSignal();
@@ -113,9 +115,7 @@ async function authorizationSignal(ready: () => Promise<void>): Promise<void> {
     await ready();
     await signal;
   } catch (error) {
-    process.off("SIGUSR1", authorize);
-    process.off("SIGINT", abort);
-    process.off("SIGTERM", abort);
+    cleanup();
     throw error;
   }
 }

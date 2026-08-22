@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -11,8 +14,8 @@ import {
   runRelayCommand,
 } from "../src/relay-command.js";
 
-async function waitForFile(path: string): Promise<string> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForFile(path: string, attempts = 100): Promise<string> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       return await readFile(path, "utf8");
     } catch (error) {
@@ -118,6 +121,54 @@ test("relay authorization gates all secret-dependent startup", async () => {
       /expected provider and model/u,
     );
   } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
+test("relay authorization keeps an otherwise idle process alive", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-relay-"));
+  const buildFile = join(directory, "build-id");
+  const sidecar = join(directory, "provider-metadata.ndjson");
+  const buildId = `sha256:${"c".repeat(64)}`;
+  const source = pathToFileURL(join(process.cwd(), "apps/cli/src/relay-command.ts")).href;
+  const script = `
+    import { awaitRelayAuthorization } from ${JSON.stringify(source)};
+    const args = ${JSON.stringify([
+      "--provider",
+      "deepseek",
+      "--model",
+      "deepseek-v4-pro",
+      "--build-id-file",
+      buildFile,
+      "--output",
+      sidecar,
+    ])};
+    await awaitRelayAuthorization(
+      args,
+      { OAL_EXPECTED_RELAY_BUILD_ID: ${JSON.stringify(buildId)} },
+      { provider: "deepseek", model: "deepseek-v4-pro" },
+    ).catch((error) => {
+      if (!(error instanceof Error) || !error.message.includes("was interrupted")) throw error;
+    });
+  `;
+  await writeFile(buildFile, `${buildId}\n`);
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    stdio: "ignore",
+  });
+  try {
+    await waitForFile(`${sidecar}.bootstrap-ready`, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(child.exitCode, null);
+    assert.equal(child.kill("SIGTERM"), true);
+    const [code, signal] = await once(child, "exit");
+    assert.equal(signal, null);
+    assert.equal(code, 0);
+  } finally {
+    if (child.exitCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+    }
     await rm(directory, { recursive: true });
   }
 });
