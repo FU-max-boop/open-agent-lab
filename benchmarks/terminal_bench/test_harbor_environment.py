@@ -16,6 +16,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import yaml
 from harbor.environments.docker.docker import DockerEnvironment
 
+from benchmarks.terminal_bench.codex_runtime import (
+    CODEX_RUNTIME_INSTALL_ROOT,
+    CODEX_RUNTIME_PREPARED_RELATIVE,
+    codex_runtime_spec,
+)
 from benchmarks.terminal_bench.experiment_contract import (
     EXPERIMENT_ID,
     canonical_json,
@@ -37,6 +42,7 @@ from benchmarks.terminal_bench.harbor_environment import (
     _validate_compose_authority,
     _validate_prepared_source,
     _validated_compose_bytes,
+    _validated_mounts,
     _validated_run_binding,
     _write_cleanup_receipt,
 )
@@ -137,6 +143,72 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             path.symlink_to(target)
             with self.assertRaisesRegex(ValueError, "symlinks"):
                 _validated_compose_bytes(path, digest, binding)
+
+    def test_only_run_local_logs_and_frozen_runtime_mounts_are_authorized(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            prepared = Path(raw).resolve()
+            runtime = prepared / CODEX_RUNTIME_PREPARED_RELATIVE
+            runtime.mkdir(parents=True)
+            trial = prepared / "jobs" / "trial"
+            trial_paths = SimpleNamespace(
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            )
+            logs = [
+                trial_paths.verifier_dir,
+                trial_paths.agent_dir,
+                trial_paths.artifacts_dir / "logs" / "artifacts",
+            ]
+            for path in logs:
+                path.mkdir(parents=True)
+            mounts = [
+                {"type": "bind", "source": str(source), "target": target}
+                for source, target in zip(
+                    logs,
+                    ("/logs/verifier", "/logs/agent", "/logs/artifacts"),
+                    strict=True,
+                )
+            ] + [
+                {
+                    "type": "bind",
+                    "source": str(runtime),
+                    "target": CODEX_RUNTIME_INSTALL_ROOT,
+                    "read_only": True,
+                }
+            ]
+            self.assertEqual(_validated_mounts(mounts, prepared, trial_paths), mounts)
+
+            attacks = []
+            writable = [dict(item) for item in mounts]
+            writable[-1].pop("read_only")
+            attacks.append(writable)
+            wrong_target = [dict(item) for item in mounts]
+            wrong_target[-1]["target"] = "/usr/local/bin"
+            attacks.append(wrong_target)
+            extra = [dict(item) for item in mounts]
+            extra.append(
+                {"type": "bind", "source": str(prepared), "target": "/workspace"}
+            )
+            attacks.append(extra)
+            outside = [dict(item) for item in mounts]
+            outside[0]["source"] = str(prepared.parent)
+            attacks.append(outside)
+            writable_runtime_alias = [dict(item) for item in mounts]
+            writable_runtime_alias[0]["source"] = str(runtime)
+            attacks.append(writable_runtime_alias)
+            for attack in attacks:
+                with self.subTest(attack=attack), self.assertRaises(ValueError):
+                    _validated_mounts(attack, prepared, trial_paths)
+
+            trial_paths.agent_dir.rmdir()
+            trial_paths.agent_dir.symlink_to(runtime, target_is_directory=True)
+            symlink_alias = [dict(item) for item in mounts]
+            symlink_alias[1]["source"] = str(runtime)
+            with self.assertRaisesRegex(ValueError, "authority"):
+                _validated_mounts(symlink_alias, prepared, trial_paths)
 
     def test_live_task_snapshot_and_image_are_content_addressed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -793,6 +865,8 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             module.write_text("# frozen module\n")
             contract = module.with_name("experiment_contract.py")
             contract.write_text("# frozen contract\n")
+            runtime_module = module.with_name("codex_runtime.py")
+            runtime_module.write_text("# frozen runtime\n")
             build = "sha256:" + "c" * 64
             runtime = {
                 "terminal-bench/example": {
@@ -825,8 +899,14 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                     "benchmarks/terminal_bench/experiment_contract.py": digest_bytes(
                         contract.read_bytes()
                     ),
+                    "benchmarks/terminal_bench/codex_runtime.py": digest_bytes(
+                        runtime_module.read_bytes()
+                    ),
                 },
-                "runtime": {"hermeticCodexRuntimeReady": True},
+                "runtime": {
+                    "hermeticCodexRuntimeReady": True,
+                    "codexRuntime": codex_runtime_spec(),
+                },
                 "taskRuntimeBindings": runtime,
             }
             manifest_path = module.with_name("verify-instruction-v1.experiment.json")
@@ -895,10 +975,17 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 },
                 "relayImageTags": _relay_image_tags(output, revision),
                 "taskSnapshots": snapshots,
+                "codexRuntime": {"verified": True},
                 "providers": [],
             }
             (output / "run-record.json").write_bytes(canonical_json(record) + b"\n")
-            with patch.dict(os.environ, {"OPEN_AGENT_LAB_REPO_ROOT": str(root)}):
+            with (
+                patch.dict(os.environ, {"OPEN_AGENT_LAB_REPO_ROOT": str(root)}),
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.verify_tree",
+                    return_value={"verified": True},
+                ),
+            ):
                 _validate_prepared_source(binding, root)
                 module.write_text("# drift\n")
                 with self.assertRaisesRegex(RuntimeError, "identity|drifted"):

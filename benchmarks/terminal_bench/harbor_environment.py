@@ -27,6 +27,12 @@ from harbor.environments.docker.docker import (
 )
 from harbor.publisher.packager import Packager
 
+from .codex_runtime import (
+    CODEX_RUNTIME_INSTALL_ROOT,
+    CODEX_RUNTIME_PREPARED_RELATIVE,
+    validate_codex_runtime_spec,
+    verify_tree,
+)
 from .experiment_contract import (
     EXPERIMENT_ID,
     PREFLIGHT_KEYS,
@@ -83,6 +89,9 @@ _DOCKER_AUTH_ENV = {
 _SECRET_ENV = re.compile(
     r"(?:API[_-]?KEY|TOKEN|SECRET|PASSW|PRIVATE[_-]?KEY|CREDENTIAL)",
     re.IGNORECASE,
+)
+_STANDARD_MOUNT_TARGETS = frozenset(
+    {"/logs/verifier", "/logs/agent", "/logs/artifacts"}
 )
 
 
@@ -397,6 +406,83 @@ def _assert_runtime_gate(
         raise RuntimeError("Live work is blocked until Codex runtime bytes are frozen.")
 
 
+def _plain_directory(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    resolved = absolute.resolve(strict=True)
+    if resolved != absolute or not resolved.is_dir():
+        raise ValueError("Harbor log mount paths must be plain directories.")
+    return resolved
+
+
+def _validated_mounts(
+    mounts: object, prepared_root: Path, trial_paths: Any
+) -> list[dict[str, Any]]:
+    """Authorize only Harbor logs plus the frozen read-only Codex tree."""
+    if not isinstance(mounts, list) or len(mounts) != 4:
+        raise ValueError("Prepared runtime mounts are invalid.")
+    try:
+        expected_logs = {
+            "/logs/verifier": _plain_directory(trial_paths.verifier_dir),
+            "/logs/agent": _plain_directory(trial_paths.agent_dir),
+            "/logs/artifacts": _plain_directory(
+                trial_paths.artifacts_dir / "logs" / "artifacts"
+            ),
+        }
+    except (AttributeError, OSError, ValueError) as error:
+        raise ValueError("Harbor log mount authority is unavailable.") from error
+    expected_runtime = (prepared_root / CODEX_RUNTIME_PREPARED_RELATIVE).resolve(
+        strict=True
+    )
+    if (
+        len(set(expected_logs.values())) != 3
+        or expected_runtime in expected_logs.values()
+    ):
+        raise ValueError("Harbor log mount authority overlaps protected paths.")
+    verified: list[dict[str, Any]] = []
+    targets: set[str] = set()
+    for mount in mounts:
+        if not isinstance(mount, dict) or set(mount) not in (
+            {"type", "source", "target"},
+            {"type", "source", "target", "read_only"},
+        ):
+            raise ValueError("Prepared runtime mounts are invalid.")
+        source = mount.get("source")
+        target = mount.get("target")
+        if (
+            mount.get("type") != "bind"
+            or not isinstance(source, str)
+            or not isinstance(target, str)
+            or target in targets
+        ):
+            raise ValueError("Prepared runtime mounts are invalid.")
+        try:
+            absolute = Path(os.path.abspath(source))
+            resolved = absolute.resolve(strict=True)
+            resolved.relative_to(prepared_root)
+        except (OSError, ValueError) as error:
+            raise ValueError("Prepared runtime mount escapes its run.") from error
+        runtime_mount = (
+            target == CODEX_RUNTIME_INSTALL_ROOT
+            and resolved == expected_runtime
+            and resolved == absolute
+            and mount.get("read_only") is True
+        )
+        log_mount = (
+            target in _STANDARD_MOUNT_TARGETS
+            and resolved == expected_logs[target]
+            and resolved == absolute
+            and "read_only" not in mount
+            and resolved.is_dir()
+        )
+        if not runtime_mount and not log_mount:
+            raise ValueError("Prepared runtime mount target is unauthorized.")
+        targets.add(target)
+        verified.append(dict(mount))
+    if targets != {*_STANDARD_MOUNT_TARGETS, CODEX_RUNTIME_INSTALL_ROOT}:
+        raise ValueError("Prepared runtime mount set is incomplete.")
+    return verified
+
+
 def _live_task_authority(
     output: Path,
     task_dir: Path,
@@ -458,8 +544,13 @@ def _validate_prepared_source(
         manifest = _unique_json(manifest_bytes, "experiment manifest")
         file_hashes = manifest["fileSha256"]
         build_ids = manifest["relayBuildIds"]
+        runtime = manifest["runtime"]
+        if not isinstance(runtime, dict):
+            raise TypeError("runtime has an invalid schema")
+        runtime_spec = validate_codex_runtime_spec(runtime.get("codexRuntime"))
         module = root / "benchmarks" / "terminal_bench" / "harbor_environment.py"
         contract = root / "benchmarks" / "terminal_bench" / "experiment_contract.py"
+        runtime_module = root / "benchmarks" / "terminal_bench" / "codex_runtime.py"
         if (
             configured != root
             or not is_strict_int(manifest.get("schemaVersion"))
@@ -471,6 +562,8 @@ def _validate_prepared_source(
             != digest_bytes(_regular_bytes(module))
             or file_hashes.get("benchmarks/terminal_bench/experiment_contract.py")
             != digest_bytes(_regular_bytes(contract))
+            or file_hashes.get("benchmarks/terminal_bench/codex_runtime.py")
+            != digest_bytes(_regular_bytes(runtime_module))
             or not isinstance(build_ids, dict)
             or set(build_ids) != {"production", "providerFreeFixture"}
             or any(not is_digest(value) for value in build_ids.values())
@@ -478,6 +571,10 @@ def _validate_prepared_source(
             or binding["relay_build_sha256"] not in set(build_ids.values())
         ):
             raise ValueError("prepared source metadata drifted")
+        runtime_receipt = verify_tree(
+            root.parent / CODEX_RUNTIME_PREPARED_RELATIVE,
+            runtime_spec,
+        )
         matches: list[dict[str, Any]] = []
         record = _unique_json(
             _regular_bytes(root.parent / "run-record.json"), "run record"
@@ -494,6 +591,7 @@ def _validate_prepared_source(
                 "relayImages",
                 "relayImageTags",
                 "taskSnapshots",
+                "codexRuntime",
                 "providers",
             }
             or not is_strict_int(record.get("schemaVersion"))
@@ -504,6 +602,7 @@ def _validate_prepared_source(
             or len(set(relay_images.values())) != 2
             or record.get("relayImageTags")
             != _relay_image_tags(root.parent, binding["source_revision"])
+            or record.get("codexRuntime") != runtime_receipt
             or not isinstance(providers, list)
         ):
             raise ValueError("run record drifted")
@@ -1131,6 +1230,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         *args: Any,
         relay_compose_sha256: str,
         run_binding: dict[str, Any],
+        mounts: list[dict[str, Any]] | None = None,
         extra_docker_compose: Sequence[Path | str] | None = None,
         keep_containers: bool = False,
         **kwargs: Any,
@@ -1141,6 +1241,9 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         root = Path(__file__).resolve().parents[2]
         record, file_hashes, task_runtime, task_snapshots = _validate_prepared_source(
             binding, root
+        )
+        authorized_mounts = _validated_mounts(
+            mounts, root.parent, kwargs.get("trial_paths")
         )
         paths = list(extra_docker_compose or [])
         if len(paths) != 1:
@@ -1170,7 +1273,11 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         self._closed = False
         try:
             super().__init__(
-                *args, extra_docker_compose=[], keep_containers=False, **kwargs
+                *args,
+                mounts=authorized_mounts,
+                extra_docker_compose=[],
+                keep_containers=False,
+                **kwargs,
             )
             self._task_runtime = _live_task_authority(
                 root.parent,

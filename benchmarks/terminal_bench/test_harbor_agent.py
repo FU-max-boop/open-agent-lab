@@ -15,6 +15,13 @@ from harbor.models.job.config import JobConfig
 from harbor.models.task.id import PackageTaskId
 
 from benchmarks.terminal_bench import paired_results as paired
+from benchmarks.terminal_bench.codex_runtime import (
+    CODEX_RUNTIME_ENTRYPOINT,
+    CODEX_RUNTIME_SPEC_SHA256,
+    HARBOR_CODEX_EXEC_PREFIX,
+    build_full_tree_verification_command,
+    codex_runtime_spec,
+)
 from benchmarks.terminal_bench.harbor_agent import (
     _EXPERIMENT_MANIFEST,
     _PROFILES,
@@ -587,6 +594,24 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
     def test_sealed_relay_profile_does_not_claim_resume_support(self) -> None:
         self.assertFalse(OpenAgentLabCodex.SUPPORTS_RESUME)
 
+    def test_codex_version_is_exact_before_parent_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            for version in (None, "0.148.0", "latest", True):
+                with (
+                    self.subTest(version=version),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_harbor_runtime"
+                    ),
+                    patch.object(Codex, "__init__", autospec=True) as parent,
+                    self.assertRaisesRegex(ValueError, "exactly 0.149.0"),
+                ):
+                    OpenAgentLabCodex(
+                        Path(raw),
+                        model_name="zai/glm-5.3",
+                        version=version,  # type: ignore[arg-type]
+                    )
+                parent.assert_not_called()
+
     def test_verify_instruction_is_opt_in_and_uses_real_codex_config(self) -> None:
         common = {
             "model_name": "zai/glm-5.3",
@@ -791,6 +816,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             parent_setup = AsyncMock()
             parent_run = AsyncMock()
+            parent_exec = AsyncMock()
             retain = AsyncMock()
 
             class DerivedPinnedRelayDockerEnvironment(PinnedRelayDockerEnvironment):
@@ -800,6 +826,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 object(),
                 object.__new__(DerivedPinnedRelayDockerEnvironment),
             ):
+                with (
+                    patch.object(Codex, "exec_as_agent", new=parent_exec),
+                    self.assertRaisesRegex(
+                        TypeError, "exact PinnedRelayDockerEnvironment"
+                    ),
+                ):
+                    await agent.install(environment)  # type: ignore[arg-type]
+                parent_exec.assert_not_awaited()
+
                 with (
                     self.subTest(environment=type(environment).__name__),
                     patch(
@@ -835,6 +870,110 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     TypeError, "exact PinnedRelayDockerEnvironment"
                 ):
                     await agent._seal_and_retain(environment)  # type: ignore[arg-type]
+
+    async def test_install_only_verifies_the_frozen_native_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            parent_exec = AsyncMock()
+            environment = _pinned_environment_mock(None)
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "exec_as_agent", new=parent_exec),
+            ):
+                await agent.install(environment)
+
+            expected = (
+                build_full_tree_verification_command(codex_runtime_spec())
+                + f'; test "$({CODEX_RUNTIME_ENTRYPOINT} --version)" = '
+                '"codex-cli 0.149.0"'
+            )
+            parent_exec.assert_awaited_once_with(environment, command=expected)
+            self.assertNotIn("npm", expected)
+            self.assertNotIn("nvm", expected)
+            self.assertEqual(
+                agent.get_version_command(), f"{CODEX_RUNTIME_ENTRYPOINT} --version"
+            )
+
+    async def test_only_the_exact_harbor_launch_uses_the_frozen_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            parent_exec = AsyncMock(return_value="sentinel")
+            environment = _pinned_environment_mock(None)
+            suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
+            agent._codex_run_active = True
+            with patch.object(Codex, "exec_as_agent", new=parent_exec):
+                result = await agent.exec_as_agent(
+                    environment,
+                    HARBOR_CODEX_EXEC_PREFIX + suffix,
+                    env={"CODEX_HOME": "/tmp/codex"},
+                    cwd="/root",
+                    timeout_sec=7,
+                )
+                with self.assertRaisesRegex(RuntimeError, "exactly once"):
+                    await agent.exec_as_agent(
+                        environment, HARBOR_CODEX_EXEC_PREFIX + suffix
+                    )
+                for command in (
+                    "codex exec -- task",
+                    "/usr/bin/codex\t\texec -- task",
+                    "true; " + HARBOR_CODEX_EXEC_PREFIX + suffix,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "ambient Codex"):
+                        await agent.exec_as_agent(environment, command)
+
+            expected = (
+                build_full_tree_verification_command(codex_runtime_spec())
+                + f"; {CODEX_RUNTIME_ENTRYPOINT} exec {suffix}"
+            )
+            self.assertEqual(result, "sentinel")
+            self.assertNotIn("nvm", expected)
+            parent_exec.assert_awaited_once_with(
+                environment,
+                expected,
+                env={"CODEX_HOME": "/tmp/codex"},
+                cwd="/root",
+                timeout_sec=7,
+            )
+
+    async def test_successful_parent_run_must_launch_codex_once(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
+            retain = AsyncMock()
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "run", new=AsyncMock()),
+                patch.object(agent, "_seal_and_retain", new=retain),
+                self.assertRaisesRegex(RuntimeError, "did not launch exactly once"),
+            ):
+                await agent.run(
+                    "instruction", _pinned_environment_mock(None), AgentContext()
+                )
+            retain.assert_awaited_once()
+            self.assertFalse(agent._codex_run_active)
 
     async def test_setup_fetches_a_per_trial_token_before_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1164,9 +1303,13 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
             agent.logger.disabled = True
+
+            async def one_launch(*_args: object, **_kwargs: object) -> None:
+                agent._codex_launches = 1
+
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
-                patch.object(Codex, "run", new=AsyncMock()),
+                patch.object(Codex, "run", new=AsyncMock(side_effect=one_launch)),
                 patch.object(
                     agent,
                     "_seal_and_retain",
@@ -1240,6 +1383,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(binding["variant_id"], "control-v1")
             self.assertIsNone(binding["requested_developer_instructions_sha256"])
+            self.assertEqual(
+                binding["codex_runtime_spec_sha256"], CODEX_RUNTIME_SPEC_SHA256
+            )
             self.assertEqual(binding["run_binding"], _RUN_BINDING)
             self.assertEqual(
                 context.metadata["open_agent_lab_provider"]["agent_variant"],

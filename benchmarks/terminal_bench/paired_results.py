@@ -37,6 +37,16 @@ from harbor.models.trial.result import TrialResult
 from harbor.publisher.packager import Packager
 from harbor.tasks.client import TaskClient
 
+from .codex_runtime import (
+    CODEX_ARCHIVE_ENV,
+    CODEX_RUNTIME_INSTALL_ROOT,
+    CODEX_RUNTIME_PREPARED_RELATIVE,
+    CODEX_RUNTIME_SPEC_SHA256,
+    codex_runtime_spec,
+    prepare_tree,
+    validate_codex_runtime_spec,
+    verify_tree,
+)
 from .experiment_contract import (
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
@@ -55,7 +65,7 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:aef3ceccfc2f980278f8e06cf686892d2eaf07b3de014b4fc60af5eeab5132cb"
+    "sha256:5aaaa36f3e7e7537dd3664a205257bcff2b0a3d304bcdbd1f8f84e11865b7751"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = "0.149.0"
@@ -886,12 +896,23 @@ def _render_pinned_overlays(
     return rendered
 
 
+def _validated_codex_runtime(runtime: dict[str, Any]) -> dict[str, object]:
+    try:
+        validated = validate_codex_runtime_spec(runtime.get("codexRuntime"))
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("frozen Codex runtime specification drifted") from error
+    if not _same_json(validated, codex_runtime_spec()):
+        raise IntegrityError("frozen Codex runtime specification drifted")
+    return validated
+
+
 def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     path = root / _MANIFEST
     manifest = _mapping(_load(path), "experiment manifest")
     raw_hash = _digest_bytes(path.read_bytes())
     hashes = _mapping(manifest.get("fileSha256"), "fileSha256")
     runtime = _mapping(manifest.get("runtime"), "runtime")
+    _validated_codex_runtime(runtime)
     configs = _sequence(manifest.get("pairedConfigs"), "pairedConfigs")
     arms = _sequence(manifest.get("arms"), "arms")
     if (
@@ -1085,6 +1106,7 @@ def _bound_config(
     jobs_dir: Path,
     compose_path: Path,
     compose_sha256: str,
+    runtime_root: Path,
 ) -> dict[str, Any]:
     config["datasets"] = []
     config["tasks"] = [
@@ -1100,6 +1122,7 @@ def _bound_config(
     config["job_name"] = job_name
     config["jobs_dir"] = str(jobs_dir)
     environment = _mapping(config.get("environment"), "environment")
+    environment["mounts"] = [_codex_runtime_mount(runtime_root)]
     environment["extra_docker_compose"] = [str(compose_path)]
     environment["import_path"] = ENVIRONMENT_IMPORT
     environment["kwargs"] = {
@@ -1107,6 +1130,35 @@ def _bound_config(
         "run_binding": binding,
     }
     return config
+
+
+def _codex_runtime_mount(runtime_root: Path) -> dict[str, object]:
+    if not runtime_root.is_absolute():
+        raise IntegrityError("prepared Codex runtime path must be absolute")
+    return {
+        "type": "bind",
+        "source": str(runtime_root),
+        "target": CODEX_RUNTIME_INSTALL_ROOT,
+        "read_only": True,
+    }
+
+
+def _materialize_codex_runtime(
+    temp: Path, spec: object
+) -> tuple[Path, dict[str, object]]:
+    archive = os.environ.get(CODEX_ARCHIVE_ENV)
+    if not archive:
+        raise IntegrityError(f"{CODEX_ARCHIVE_ENV} must name the pinned Codex archive")
+    archive_path = Path(archive)
+    if not archive_path.is_absolute():
+        raise IntegrityError(f"{CODEX_ARCHIVE_ENV} must be an absolute path")
+    runtime_root = temp / CODEX_RUNTIME_PREPARED_RELATIVE
+    runtime_root.parent.mkdir(parents=True)
+    try:
+        receipt = prepare_tree(archive_path, runtime_root, spec)
+    except (OSError, TypeError, ValueError) as error:
+        raise IntegrityError("pinned Codex runtime preparation failed") from error
+    return runtime_root, receipt
 
 
 def _write_fixture_configs(
@@ -1119,6 +1171,7 @@ def _write_fixture_configs(
     fixture_image_id: str,
     fixture_compose_path: Path,
     fixture_compose_sha256: str,
+    runtime_root: Path,
 ) -> None:
     fixture_preflight = {
         **preflight,
@@ -1145,6 +1198,7 @@ def _write_fixture_configs(
             "run_binding": fixture_binding,
         }
         environment = _mapping(fixture.get("environment"), f"{name} environment")
+        environment["mounts"] = [_codex_runtime_mount(runtime_root)]
         environment["extra_docker_compose"] = [str(fixture_compose_path)]
         environment["import_path"] = ENVIRONMENT_IMPORT
         environment["kwargs"] = {
@@ -1166,6 +1220,9 @@ def _prepare_run(
 ) -> None:
     snapshot = _materialize_revision(root, revision, temp / "source")
     manifest, _, manifest_sha = _manifest(snapshot)
+    runtime_spec = validate_codex_runtime_spec(manifest["runtime"]["codexRuntime"])
+    _, runtime_receipt = _materialize_codex_runtime(temp, runtime_spec)
+    published_runtime_root = output / CODEX_RUNTIME_PREPARED_RELATIVE
     replication = _replication(manifest, replication_id)
     task_snapshots = _materialize_task_snapshots(temp)
     images = _build_relay_images(
@@ -1215,6 +1272,7 @@ def _prepare_run(
             output / "jobs" / provider,
             output / overlays[provider]["path"],
             overlays[provider]["sha256"],
+            published_runtime_root,
         )
         rendered = yaml.safe_dump(config, sort_keys=False)
         (temp / "configs" / f"{provider}.yaml").write_text(rendered)
@@ -1241,6 +1299,7 @@ def _prepare_run(
         images["providerFreeFixture"],
         output / overlays["fixture"]["path"],
         overlays["fixture"]["sha256"],
+        published_runtime_root,
     )
     if _clean_revision(root) != revision:
         raise IntegrityError("source revision changed while preparing the run")
@@ -1251,6 +1310,7 @@ def _prepare_run(
         "relayImages": images,
         "relayImageTags": tags,
         "taskSnapshots": task_snapshots,
+        "codexRuntime": runtime_receipt,
         "providers": providers,
     }
     pending_record = temp / ".run-record.json"
@@ -1294,7 +1354,10 @@ def prepare(output: Path, replication_id: str = "screen-v1") -> Path:
 
 
 def _validate_record(
-    run_dir: Path, manifest_sha: str, production_build_id: str
+    run_dir: Path,
+    manifest_sha: str,
+    production_build_id: str,
+    runtime_spec: object,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     record = _mapping(
         _artifact_json(run_dir, "run-record.json", "run record"), "run record"
@@ -1308,6 +1371,7 @@ def _validate_record(
             "relayImages",
             "relayImageTags",
             "taskSnapshots",
+            "codexRuntime",
             "providers",
         }
         or not is_strict_int(record.get("schemaVersion"))
@@ -1320,6 +1384,7 @@ def _validate_record(
     relay_images = _mapping(record.get("relayImages"), "relayImages")
     relay_tags = _mapping(record.get("relayImageTags"), "relayImageTags")
     task_snapshots = _mapping(record.get("taskSnapshots"), "taskSnapshots")
+    runtime_receipt = _mapping(record.get("codexRuntime"), "codexRuntime")
     if (
         not is_strict_int(preflight.get("schemaVersion"))
         or preflight["schemaVersion"] != 1
@@ -1339,6 +1404,14 @@ def _validate_record(
     ):
         raise IntegrityError("preflight binding is invalid")
     _validate_task_snapshots(run_dir, task_snapshots)
+    try:
+        observed_runtime = verify_tree(
+            run_dir / CODEX_RUNTIME_PREPARED_RELATIVE, runtime_spec
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise IntegrityError("prepared Codex runtime drifted") from error
+    if not _same_json(runtime_receipt, observed_runtime):
+        raise IntegrityError("prepared Codex runtime receipt drifted")
     _iso(preflight.get("createdAt"), "preflight.createdAt")
     return preflight, _sequence(record.get("providers"), "providers")
 
@@ -1676,6 +1749,7 @@ def _expected_trial_lock(
 ) -> dict[str, Any]:
     compose = str(compose_path)
     spec = _VARIANTS[variant]
+    runtime_root = task_path.parent.parent / CODEX_RUNTIME_PREPARED_RELATIVE
     return {
         "schema_version": 2,
         "task": {
@@ -1712,6 +1786,7 @@ def _expected_trial_lock(
             "delete": True,
             "cpu_enforcement_policy": "auto",
             "memory_enforcement_policy": "auto",
+            "mounts": [_codex_runtime_mount(runtime_root)],
             "extra_docker_compose": [compose],
             "kwargs": {
                 "relay_compose_sha256": compose_sha256,
@@ -2243,6 +2318,7 @@ def _attempt(
             "relay_instance_id": verified["seal"].get("relayInstanceId"),
             "relay_build_id": verified["seal"].get("buildId"),
             "relay_marker_sha256": verified["seal"].get("markerSha256"),
+            "codex_runtime_spec_sha256": CODEX_RUNTIME_SPEC_SHA256,
             "provider_id": provider,
             "requested_model": model,
             "variant_id": variant,
@@ -2415,6 +2491,7 @@ def _validated_job_dir(
         expected_jobs_dir,
         compose_path,
         compose_sha256,
+        run_dir / CODEX_RUNTIME_PREPARED_RELATIVE,
     )
     if not _same_json(config, expected_config):
         raise IntegrityError("generated config differs from its frozen template")
@@ -2893,7 +2970,10 @@ def summarize(run_dirs: list[Path]) -> dict[str, Any]:
         if not run_dir.is_dir():
             raise IntegrityError("each input must be an exact prepared run directory")
         preflight, providers = _validate_record(
-            run_dir, manifest_sha, manifest["relayBuildIds"]["production"]
+            run_dir,
+            manifest_sha,
+            manifest["relayBuildIds"]["production"],
+            manifest["runtime"]["codexRuntime"],
         )
         prepared_at.append(_iso(preflight["createdAt"], "preflight.createdAt"))
         replication_id = preflight["replicationId"]
@@ -2926,7 +3006,12 @@ def cleanup_images(run_dir: Path) -> dict[str, str]:
     """Remove only the run-owned image tags after its trials finish."""
     run_dir = run_dir.expanduser().resolve(strict=True)
     manifest, _, manifest_sha = _manifest(_repo_root())
-    _validate_record(run_dir, manifest_sha, manifest["relayBuildIds"]["production"])
+    _validate_record(
+        run_dir,
+        manifest_sha,
+        manifest["relayBuildIds"]["production"],
+        manifest["runtime"]["codexRuntime"],
+    )
     record = _mapping(
         _artifact_json(run_dir, "run-record.json", "run record"), "run record"
     )
