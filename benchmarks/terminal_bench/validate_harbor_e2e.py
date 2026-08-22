@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from harbor.models.job.config import JobConfig
-from harbor.models.job.lock import TrialLock
+from harbor.models.job.lock import JobLock, TrialLock
+from harbor.models.job.result import JobResult
 from harbor.models.trajectories.trajectory import Trajectory
 from harbor.models.trial.result import TrialResult
 
@@ -97,6 +98,8 @@ def _assert_secret_absent(job_dir: Path, secret: bytes) -> None:
 def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     trial_dir = _trial_dir(job_dir)
     job = JobConfig.model_validate_json((job_dir / "config.json").read_text())
+    job_result = JobResult.model_validate_json((job_dir / "result.json").read_text())
+    job_lock = JobLock.model_validate_json((job_dir / "lock.json").read_text())
     result = TrialResult.model_validate_json((trial_dir / "result.json").read_text())
     lock = TrialLock.model_validate_json((trial_dir / "lock.json").read_text())
     trajectory = Trajectory.model_validate_json(
@@ -104,6 +107,29 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
     )
 
     _require(result.exception_info is None, "Harbor recorded a trial exception.")
+    _require(job_result.finished_at is not None, "Harbor job did not finish.")
+    _require(job_result.n_total_trials == 1, "Harbor job trial count drifted.")
+    _require(
+        (
+            job_result.stats.n_completed_trials,
+            job_result.stats.n_errored_trials,
+            job_result.stats.n_running_trials,
+            job_result.stats.n_pending_trials,
+            job_result.stats.n_cancelled_trials,
+            job_result.stats.n_retries,
+        )
+        == (1, 0, 0, 0, 0, 0),
+        "Harbor job did not complete exactly one clean trial.",
+    )
+    _require(
+        len(job_result.trial_results) == 1
+        and job_result.trial_results[0].id == result.id,
+        "Harbor job result is not bound to the trial result.",
+    )
+    _require(
+        len(job_lock.trials) == 1 and job_lock.trials[0] == lock,
+        "Harbor job lock is not bound to the trial lock.",
+    )
     _require(result.task_name == "hello-world/hello-world", "Unexpected task name.")
     _require(len(job.datasets) == 1, "Expected one Harbor dataset.")
     _require(job.datasets[0].name == "harbor/hello-world", "Dataset identity drifted.")
@@ -114,10 +140,7 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
         "Resolved task digest drifted.",
     )
     rewards = result.verifier_result.rewards if result.verifier_result else None
-    _require(
-        rewards and all(value == 1 for value in rewards.values()),
-        "Verifier reward is not 1.",
-    )
+    _require(rewards == {"reward": 1.0}, "Verifier reward is not exactly 1.")
 
     _require(trajectory.schema_version == "ATIF-v1.7", "Unexpected ATIF version.")
     _require(trajectory.session_id, "ATIF session identity is missing.")

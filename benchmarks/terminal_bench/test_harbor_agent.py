@@ -335,15 +335,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             )
 
             class Environment:
-                async def service_exec(
-                    self, *_args: object, **_kwargs: object
-                ) -> object:
-                    return SimpleNamespace(return_code=0, stdout="", stderr="")
-
-                async def service_download_file(
-                    self, _source: str, target: Path, **_kwargs: object
-                ) -> None:
-                    target.write_text("retained")
+                async def service_exec(self, command: str, **_kwargs: object) -> object:
+                    stdout = "cmV0YWluZWQ=" if command.startswith("base64 ") else ""
+                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
             await agent._seal_and_retain(Environment())  # type: ignore[arg-type]
             evidence = trial / "artifacts" / "provider-evidence"
@@ -354,6 +348,27 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (evidence / "provider-metadata.ndjson").read_text(), "retained"
             )
+
+    async def test_evidence_failure_fails_an_otherwise_successful_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            agent = OpenAgentLabCodex(
+                Path(raw),
+                model_name="zai/glm-5.3",
+                version="0.149.0",
+                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            )
+            agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
+            agent.logger.disabled = True
+            with (
+                patch.object(Codex, "run", new=AsyncMock()),
+                patch.object(
+                    agent,
+                    "_seal_and_retain",
+                    new=AsyncMock(side_effect=RuntimeError("evidence failed")),
+                ),
+                self.assertRaisesRegex(RuntimeError, "evidence failed"),
+            ):
+                await agent.run("instruction", object(), AgentContext())  # type: ignore[arg-type]
 
     def test_invalid_metadata_never_raises_into_the_official_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
