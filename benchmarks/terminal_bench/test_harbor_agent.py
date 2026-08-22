@@ -158,10 +158,16 @@ class RelayMetadataTest(unittest.TestCase):
                 {"ok": False, "reasons": ["synthetic_provider"]},
             )
 
-    def test_pre_accept_rejection_prevents_publication(self) -> None:
+    def test_real_rejection_still_blocks_with_a_post_terminal_disconnect(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            _write_evidence(directory, rejected_requests={"invalid_json": 1})
+            _write_evidence(
+                directory,
+                rejected_requests={
+                    "client_disconnected_after_close": 1,
+                    "invalid_json": 1,
+                },
+            )
             metadata = relay_metadata(
                 directory / "provider-metadata.ndjson",
                 directory / "provider-metadata.ndjson.sealed",
@@ -209,6 +215,7 @@ class RelayMetadataTest(unittest.TestCase):
                     (200, "completed", _DEFAULT_USAGE),
                     (429, "failed", _DEFAULT_USAGE),
                 ),
+                rejected_requests={"client_disconnected_after_close": 1},
             )
             metadata = relay_metadata(
                 directory / "provider-metadata.ndjson",
