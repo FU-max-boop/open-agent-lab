@@ -197,13 +197,19 @@ jobs:
           PY
           cd "$OPEN_AGENT_LAB_REPO_ROOT"
           harbor jobs start --config "$prepared_run/fixtures/harbor-e2e.yaml" --yes
-          sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
-            python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
-            "$prepared_run/fixture-jobs/harbor-e2e/open-agent-lab-harbor-provider-free-e2e"
+          control_job="$prepared_run/fixture-jobs/harbor-e2e/open-agent-lab-harbor-provider-free-e2e"
+          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+            python3 -m benchmarks.terminal_bench.validate_harbor_e2e "$control_job"; then
+            cat "$control_job"/*/artifacts/manifest.json
+            exit 1
+          fi
           harbor jobs start \
             --config "$prepared_run/fixtures/harbor-verify-instruction-e2e.yaml" \
             --yes
-          sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+          treatment_job="$prepared_run/fixture-jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e"
+          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
-            "$prepared_run/fixture-jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e" \
-            verify-instruction-v1
+            "$treatment_job" verify-instruction-v1; then
+            cat "$treatment_job"/*/artifacts/manifest.json
+            exit 1
+          fi
