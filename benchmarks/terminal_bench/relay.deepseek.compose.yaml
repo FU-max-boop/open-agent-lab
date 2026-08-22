@@ -1,0 +1,50 @@
+services:
+  main:
+    depends_on:
+      open-agent-lab-relay:
+        condition: service_healthy
+
+  open-agent-lab-relay:
+    build:
+      context: ${OPEN_AGENT_LAB_REPO_ROOT:?Set OPEN_AGENT_LAB_REPO_ROOT}
+      dockerfile: benchmarks/terminal_bench/relay.Dockerfile
+    command:
+      - --provider
+      - deepseek
+      - --model
+      - deepseek-v4-pro
+      - --output
+      - /var/lib/open-agent-lab/provider-metadata.ndjson
+      - --client-token-output
+      - /var/lib/open-agent-lab/provider-metadata.ndjson.client-token
+      - --listen
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ttl-seconds
+      - "14400"
+      - --max-requests
+      - "256"
+      - --build-id-file
+      - /app/relay-build-id
+    environment:
+      DEEPSEEK_API_KEY_FILE: /run/secrets/provider-api-key
+      OAL_RELAY_GID: "1000"
+      OAL_RELAY_UID: "1000"
+    secrets:
+      - provider-api-key
+    read_only: true
+    tmpfs:
+      - /var/lib/open-agent-lab:mode=0700,uid=1000,gid=1000
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+secrets:
+  provider-api-key:
+    file: ${OAL_PROVIDER_API_KEY_FILE:?Set OAL_PROVIDER_API_KEY_FILE}

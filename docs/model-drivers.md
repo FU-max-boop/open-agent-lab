@@ -74,11 +74,18 @@ system fingerprint when supplied, and a hash of the redacted raw event stream.
 Missing usage stays missing rather than becoming zero. Private reasoning and API
 keys are never published.
 
-The current Harbor adapter does not yet meet that publication gate: Harbor 0.22
-does not preserve provider-returned model/request metadata in its ATIF output,
-and its unsandboxed same-UID Linux process layout needs a credential relay or
-tested OS boundary. The frozen pilot remains an infrastructure configuration
-until both gaps have retained regression evidence.
+The Harbor path adds an isolated native-Responses byte relay rather than a
+protocol adapter. Each relay generates one short-lived, fixed-model capability,
+injects the durable provider key, and stores response identity, request ID,
+status, usage, timing, and byte hashes in a redacted hash chain. Harbor seals
+the listener and validates every three-event lifecycle from a host-only copy
+before attaching this additional metadata; the chain and seal are also retained
+as separate artifacts. Its official ATIF conversion remains unchanged.
+
+This implementation is not yet a result claim. A retained Linux container
+probe must show that the task cannot inspect the relay PID or durable key, and
+live conformance must show that both providers return consistent model identity
+and request metadata. Missing values remain missing and block publication.
 
 ## Diagnostic Chat driver
 

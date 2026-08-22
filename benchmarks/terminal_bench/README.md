@@ -9,43 +9,51 @@ trajectory conversion; Open Agent Lab only freezes the native Responses
 provider. Codex is pinned to `0.149.0`, Harbor to `0.22.0`, and the dataset to
 the digest in `pilot-v1.selection.json`.
 
-The adapter also closes Harbor's default credential-file path: Codex reads the
-provider-native environment variable, Harbor receives an empty compatibility
-`auth.json`, and the normal shell-tool environment sees the selected key only
-as an empty string.
+The adapter resolves no Harbor model connection and receives no durable provider
+credential. Each relay generates its own 256-bit capability; Harbor retrieves
+it through the sidecar control plane and the shell policy blanks it for normal
+tool children. A separate Compose service reads the provider key once from a
+Docker secret, drops to uid 1000, accepts only the exact `/v1/responses` model
+route, and writes `/var/lib/open-agent-lab/provider-metadata.ndjson`. After
+Codex exits, Harbor seals the relay, validates a host-only copy of the redacted
+hash chain, and retains the chain and seal as separate artifacts. The official
+ATIF trajectory remains unchanged.
 
 ## Gates before a publishable run
 
-These configs freeze the experiment but are not yet publication-ready. Harbor
-0.22 launches Codex with its internal sandbox disabled; on Linux, same-UID code
-may be able to inspect the parent Codex environment through `/proc` despite the
-shell filter. A credential relay or tested OS isolation boundary, plus a Linux
-regression probe, is required before using a durable provider key. Also, Harbor
-0.22's ATIF path preserves the requested model but not a provider-returned model
-identity or transport request ID. A raw-response metadata sidecar must close
-that evidence gap before results are published.
-
-Use a disposable, tightly limited key only for private infrastructure debugging
-until both gates pass.
+The boundary and metadata path are implemented and provider-free tests pass, but
+this machine has not run the Compose topology. Before results are publishable, a
+retained Linux probe must confirm that the task can inspect its own environment,
+files and `/proc` but cannot find the durable key or relay process. Live probes
+must also produce consistent returned-model and provider request IDs. Use a
+disposable key file and a provider-side spend cap until those gates pass.
 
 Five tasks were selected only from the pinned directory names by sorting
 `sha256(seed + NUL + task_id)` and taking the first five. No tests, solutions,
 or outcomes were used to select them. Both providers use the same tasks, one
 attempt, serial execution, official resources/timeouts, and the unmodified
-official verifier.
+official verifier. This sealed-relay adapter is deliberately single-step and
+does not advertise Codex resume support; a future multi-step run needs one relay
+per step or a separate trial-end seal hook.
 
-After installing Harbor 0.22.0 and a supported container runtime, the private
-infrastructure command is:
+After installing Harbor 0.22.0 and a supported container runtime, set the
+repository root and a provider key file **outside this repository**. Inside the
+relay container the file must be owned by a different uid than 1000 and be
+unreadable after privilege drop (on rootful Linux, use root:root mode 0400).
+The relay fails closed otherwise. Its capability is generated separately for
+every trial. Do not export the provider key itself into Harbor:
 
 ```bash
-export DEEPSEEK_API_KEY="..."
+export OPEN_AGENT_LAB_REPO_ROOT="$PWD"
+export OAL_PROVIDER_API_KEY_FILE="/absolute/path/to/deepseek-key"
 harbor jobs start \
   --config benchmarks/terminal_bench/pilot-v1.deepseek.yaml \
   --yes
 ```
 
 ```bash
-export ZAI_API_KEY="..."
+export OPEN_AGENT_LAB_REPO_ROOT="$PWD"
+export OAL_PROVIDER_API_KEY_FILE="/absolute/path/to/zai-key"
 harbor jobs start \
   --config benchmarks/terminal_bench/pilot-v1.zai.yaml \
   --yes

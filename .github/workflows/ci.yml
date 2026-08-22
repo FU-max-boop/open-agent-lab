@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -38,3 +38,56 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Probe pinned Codex through native Responses relay
+        run: |
+          npm install --prefix /tmp/open-agent-lab-codex --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
+          OPEN_AGENT_LAB_CODEX_BIN=/tmp/open-agent-lab-codex/node_modules/.bin/codex \
+            node --import tsx --test --test-name-pattern="installed Codex" apps/cli/test/codex-runner.test.ts
+
+      - name: Validate Harbor 0.22 adapter
+        run: |
+          python3 -m pip install --disable-pip-version-check harbor==0.22.0 ruff==0.16.4
+          python3 -m ruff format --check benchmarks/terminal_bench/harbor_agent.py benchmarks/terminal_bench/relay_evidence.py benchmarks/terminal_bench/test_harbor_agent.py
+          python3 -m ruff check benchmarks/terminal_bench/harbor_agent.py benchmarks/terminal_bench/relay_evidence.py benchmarks/terminal_bench/test_harbor_agent.py
+          python3 -m unittest benchmarks.terminal_bench.test_harbor_agent
+
+  relay-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose overlays
+        env:
+          OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
+          OAL_PROVIDER_API_KEY_FILE: /tmp/provider-key
+        run: |
+          printf 'services:\n  main:\n    image: busybox:1.37.0\n' > /tmp/base-compose.yaml
+          install -m 0600 /dev/null "$OAL_PROVIDER_API_KEY_FILE"
+          docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml config --quiet
+          docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.zai.compose.yaml config --quiet
+
+      - name: Exercise isolated relay lifecycle
+        env:
+          OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
+          OAL_PROVIDER_API_KEY_FILE: /tmp/provider-key
+        run: |
+          printf 'provider-free-ci-key\n' > "$OAL_PROVIDER_API_KEY_FILE"
+          sudo chown 0:0 "$OAL_PROVIDER_API_KEY_FILE"
+          sudo chmod 0400 "$OAL_PROVIDER_API_KEY_FILE"
+          compose=(docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml)
+          trap '"${compose[@]}" down --volumes' EXIT
+          "${compose[@]}" up --detach --build --wait open-agent-lab-relay
+          "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
+            'test ! -r /run/secrets/provider-api-key && test "$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/1/status)" = 0000000000000000'
+          "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
+            'test "$(wc -c < /var/lib/open-agent-lab/provider-metadata.ndjson.client-token)" -eq 65'
+          "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay sh -c \
+            'kill -USR2 1; i=0; while [ ! -f /var/lib/open-agent-lab/provider-metadata.ndjson.sealed ]; do i=$((i+1)); [ "$i" -lt 150 ] || exit 1; sleep 0.1; done'
+          "${compose[@]}" exec --no-TTY --user 1000 open-agent-lab-relay node --input-type=module -e \
+            "const fs=await import('node:fs/promises');const relay=await import('/app/apps/cli/relay-dist/responses-relay.js');const build=(await fs.readFile('/app/relay-build-id','utf8')).trim();const seal=relay.verifyRelaySeal(await fs.readFile('/var/lib/open-agent-lab/provider-metadata.ndjson','utf8'),await fs.readFile('/var/lib/open-agent-lab/provider-metadata.ndjson.sealed','utf8'));if(!/^sha256:[a-f0-9]{64}$/.test(build)||seal.buildId!==build)throw new Error('relay build identity mismatch')"

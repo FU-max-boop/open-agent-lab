@@ -7,8 +7,15 @@ import {
   buildCodexProbeInvocation,
   runCodexInvocation,
 } from "./codex-runner.js";
+import {
+  startNativeResponsesRelay,
+  verifyRelaySeal,
+  type NativeResponsesRelay,
+} from "./responses-relay.js";
 
-const PROBE_KEY = "open-agent-lab-local-probe";
+const PROBE_KEY = "open-agent-lab-local-probe-00000000";
+const UPSTREAM_PROBE_KEY = "open-agent-lab-upstream-probe";
+const PROBE_MODEL = "open-agent-lab-probe";
 const CALL_ID = "call_open_agent_lab_probe";
 const OUTPUT_FILE = "codex-probe.txt";
 const OUTPUT_TEXT = "codex-native-responses\n";
@@ -57,6 +64,7 @@ function complete(response: ServerResponse, id: string): void {
     type: "response.completed",
     response: {
       id,
+      model: PROBE_MODEL,
       usage: {
         input_tokens: 10,
         input_tokens_details: { cached_tokens: 0 },
@@ -124,9 +132,14 @@ else
 fi > ${OUTPUT_FILE}`;
 }
 
-export async function runCodexProbe(codexPath = "codex"): Promise<CodexProbeResult> {
+export async function runCodexProbe(
+  codexPath = "codex",
+  throughRelay = false,
+): Promise<CodexProbeResult> {
   const workspace = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-probe-"));
+  const sidecarPath = join(workspace, "provider-metadata.ndjson");
   const requests: ProbeRequest[] = [];
+  let relay: NativeResponsesRelay | undefined;
   let tool = "";
   let toolOutput = "";
   const server = createServer(async (request, response) => {
@@ -142,7 +155,8 @@ export async function runCodexProbe(codexPath = "codex"): Promise<CodexProbeResu
         response.writeHead(404).end();
         return;
       }
-      if (request.headers.authorization !== `Bearer ${PROBE_KEY}`) {
+      const expectedKey = throughRelay ? UPSTREAM_PROBE_KEY : PROBE_KEY;
+      if (request.headers.authorization !== `Bearer ${expectedKey}`) {
         response.writeHead(401).end();
         return;
       }
@@ -150,9 +164,11 @@ export async function runCodexProbe(codexPath = "codex"): Promise<CodexProbeResu
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "close",
+        "openai-model": PROBE_MODEL,
+        "x-request-id": `provider-probe-${requests.length}`,
       });
       const id = `resp_probe_${requests.length}`;
-      event(response, { type: "response.created", response: { id } });
+      event(response, { type: "response.created", response: { id, model: PROBE_MODEL } });
       if (requests.length === 1) {
         tool = functionTool(body);
         event(response, {
@@ -198,10 +214,23 @@ export async function runCodexProbe(codexPath = "codex"): Promise<CodexProbeResu
     if (address === null || typeof address === "string") {
       throw new Error("Codex probe failed to bind a loopback port.");
     }
+    if (throughRelay) {
+      relay = await startNativeResponsesRelay({
+        runId: "codex-relay-probe",
+        providerId: "probe",
+        buildId: "development",
+        expectedModel: PROBE_MODEL,
+        upstreamResponsesUrl: `http://127.0.0.1:${address.port}/responses`,
+        upstreamBearer: UPSTREAM_PROBE_KEY,
+        clientBearer: PROBE_KEY,
+        sidecarPath,
+        expiresAtMs: Date.now() + 60_000,
+      });
+    }
     const invocation = buildCodexProbeInvocation({
       workspace,
       prompt: "Use the available shell tool exactly once, then report completion.",
-      baseUrl: `http://127.0.0.1:${address.port}`,
+      baseUrl: relay?.baseUrl ?? `http://127.0.0.1:${address.port}`,
       codexPath,
     });
     const code = await runCodexInvocation(
@@ -235,6 +264,14 @@ export async function runCodexProbe(codexPath = "codex"): Promise<CodexProbeResu
       sawTurnComplete: stdout.includes('"type":"turn.completed"'),
     };
   } finally {
+    if (relay !== undefined) {
+      const summary = await relay.close();
+      const journal = await readFile(sidecarPath, "utf8");
+      verifyRelaySeal(journal, await readFile(relay.sealPath, "utf8"));
+      if (summary.eventCount !== 6) {
+        throw new Error(`Relay probe expected 6 metadata events, received ${summary.eventCount}.`);
+      }
+    }
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     await rm(workspace, { force: true, recursive: true });
   }

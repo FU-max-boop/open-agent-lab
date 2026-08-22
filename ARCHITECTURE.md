@@ -15,7 +15,7 @@ implemented; the diagram is not an implementation-status claim.
                        /                 \
           open-source Codex              verifier
              /          \                   |
-     native Responses   code workspace    evidence
+     Responses relay    code workspace    evidence
        GLM/DeepSeek           |             bundle
                        durable journal
 ```
@@ -55,9 +55,18 @@ authority for outer-run state and uncertain effects.
 
 The primary model path is an unmodified, pinned open-source Codex release using
 its supported custom-provider configuration and the Responses wire protocol.
-DeepSeek and Z.AI connect directly to their documented native Responses
-endpoints. A protocol shim is permitted only for a concrete failing probe and
-must stay narrower than the missing behavior.
+Local diagnostics may connect directly to documented native Responses
+endpoints. Benchmark tasks instead see a short-lived, quota-bounded credential
+for an isolated byte relay; only that relay holds the durable provider key. The
+relay neither translates nor retries the protocol. It normalizes validated JSON
+to remove duplicate-key ambiguity, fixes one model and endpoint, and streams
+responses byte-for-byte while retaining a redacted, hash-chained transport
+sidecar outside the task container. Harbor seals the relay before copying that
+sidecar, so every accepted request has one fsynced request → headers → closed
+lifecycle and no task process can append calls during verification.
+
+A protocol shim is permitted only for a concrete failing probe and must stay
+narrower than the missing behavior.
 
 Each model variant records at least:
 
@@ -202,6 +211,8 @@ Initial controls include:
 - least-privilege network and credential injection;
 - explicit approvals for consequential external actions;
 - separation of agent-visible state from verifier-only state;
+- durable provider credentials isolated from the task PID, mount, and network
+  namespaces;
 - output-size, time, token, process, and retry limits;
 - secret detection and structured redaction before model context or publication;
 - provenance labels that distinguish system policy, operator instruction, task
@@ -217,8 +228,9 @@ Each benchmark adapter is a thin boundary that maps the official task lifecycle
 to Codex and returns the official evaluator output. Terminal-Bench integration
 inherits Harbor's Codex adapter so installation, session capture, ATIF
 conversion, and container interaction stay upstream-owned. Our subclass may
-select a native provider profile and add variant metadata; it may not add
-task-specific reasoning, expose hidden state, or rewrite scores.
+select a native provider profile, route through the isolated byte relay, and add
+redacted transport metadata; it may not add task-specific reasoning, expose
+hidden state, or rewrite scores.
 
 Benchmark adapters, product skills, and site-specific automations remain separate
 packages. Results from a general harness and a skill-augmented harness are
@@ -235,6 +247,7 @@ separate tracks.
 - No browser element reference reused after its observation expires.
 - No benchmark evaluator secrets in agent-readable context.
 - No published evidence bundle containing raw credentials.
+- No durable provider credential in a benchmark task container.
 - No event mutation after finalization; corrections append a superseding record.
 - No client-specific task state required to resume from another client.
 

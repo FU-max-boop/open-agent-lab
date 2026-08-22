@@ -13,11 +13,13 @@ agent rather than a second implementation of the same loop.
 recoverable SQLite kernel, strict evidence bundles, and a provider-free
 `run -> verify -> replay` smoke path. It also has a credential-hardened Codex
 runner for DeepSeek's standard Responses API and the Z.AI Coding Plan Responses
-endpoint.
+endpoint. The benchmark path adds a single-endpoint byte relay so durable
+provider credentials stay outside the task container while returned-model and
+request metadata remain auditable.
 The older Chat Completions driver remains a diagnostic fallback, not the primary
-agent path. Live-provider conformance and a Terminal-Bench pilot are still
-pending execution. There is no installable release or public benchmark result
-yet.
+agent path. Linux container isolation, live-provider conformance, and the
+Terminal-Bench pilot are still pending execution. There is no installable
+release or public benchmark result yet.
 
 Open Agent Lab is independent from OpenAI and is not an official Codex
 distribution.
@@ -121,7 +123,7 @@ CLI / Harbor / CI
         |
 experiment + recovery controller
         |
-open-source Codex -- native Responses API -- GLM / DeepSeek
+open-source Codex -- isolated Responses relay -- GLM / DeepSeek
         |
 code workspace -> official verifier -> evidence bundle
 ```

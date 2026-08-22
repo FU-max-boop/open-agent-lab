@@ -1,5 +1,6 @@
 node_modules/
 dist/
+relay-dist/
 coverage/
 .DS_Store
 *.tsbuildinfo

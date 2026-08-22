@@ -188,3 +188,14 @@ test(
     });
   },
 );
+
+test(
+  "installed Codex completes the same tool round through the isolated relay",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async () => {
+    const result = await runCodexProbe(process.env.OPEN_AGENT_LAB_CODEX_BIN, true);
+    assert.equal(result.ok, true);
+    assert.equal(result.requests, 2);
+    assert.equal(result.output, "codex-native-responses");
+  },
+);
