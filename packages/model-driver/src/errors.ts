@@ -2,6 +2,7 @@ export type ModelContractErrorCode =
   | "aborted"
   | "capability_mismatch"
   | "invalid_capabilities"
+  | "invalid_configuration"
   | "invalid_driver"
   | "invalid_request"
   | "invalid_stream"

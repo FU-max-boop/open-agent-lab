@@ -7,9 +7,9 @@ export interface JsonObject {
 }
 
 /**
- * Capabilities are discovered from the configured endpoint. They are never
- * inferred from a model name, which keeps routing policy separate from model
- * identity and allows self-hosted endpoints to report their real behavior.
+ * Effective capabilities are explicitly configured or discovered. They are
+ * never inferred from a model name, which keeps routing policy separate from
+ * model identity and lets self-hosted endpoints report their real behavior.
  */
 export interface ModelCapabilities {
   /** Accepts and can emit text. */
@@ -46,6 +46,12 @@ export interface TextContentPart {
   text: string;
 }
 
+/** Provider-visible reasoning that must be replayed in multi-turn tool calls. */
+export interface ReasoningContentPart {
+  type: "reasoning";
+  text: string;
+}
+
 export interface ImageUrlSource {
   type: "url";
   url: string;
@@ -79,6 +85,7 @@ export interface ToolResultContentPart {
 
 export type ModelContentPart =
   | TextContentPart
+  | ReasoningContentPart
   | ImageContentPart
   | ToolCallContentPart
   | ToolResultContentPart;
@@ -98,11 +105,7 @@ export interface ModelToolDefinition {
   strict?: boolean;
 }
 
-export type ModelToolChoice =
-  | "auto"
-  | "none"
-  | "required"
-  | { name: string };
+export type ModelToolChoice = "auto" | "none" | "required" | { name: string };
 
 export interface ModelResponseSchema {
   name: string;
@@ -113,7 +116,7 @@ export interface ModelResponseSchema {
 
 export interface ModelReasoningOptions {
   enabled: boolean;
-  effort?: "low" | "medium" | "high";
+  effort?: "low" | "high" | "max";
 }
 
 export interface ModelGenerationOptions {
@@ -187,6 +190,19 @@ export interface UsageEvent {
   usage: ModelUsage;
 }
 
+/** Stable response identity retained for reproducibility and routing audits. */
+export interface ModelResponseInfo {
+  responseId?: string;
+  providerRequestId?: string;
+  model?: string;
+  systemFingerprint?: string;
+}
+
+export interface ResponseInfoEvent {
+  type: "response_info";
+  info: ModelResponseInfo;
+}
+
 export type ModelFinishReason =
   | "stop"
   | "length"
@@ -215,6 +231,7 @@ export type ModelStreamEvent =
   | ReasoningDeltaEvent
   | ToolCallDeltaEvent
   | ToolCallCompleteEvent
+  | ResponseInfoEvent
   | UsageEvent
   | FinishEvent
   | ModelErrorEvent;
@@ -223,7 +240,7 @@ export interface ModelDriver {
   /** Stable adapter instance identifier for logs; it is not used for routing. */
   readonly driverId: string;
 
-  /** Probe the configured endpoint and report its effective capabilities. */
+  /** Return the configured or discovered effective capability profile. */
   probe(options?: ModelProbeOptions): Promise<ModelCapabilities>;
 
   /** Produce normalized events. `finish` or `error` must be the final event. */
@@ -249,6 +266,7 @@ export interface ModelStreamResult {
   text: string;
   reasoning: string;
   toolCalls: readonly CompletedToolCall[];
+  responseInfo?: Readonly<ModelResponseInfo>;
   usage?: ModelUsage;
   finish?: FinishEvent;
   error?: ModelErrorEvent;

@@ -22,8 +22,12 @@ and budget—not a brand name or a model name alone.
 
 ### External headline target
 
-The first headline target is a valid submission to the official
-[Terminal-Bench 2.1 leaderboard](https://www.tbench.ai/leaderboard/terminal-bench/2.1).
+The first headline target is an independently run, team-verified Terminal-Bench
+2.1 result. The official repository currently states that community submissions
+are closed and that only maintainer-run agents are accepted, so local Harbor
+runs are labeled reproducible pilots rather than official leaderboard results.
+This status must be rechecked before any submission or publicity claim. See the
+[official submission rules](https://github.com/harbor-framework/terminal-bench-2-1/blob/main/leaderboard/SUBMIT.md).
 The browser headline target is a v2 trajectory submission to
 [Online-Mind2Web](https://github.com/OSU-NLP-Group/Online-Mind2Web), with its
 automatic or human evaluation status disclosed. We do not compute an unofficial

@@ -3,6 +3,7 @@ import type {
   CompletedToolCall,
   JsonValue,
   ModelErrorEvent,
+  ModelResponseInfo,
   ModelStreamEvent,
   ModelStreamResult,
   ModelUsage,
@@ -131,8 +132,7 @@ function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
       leftKeys.length === rightKeys.length &&
       leftKeys.every(
         (key, index) =>
-          key === rightKeys[index] &&
-          jsonValuesEqual(left[key]!, right[key]!),
+          key === rightKeys[index] && jsonValuesEqual(left[key]!, right[key]!),
       )
     );
   }
@@ -197,12 +197,78 @@ function completeToolCall(
 }
 
 function validateError(event: ModelErrorEvent): void {
-  if (event.code.trim() === "" || event.message.trim() === "") {
+  if (
+    typeof event.code !== "string" ||
+    typeof event.message !== "string" ||
+    event.code.trim() === "" ||
+    event.message.trim() === ""
+  ) {
     throw new ModelContractError(
       "invalid_stream",
       "An error event requires a non-empty code and message.",
     );
   }
+}
+
+const RESPONSE_INFO_FIELDS = [
+  "responseId",
+  "providerRequestId",
+  "model",
+  "systemFingerprint",
+] as const;
+
+function normalizeResponseInfo(value: unknown): Readonly<ModelResponseInfo> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ModelContractError(
+      "invalid_stream",
+      "response_info must be an object.",
+    );
+  }
+  const info = value as Record<string, unknown>;
+  if (
+    Object.keys(info).some(
+      (key) =>
+        !RESPONSE_INFO_FIELDS.includes(
+          key as (typeof RESPONSE_INFO_FIELDS)[number],
+        ),
+    )
+  ) {
+    throw new ModelContractError(
+      "invalid_stream",
+      "response_info contains an unsupported identity field.",
+    );
+  }
+  const fields = RESPONSE_INFO_FIELDS.map((key) => info[key]);
+  if (fields.every((value) => value === undefined)) {
+    throw new ModelContractError(
+      "invalid_stream",
+      "response_info must contain at least one identity field.",
+    );
+  }
+  if (
+    fields.some(
+      (value) =>
+        value !== undefined &&
+        (typeof value !== "string" || value.trim() === ""),
+    )
+  ) {
+    throw new ModelContractError(
+      "invalid_stream",
+      "response_info identity fields must be non-empty strings.",
+    );
+  }
+  return Object.freeze({
+    ...(info.responseId === undefined
+      ? {}
+      : { responseId: info.responseId as string }),
+    ...(info.providerRequestId === undefined
+      ? {}
+      : { providerRequestId: info.providerRequestId as string }),
+    ...(info.model === undefined ? {} : { model: info.model as string }),
+    ...(info.systemFingerprint === undefined
+      ? {}
+      : { systemFingerprint: info.systemFingerprint as string }),
+  });
 }
 
 /**
@@ -215,6 +281,7 @@ export async function collectModelStream(
 ): Promise<ModelStreamResult> {
   let text = "";
   let reasoning = "";
+  let responseInfo: Readonly<ModelResponseInfo> | undefined;
   let usage: ModelUsage | undefined;
   let finish: ModelStreamResult["finish"];
   let error: ModelStreamResult["error"];
@@ -270,6 +337,15 @@ export async function collectModelStream(
       case "tool_call_complete":
         toolCalls.push(completeToolCall(event, partials));
         break;
+      case "response_info":
+        if (responseInfo !== undefined) {
+          throw new ModelContractError(
+            "invalid_stream",
+            "A normalized model stream may emit response_info only once.",
+          );
+        }
+        responseInfo = normalizeResponseInfo(event.info);
+        break;
       case "usage":
         if (usage !== undefined) {
           throw new ModelContractError(
@@ -320,6 +396,7 @@ export async function collectModelStream(
     toolCalls: Object.freeze(
       [...toolCalls].sort((left, right) => left.index - right.index),
     ),
+    ...(responseInfo === undefined ? {} : { responseInfo }),
     ...(usage === undefined ? {} : { usage }),
     ...(finish === undefined ? {} : { finish }),
     ...(error === undefined ? {} : { error }),

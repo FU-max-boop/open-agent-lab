@@ -8,14 +8,16 @@ dependency. The intended system combines repository work, terminal execution,
 and browser interaction in one resumable task runtime, with machine-checkable
 outcomes and auditable evidence.
 
-**Status: recoverable-kernel bootstrap.** The repository now contains versioned
+**Status: recoverable-kernel and model-gateway bootstrap.** The repository now contains versioned
 run/event contracts, a strict content-addressed evidence bundle, a provider-free
 `run -> verify -> replay` smoke path, and a SQLite-backed recoverable task
-kernel. The provider-free smoke now runs through the kernel, broker, independent
-verifier, and evidence writer. There is still no installable release or public
-benchmark result. This repository must not be cited as outperforming another
-agent, appearing on an official leaderboard, or completing OSWorld. Those are
-targets, not current claims.
+kernel. A single strict OpenAI-compatible Chat Completions driver now covers the
+documented common subset of GLM and DeepSeek, with offline wire-contract tests;
+live-provider conformance is still pending. The provider-free smoke runs through
+the kernel, broker, independent verifier, and evidence writer. There is still no
+installable release or public benchmark result. This repository must not be
+cited as outperforming another agent, appearing on an official leaderboard, or
+completing OSWorld. Those are targets, not current claims.
 
 "Codex-class" describes the intended breadth of the workflow; it does not imply
 affiliation with or equivalence to OpenAI Codex.
@@ -142,6 +144,8 @@ Detailed exit criteria live in [CHARTER.md](CHARTER.md).
   rules
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution and benchmark-integrity rules
 - [ROADMAP.md](ROADMAP.md): current two-week gate and its exit criteria
+- [docs/model-drivers.md](docs/model-drivers.md): GLM/DeepSeek adapter contract,
+  limitations, and live-conformance gate
 - [docs/decisions](docs/decisions): accepted persistence and recovery decisions
 
 ## License

@@ -18,5 +18,9 @@
   },
   "engines": {
     "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "@open-agent-lab/contracts": "workspace:*",
+    "openai": "6.49.0"
   }
 }
