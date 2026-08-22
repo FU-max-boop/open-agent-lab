@@ -35,26 +35,29 @@ RUN find package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
     | sha256sum \
     | awk '{print "sha256:" $1}' > /src/relay-fixture-build-id
 RUN pnpm exec tsc -b packages/contracts packages/evidence \
-    && pnpm exec tsc -p apps/cli/tsconfig.relay.json
+    && pnpm exec tsc -p apps/cli/tsconfig.relay.json \
+    && rm -f apps/cli/relay-dist/.tsbuildinfo \
+    && cp -a apps/cli/relay-dist apps/cli/relay-production-dist \
+    && rm -f \
+      apps/cli/relay-production-dist/relay-fixture-entry.* \
+      apps/cli/relay-production-dist/responses-fixture.*
 
-FROM node:20.19.0-bookworm-slim@sha256:5cfa999422613d3b34f766cbb814d964cbfcb76aaf3607e805da21cccb352bac AS fixture
+FROM node:20.19.0-bookworm-slim@sha256:5cfa999422613d3b34f766cbb814d964cbfcb76aaf3607e805da21cccb352bac AS runtime-base
 
 WORKDIR /app
 COPY --from=build /src/apps/cli/package.json ./apps/cli/package.json
-COPY --from=build /src/apps/cli/relay-dist ./apps/cli/relay-dist
-COPY --from=build /src/relay-fixture-build-id ./relay-build-id
 COPY --from=build /src/packages/contracts/package.json ./node_modules/@open-agent-lab/contracts/package.json
 COPY --from=build /src/packages/contracts/dist ./node_modules/@open-agent-lab/contracts/dist
 COPY --from=build /src/packages/evidence/package.json ./node_modules/@open-agent-lab/evidence/package.json
 COPY --from=build /src/packages/evidence/dist ./node_modules/@open-agent-lab/evidence/dist
-RUN rm -f /app/apps/cli/relay-dist/.tsbuildinfo \
-    && mkdir -p /var/lib/open-agent-lab \
-    && chown node:node /var/lib/open-agent-lab
+RUN mkdir -p /var/lib/open-agent-lab && chown node:node /var/lib/open-agent-lab
 
 ENTRYPOINT ["node", "/app/apps/cli/relay-dist/relay-entry.js"]
 
-FROM fixture AS production
+FROM runtime-base AS fixture
+COPY --from=build /src/apps/cli/relay-dist ./apps/cli/relay-dist
+COPY --from=build /src/relay-fixture-build-id ./relay-build-id
+
+FROM runtime-base AS production
+COPY --from=build /src/apps/cli/relay-production-dist ./apps/cli/relay-dist
 COPY --from=build /src/relay-build-id ./relay-build-id
-RUN rm -f \
-    /app/apps/cli/relay-dist/relay-fixture-entry.* \
-    /app/apps/cli/relay-dist/responses-fixture.*

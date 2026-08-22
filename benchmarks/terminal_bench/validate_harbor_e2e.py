@@ -19,6 +19,21 @@ _DATASET_DIGEST = (
 )
 _TASK_DIGEST = "sha256:38d7a077f07fbee8efc78db5dec9a72f82e727510ad1dcfeac0b55fa845256b7"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ISOLATION_COMMAND = r"""expected=__SECRET_SHA256__
+for file in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do
+  [ -r "$file" ] || continue
+  while IFS= read -r candidate; do
+    case "$candidate" in *=*) candidate=${candidate#*=} ;; esac
+    [ -z "$candidate" ] || [ "$(printf %s "$candidate" | sha256sum | cut -d' ' -f1)" != "$expected" ] || exit 42
+  done < <(tr '\0' '\n' < "$file" 2>/dev/null)
+done
+if [ -d /run/secrets ]; then
+  for file in /run/secrets/*; do
+    [ -r "$file" ] || continue
+    [ "$(printf %s "$(cat "$file")" | sha256sum | cut -d' ' -f1)" != "$expected" ] || exit 42
+  done
+fi
+printf 'Hello, world!\n' > /app/hello.txt"""
 
 
 def _require(condition: object, message: str) -> None:
@@ -34,6 +49,18 @@ def _canonical(value: object) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
+
+
+def _isolation_command(secret: bytes) -> str:
+    digest = hashlib.sha256(secret).hexdigest()
+    return _ISOLATION_COMMAND.replace("__SECRET_SHA256__", digest)
+
+
+def _assert_isolation_call(arguments: object, secret: bytes) -> None:
+    _require(
+        arguments == {"cmd": _isolation_command(secret)},
+        "Fixture isolation command drifted.",
+    )
 
 
 def _trial_dir(job_dir: Path) -> Path:
@@ -105,6 +132,7 @@ def validate(job_dir: Path, secret: bytes) -> dict[str, Any]:
         "Fixture tool identity drifted.",
     )
     _require(calls[0].function_name == "exec_command", "Unexpected Codex tool.")
+    _assert_isolation_call(calls[0].arguments, secret)
     _require(
         any(
             result.source_call_id == calls[0].tool_call_id

@@ -13,6 +13,10 @@ from harbor.models.agent.context import AgentContext
 
 from benchmarks.terminal_bench.harbor_agent import _PROFILES, OpenAgentLabCodex
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
+from benchmarks.terminal_bench.validate_harbor_e2e import (
+    _assert_isolation_call,
+    _isolation_command,
+)
 
 _DEFAULT_USAGE = object()
 
@@ -205,6 +209,14 @@ class RelayMetadataTest(unittest.TestCase):
 
 
 class ProfileDriftTest(unittest.TestCase):
+    def test_provider_free_e2e_rejects_a_degraded_isolation_command(self) -> None:
+        secret = b"provider-free-test-key"
+        _assert_isolation_call({"cmd": _isolation_command(secret)}, secret)
+        with self.assertRaisesRegex(RuntimeError, "isolation command drifted"):
+            _assert_isolation_call(
+                {"cmd": "printf 'Hello, world!\\n' > /app/hello.txt"}, secret
+            )
+
     def test_typescript_compose_and_pilot_profiles_are_aligned(self) -> None:
         root = Path(__file__).parents[2]
         relay_command = (root / "apps/cli/src/relay-command.ts").read_text()

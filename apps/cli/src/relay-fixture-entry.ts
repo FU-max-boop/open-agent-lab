@@ -15,7 +15,7 @@ for file in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do
   while IFS= read -r candidate; do
     case "\$candidate" in *=*) candidate=\${candidate#*=} ;; esac
     [ -z "\$candidate" ] || [ "\$(printf %s "\$candidate" | sha256sum | cut -d' ' -f1)" != "\$expected" ] || exit 42
-  done < <(tr '\0' '\n' < "\$file" 2>/dev/null)
+  done < <(tr '\\0' '\\n' < "\$file" 2>/dev/null)
 done
 if [ -d /run/secrets ]; then
   for file in /run/secrets/*; do
