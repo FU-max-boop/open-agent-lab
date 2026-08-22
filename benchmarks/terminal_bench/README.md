@@ -21,12 +21,22 @@ ATIF trajectory remains unchanged.
 
 ## Gates before a publishable run
 
-The boundary and metadata path are implemented and provider-free tests pass, but
-this machine has not run the Compose topology. Before results are publishable, a
-retained Linux probe must confirm that the task can inspect its own environment,
-files and `/proc` but cannot find the durable key or relay process. Live probes
-must also produce consistent returned-model and provider request IDs. Use a
-disposable key file and a provider-side spend cap until those gates pass.
+The provider-free CI gate in `harbor-e2e.yaml` runs the complete Compose topology
+on Linux with Harbor 0.22 and Codex 0.149.0. A deterministic native Responses
+fixture makes Codex issue one real `exec_command` inside Harbor's official
+`hello-world` task. The command probes task-visible files, `/proc`, and mounted
+secrets for the fixture credential's hash before completing the task. The gate
+then requires the official reward, two linked relay requests, a valid seal,
+retained metadata, matching Harbor result/lock records, and a matching ATIF
+trajectory. The production relay image is also scanned as an OCI archive to
+ensure fixture code is absent from every image layer.
+
+That green gate proves the adapter and isolation machinery, not DeepSeek, GLM,
+or Terminal-Bench capability. Fixture metadata is labeled `synthetic-fixture`
+and fails both publication gates by design. Before any result is publishable,
+live probes must produce consistent returned-model and provider request IDs
+without exposing the durable key. Use a disposable key file and a provider-side
+spend cap until those gates pass.
 
 Five tasks were selected only from the pinned directory names by sorting
 `sha256(seed + NUL + task_id)` and taking the first five. No tests, solutions,
