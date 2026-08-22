@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,13 +11,22 @@ from uuid import UUID
 import yaml
 from harbor.agents.installed.codex import Codex
 from harbor.models.agent.context import AgentContext
+from harbor.models.job.config import JobConfig
+from harbor.models.task.id import PackageTaskId
 
+from benchmarks.terminal_bench import paired_results as paired
 from benchmarks.terminal_bench.harbor_agent import (
+    _EXPERIMENT_MANIFEST,
     _PROFILES,
+    _RELAY_AUTHORIZE_COMMAND,
+    _RELAY_BOOTSTRAP_COMMAND,
+    _RELAY_TOKEN_COMMAND,
+    _REPOSITORY_ROOT,
     _VERIFY_INSTRUCTION,
     _VERIFY_INSTRUCTION_SHA256,
     OpenAgentLabCodex,
     OpenAgentLabCodexVerifyInstructionV1,
+    _validate_live_source,
 )
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 from benchmarks.terminal_bench.validate_harbor_e2e import (
@@ -25,6 +35,43 @@ from benchmarks.terminal_bench.validate_harbor_e2e import (
 )
 
 _DEFAULT_USAGE = object()
+_RUN_BINDING = {
+    "schema_version": 1,
+    "experiment_id": "terminal-bench-2.1-verify-instruction-v1",
+    "replication_id": "screen-v1",
+    "source_revision": "a" * 40,
+    "experiment_manifest_sha256": "sha256:" + "b" * 64,
+    "relay_build_sha256": "sha256:" + "d" * 64,
+    "relay_image_sha256": "sha256:" + "f" * 64,
+    "preflight_sha256": "sha256:" + "c" * 64,
+    "task_snapshots_sha256": "sha256:" + "9" * 64,
+}
+_CAPABILITY_ID = "e" * 64
+
+
+def _bootstrap_identity(
+    *,
+    provider: str = "zai",
+    model: str = "glm-5.3",
+    capability_id: str = _CAPABILITY_ID,
+) -> str:
+    return _canonical(
+        {
+            "schemaVersion": 1,
+            "buildId": _RUN_BINDING["relay_build_sha256"],
+            "provider": provider,
+            "model": model,
+            "capabilityId": capability_id,
+        }
+    )
+
+
+def _relay_capability(
+    capability_id: str = _CAPABILITY_ID, bearer: str = "a" * 64
+) -> str:
+    return _canonical(
+        {"schemaVersion": 1, "capabilityId": capability_id, "bearer": bearer}
+    )
 
 
 def _canonical(value: object) -> str:
@@ -41,6 +88,10 @@ def _digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
 
 
+def _relay_time(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _write_evidence(
     directory: Path,
     *,
@@ -53,48 +104,88 @@ def _write_evidence(
 ) -> None:
     events = []
     for ordinal, (status, transport_state, usage) in enumerate(
-        requests or ((200, "completed", _DEFAULT_USAGE),), 1
+        ((200, "completed", _DEFAULT_USAGE),) if requests is None else requests,
+        1,
     ):
+        requested_at = datetime(2026, 8, 22, tzinfo=timezone.utc) + timedelta(
+            milliseconds=(ordinal - 1) * 3
+        )
+        observed_usage = (
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            if usage is _DEFAULT_USAGE
+            else usage
+        )
+        terminal_response = {
+            "id": f"response-test-{ordinal}",
+            "model": returned_model,
+        }
+        if observed_usage is not None:
+            terminal_response["usage"] = observed_usage
+        response_body = "data:" + _canonical(
+            {"type": "response.completed", "response": terminal_response}
+        )
+        request_body = _canonical({"model": "glm-5.3", "store": False, "stream": True})
         common = {
             "schemaVersion": schema_version,
             "relayVersion": "native-responses-relay-v1",
             "runId": "relay-test",
-            "relayInstanceId": "instance-test",
+            "relayInstanceId": "00000000-0000-4000-8000-000000000001",
             "providerId": provider_id,
             "buildId": build_id,
             "ordinal": ordinal,
-            "relayRequestId": f"request-test-{ordinal}",
+            "relayRequestId": f"00000000-0000-4000-8000-{ordinal:012d}",
         }
         events.extend(
             [
                 {
                     **common,
+                    "at": _relay_time(requested_at),
                     "event": "transport.responses.request",
                     "requestedModel": "glm-5.3",
+                    "requestBytes": len(request_body.encode()),
+                    "requestSha256": _digest(request_body),
+                    "clientRequestId": f"client-test-{ordinal}",
+                    "stream": True,
                 },
                 {
                     **common,
+                    "at": _relay_time(requested_at + timedelta(milliseconds=1)),
                     "event": "transport.responses.headers",
                     "status": status,
                     "providerRequestId": f"provider-test-{ordinal}",
+                    "modelHeader": "glm-5.3",
+                    "headersMs": 1,
                 },
                 {
                     **common,
+                    "at": _relay_time(requested_at + timedelta(milliseconds=2)),
                     "event": "transport.responses.closed",
                     "status": status,
                     "providerRequestId": f"provider-test-{ordinal}",
                     "transportState": transport_state,
+                    "errorCategory": (
+                        None
+                        if transport_state == "completed"
+                        else "client_disconnected"
+                        if transport_state == "aborted"
+                        else "upstream_failure"
+                    ),
+                    "responseBytes": len(response_body.encode()),
+                    "responseSha256": _digest(response_body),
+                    "durationMs": 2,
+                    "firstByteMs": 1,
                     "parseErrors": 0,
                     "metadataConflicts": [],
                     "modelConsistency": "consistent",
+                    "modelSources": {
+                        "http.openai-model.0": "glm-5.3",
+                        "event.response.completed.response.model.1": returned_model,
+                    },
                     "returnedModel": returned_model,
                     "responseId": f"response-test-{ordinal}",
+                    "systemFingerprint": None,
                     "terminalEvent": "response.completed",
-                    "usage": (
-                        {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-                        if usage is _DEFAULT_USAGE
-                        else usage
-                    ),
+                    "usage": observed_usage,
                 },
             ]
         )
@@ -104,12 +195,14 @@ def _write_evidence(
         body = {**event, "previousEventSha256": previous}
         previous = _digest(_canonical(body))
         lines.append(_canonical({**body, "eventSha256": previous}))
-    (directory / "provider-metadata.ndjson").write_text("\n".join(lines) + "\n")
+    (directory / "provider-metadata.ndjson").write_text(
+        "\n".join(lines) + ("\n" if lines else "")
+    )
     marker = {
         "schemaVersion": schema_version,
         "relayVersion": "native-responses-relay-v1",
         "runId": "relay-test",
-        "relayInstanceId": "instance-test",
+        "relayInstanceId": "00000000-0000-4000-8000-000000000001",
         "providerId": provider_id,
         "buildId": build_id,
         "state": "sealed",
@@ -241,6 +334,27 @@ class RelayMetadataTest(unittest.TestCase):
                 "usage_missing_or_invalid", metadata["publication_gate"]["reasons"]
             )
 
+    def test_empty_sealed_journal_is_auditable_but_cannot_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(directory, requests=())
+            with self.assertRaisesRegex(ValueError, "metadata is empty"):
+                relay_metadata(
+                    directory / "provider-metadata.ndjson",
+                    directory / "provider-metadata.ndjson.sealed",
+                )
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+                allow_empty=True,
+            )
+            self.assertEqual(metadata["event_count"], 0)
+            self.assertIsNone(metadata["chain_head"])
+            self.assertEqual(
+                metadata["publication_gate"],
+                {"ok": False, "reasons": ["no_completed_response"]},
+            )
+
     def test_boolean_schema_version_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -265,9 +379,7 @@ class ProfileDriftTest(unittest.TestCase):
         )
         self.assertEqual(manifest["runClass"], "development")
         for relative, expected in manifest["fileSha256"].items():
-            actual = (
-                "sha256:" + hashlib.sha256((root / relative).read_bytes()).hexdigest()
-            )
+            actual = paired._frozen_file_digest(root, relative)
             self.assertEqual(actual, expected, relative)
 
     def test_verify_instruction_bytes_are_frozen(self) -> None:
@@ -291,6 +403,8 @@ class ProfileDriftTest(unittest.TestCase):
     def test_typescript_compose_and_pilot_profiles_are_aligned(self) -> None:
         root = Path(__file__).parents[2]
         relay_command = (root / "apps/cli/src/relay-command.ts").read_text()
+        experiment = json.loads(_EXPERIMENT_MANIFEST.read_text())
+        runtime_tasks = experiment["runtime"]["taskOrder"]
         cases = (
             (
                 "deepseek",
@@ -312,6 +426,12 @@ class ProfileDriftTest(unittest.TestCase):
                 command = compose["services"]["open-agent-lab-relay"]["command"]
                 self.assertEqual(command[command.index("--provider") + 1], provider)
                 self.assertEqual(command[command.index("--model") + 1], selected_model)
+                self.assertEqual(
+                    compose["services"]["open-agent-lab-relay"]["environment"][
+                        "OAL_EXPECTED_RELAY_BUILD_ID"
+                    ],
+                    experiment["relayBuildIds"]["production"],
+                )
 
                 pilot = yaml.safe_load(
                     (
@@ -357,6 +477,31 @@ class ProfileDriftTest(unittest.TestCase):
                     paired["datasets"][0]["task_names"],
                     pilot["datasets"][0]["task_names"],
                 )
+                self.assertEqual(paired["datasets"][0]["task_names"], runtime_tasks)
+
+    def test_terminal_bench_task_filters_use_harbor_package_names(self) -> None:
+        root = Path(__file__).parents[2]
+        runtime_tasks = json.loads(_EXPERIMENT_MANIFEST.read_text())["runtime"][
+            "taskOrder"
+        ]
+        available = [
+            PackageTaskId(
+                org="terminal-bench",
+                name=name.removeprefix("terminal-bench/"),
+                ref="sha256:" + f"{index:064x}",
+            )
+            for index, name in enumerate(runtime_tasks, 1)
+        ]
+        for provider in _PROFILES:
+            with self.subTest(provider=provider):
+                config = yaml.safe_load(
+                    (
+                        root / "benchmarks/terminal_bench" / f"pilot-v2.{provider}.yaml"
+                    ).read_text()
+                )
+                dataset = JobConfig.model_validate(config).datasets[0]
+                selected = dataset._filter_task_ids(available)
+                self.assertEqual([task.get_name() for task in selected], runtime_tasks)
 
     def test_provider_free_e2e_is_exact_and_only_overrides_the_entrypoint(self) -> None:
         root = Path(__file__).parents[2]
@@ -371,6 +516,18 @@ class ProfileDriftTest(unittest.TestCase):
                 }
             ],
         )
+        expected_artifacts = [
+            {
+                "source": f"/var/lib/open-agent-lab/{name}",
+                "destination": name,
+                "service": "open-agent-lab-relay",
+            }
+            for name in (
+                "provider-metadata.ndjson",
+                "provider-metadata.ndjson.sealed",
+            )
+        ]
+        self.assertEqual(config["artifacts"], expected_artifacts)
         self.assertEqual(
             config["environment"]["extra_docker_compose"],
             [
@@ -385,6 +542,11 @@ class ProfileDriftTest(unittest.TestCase):
                 "services": {
                     "open-agent-lab-relay": {
                         "build": {"target": "fixture"},
+                        "environment": {
+                            "OAL_EXPECTED_RELAY_BUILD_ID": json.loads(
+                                _EXPERIMENT_MANIFEST.read_text()
+                            )["relayBuildIds"]["providerFreeFixture"]
+                        },
                         "entrypoint": [
                             "node",
                             "/app/apps/cli/relay-dist/relay-fixture-entry.js",
@@ -401,6 +563,7 @@ class ProfileDriftTest(unittest.TestCase):
             treatment["environment"]["extra_docker_compose"],
             config["environment"]["extra_docker_compose"],
         )
+        self.assertEqual(treatment["artifacts"], expected_artifacts)
         self.assertTrue(
             treatment["agents"][0]["kwargs"]["enable_verify_instruction_v1"]
         )
@@ -421,10 +584,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             "version": "0.149.0",
             "extra_env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
         }
-        with tempfile.TemporaryDirectory() as raw:
-            control = OpenAgentLabCodex(Path(raw) / "control", **common)
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+        ):
+            control = OpenAgentLabCodex(
+                Path(raw) / "control", run_binding=_RUN_BINDING, **common
+            )
             treatment = OpenAgentLabCodexVerifyInstructionV1(
-                Path(raw) / "treatment", **common
+                Path(raw) / "treatment", run_binding=_RUN_BINDING, **common
             )
 
         self.assertNotIn("developer_instructions", control._build_effective_config())
@@ -461,41 +629,427 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     Path(raw), enable_verify_instruction_v1=False, **common
                 )
 
+    def test_live_run_binding_is_strict_and_copied(self) -> None:
+        common = {
+            "model_name": "zai/glm-5.3",
+            "version": "0.149.0",
+            "extra_env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            source = dict(_RUN_BINDING)
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(Path(raw), run_binding=source, **common)
+            source["replication_id"] = "tampered"
+            self.assertEqual(agent._open_agent_lab_run_binding, _RUN_BINDING)
+
+            for invalid in (
+                {**_RUN_BINDING, "extra": True},
+                {**_RUN_BINDING, "schema_version": True},
+                {**_RUN_BINDING, "replication_id": "unknown"},
+                {**_RUN_BINDING, "source_revision": "a" * 39},
+                {**_RUN_BINDING, "relay_image_sha256": "sha256:bad"},
+                {**_RUN_BINDING, "preflight_sha256": "sha256:bad"},
+            ):
+                with (
+                    self.subTest(invalid=invalid),
+                    self.assertRaisesRegex(ValueError, "run_binding"),
+                ):
+                    OpenAgentLabCodex(Path(raw), run_binding=invalid, **common)
+
+    def test_bound_profile_validates_source_before_parent_constructor(self) -> None:
+        events: list[str] = []
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "benchmarks.terminal_bench.harbor_agent._validate_live_source",
+                side_effect=lambda _binding: events.append("source"),
+            ),
+            patch.object(
+                Codex,
+                "__init__",
+                autospec=True,
+                side_effect=lambda *_args, **_kwargs: events.append("parent"),
+            ),
+        ):
+            OpenAgentLabCodex(
+                Path(raw),
+                model_name="zai/glm-5.3",
+                version="0.149.0",
+                run_binding=_RUN_BINDING,
+                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            )
+        self.assertEqual(events, ["source", "parent"])
+
+    def test_wrong_or_editable_harbor_fails_before_parent_constructor(self) -> None:
+        for version, direct_url in (
+            ("0.23.0", None),
+            ("0.22.0", '{"dir_info":{"editable":true}}'),
+        ):
+            package = SimpleNamespace(
+                version=version, read_text=lambda _name, value=direct_url: value
+            )
+            with (
+                self.subTest(version=version, direct_url=direct_url),
+                tempfile.TemporaryDirectory() as raw,
+                patch(
+                    "benchmarks.terminal_bench.harbor_agent.distribution",
+                    return_value=package,
+                ),
+                patch.object(Codex, "__init__", autospec=True) as parent,
+                self.assertRaisesRegex(RuntimeError, "non-editable 0.22.0"),
+            ):
+                OpenAgentLabCodex(Path(raw))
+            parent.assert_not_called()
+
+    def test_live_source_is_rechecked_before_provider_work(self) -> None:
+        build_ids = json.loads(_EXPERIMENT_MANIFEST.read_text())["relayBuildIds"]
+        binding = {
+            **_RUN_BINDING,
+            "experiment_manifest_sha256": (
+                "sha256:"
+                + hashlib.sha256(_EXPERIMENT_MANIFEST.read_bytes()).hexdigest()
+            ),
+            "relay_build_sha256": build_ids["providerFreeFixture"],
+        }
+        clean = [
+            SimpleNamespace(returncode=0, stdout=f"{_REPOSITORY_ROOT}\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="a" * 40 + "\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with (
+            patch.dict(
+                "os.environ", {"OPEN_AGENT_LAB_REPO_ROOT": str(_REPOSITORY_ROOT)}
+            ),
+            patch("subprocess.run", side_effect=clean),
+        ):
+            _validate_live_source(binding)
+
+        with (
+            patch.dict(
+                "os.environ", {"OPEN_AGENT_LAB_REPO_ROOT": str(_REPOSITORY_ROOT)}
+            ),
+            patch("subprocess.run", side_effect=clean),
+            self.assertRaisesRegex(RuntimeError, "runtime bytes are frozen"),
+        ):
+            _validate_live_source(
+                {**binding, "relay_build_sha256": build_ids["production"]}
+            )
+
+        dirty = [
+            *clean[:2],
+            SimpleNamespace(returncode=0, stdout=" M result-aware-edit\n", stderr=""),
+        ]
+        with (
+            patch.dict(
+                "os.environ", {"OPEN_AGENT_LAB_REPO_ROOT": str(_REPOSITORY_ROOT)}
+            ),
+            patch("subprocess.run", side_effect=dirty),
+            self.assertRaisesRegex(RuntimeError, "drifted"),
+        ):
+            _validate_live_source(binding)
+
+        with (
+            patch.dict("os.environ", {"OPEN_AGENT_LAB_REPO_ROOT": "/tmp"}),
+            self.assertRaisesRegex(RuntimeError, "drifted"),
+        ):
+            _validate_live_source(binding)
+
+    def test_unbound_profile_and_legacy_fixture_bypass_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            common = {
+                "model_name": "zai/glm-5.3",
+                "version": "0.149.0",
+                "extra_env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            }
+            with self.assertRaisesRegex(RuntimeError, "prepared run binding"):
+                OpenAgentLabCodex(Path(raw) / "live", **common)
+            with self.assertRaisesRegex(ValueError, "prepared source binding"):
+                OpenAgentLabCodex(
+                    Path(raw) / "fixture", provider_free_fixture=True, **common
+                )
+
     async def test_setup_fetches_a_per_trial_token_before_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             trial = Path(raw)
             logs = trial / "agent"
             logs.mkdir()
-            agent = OpenAgentLabCodex(
-                logs,
-                model_name="zai/glm-5.3",
-                version="0.149.0",
-                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
-            )
+            calls: list[tuple[str, dict[str, object]]] = []
+            events: list[str] = []
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    logs,
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
 
             class Environment:
                 async def service_exec(
                     self, *_args: object, **_kwargs: object
                 ) -> object:
                     parent_setup.assert_awaited_once()
-                    return SimpleNamespace(return_code=0, stdout="a" * 64, stderr="")
+                    calls.append((str(_args[0]), _kwargs))
+                    events.append(f"exec:{_args[0]}")
+                    if _args[0] == "cat /app/relay-build-id":
+                        stdout = _RUN_BINDING["relay_build_sha256"]
+                    elif _args[0] == _RELAY_BOOTSTRAP_COMMAND:
+                        stdout = _bootstrap_identity()
+                    elif _args[0] == _RELAY_AUTHORIZE_COMMAND:
+                        stdout = ""
+                    else:
+                        stdout = _relay_capability()
+                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
-            with patch.object(Codex, "setup", new=AsyncMock()) as parent_setup:
+            with (
+                patch(
+                    "benchmarks.terminal_bench.harbor_agent._validate_live_source",
+                    side_effect=lambda _binding: events.append("source"),
+                ),
+                patch.object(
+                    Codex,
+                    "setup",
+                    new=AsyncMock(
+                        side_effect=lambda _environment: events.append("parent")
+                    ),
+                ) as parent_setup,
+            ):
                 await agent.setup(Environment())  # type: ignore[arg-type]
             parent_setup.assert_awaited_once()
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        "cat /app/relay-build-id",
+                        {
+                            "service": "open-agent-lab-relay",
+                            "timeout_sec": 10,
+                            "user": "1000",
+                        },
+                    ),
+                    (
+                        _RELAY_BOOTSTRAP_COMMAND,
+                        {
+                            "service": "open-agent-lab-relay",
+                            "timeout_sec": 10,
+                            "user": "0",
+                        },
+                    ),
+                    (
+                        _RELAY_AUTHORIZE_COMMAND,
+                        {
+                            "service": "open-agent-lab-relay",
+                            "timeout_sec": 10,
+                            "user": "0",
+                        },
+                    ),
+                    (
+                        _RELAY_TOKEN_COMMAND,
+                        {
+                            "service": "open-agent-lab-relay",
+                            "timeout_sec": 25,
+                            "user": "1000",
+                        },
+                    ),
+                ],
+            )
+            self.assertEqual(
+                events,
+                [
+                    "source",
+                    "parent",
+                    "exec:cat /app/relay-build-id",
+                    f"exec:{_RELAY_BOOTSTRAP_COMMAND}",
+                    "source",
+                    f"exec:{_RELAY_AUTHORIZE_COMMAND}",
+                    f"exec:{_RELAY_TOKEN_COMMAND}",
+                ],
+            )
             self.assertEqual(agent.extra_env["OAL_RELAY_TOKEN"], "a" * 64)
+
+    async def test_setup_rejects_the_wrong_relay_build_before_a_token(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+
+            class Environment:
+                async def service_exec(
+                    self, *_args: object, **_kwargs: object
+                ) -> object:
+                    return SimpleNamespace(
+                        return_code=0, stdout="sha256:" + "f" * 64, stderr=""
+                    )
+
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "setup", new=AsyncMock()),
+                self.assertRaisesRegex(RuntimeError, "build identity"),
+            ):
+                await agent.setup(Environment())  # type: ignore[arg-type]
+            self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
+
+    async def test_setup_rejects_mixed_provider_or_model_before_authorization(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            for provider, model in (
+                ("zai", "glm-5.3"),
+                ("deepseek", "deepseek-v4-flash"),
+            ):
+                with (
+                    self.subTest(provider=provider, model=model),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_live_source"
+                    ),
+                ):
+                    agent = OpenAgentLabCodex(
+                        Path(raw),
+                        model_name="deepseek/deepseek-v4-pro",
+                        version="0.149.0",
+                        run_binding=_RUN_BINDING,
+                        extra_env={
+                            "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"
+                        },
+                    )
+                commands: list[str] = []
+
+                class Environment:
+                    def __init__(
+                        self,
+                        selected_provider: str,
+                        selected_model: str,
+                        calls: list[str],
+                    ) -> None:
+                        self.provider = selected_provider
+                        self.model = selected_model
+                        self.calls = calls
+
+                    async def service_exec(
+                        self, command: str, **_kwargs: object
+                    ) -> object:
+                        self.calls.append(command)
+                        stdout = (
+                            _RUN_BINDING["relay_build_sha256"]
+                            if command == "cat /app/relay-build-id"
+                            else _bootstrap_identity(
+                                provider=self.provider, model=self.model
+                            )
+                        )
+                        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+                with (
+                    patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_live_source"
+                    ),
+                    patch.object(Codex, "setup", new=AsyncMock()),
+                    self.assertRaisesRegex(RuntimeError, "does not match this trial"),
+                ):
+                    await agent.setup(  # type: ignore[arg-type]
+                        Environment(provider, model, commands)
+                    )
+                self.assertEqual(
+                    commands, ["cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND]
+                )
+                self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
+
+    async def test_setup_rejects_an_invalid_relay_token(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+
+            class Environment:
+                async def service_exec(self, command: str, **_kwargs: object) -> object:
+                    if command == "cat /app/relay-build-id":
+                        stdout = _RUN_BINDING["relay_build_sha256"]
+                    elif command == _RELAY_BOOTSTRAP_COMMAND:
+                        stdout = _bootstrap_identity()
+                    elif command == _RELAY_AUTHORIZE_COMMAND:
+                        stdout = ""
+                    else:
+                        stdout = _relay_capability(capability_id="f" * 64)
+                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "setup", new=AsyncMock()),
+                self.assertRaisesRegex(RuntimeError, "per-trial relay capability"),
+            ):
+                await agent.setup(Environment())  # type: ignore[arg-type]
+            self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
+
+    async def test_setup_never_reads_a_token_when_authorization_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            commands: list[str] = []
+
+            class Environment:
+                async def service_exec(self, command: str, **_kwargs: object) -> object:
+                    commands.append(command)
+                    return SimpleNamespace(
+                        return_code=(
+                            0
+                            if command
+                            in {"cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND}
+                            else 1
+                        ),
+                        stdout=(
+                            _RUN_BINDING["relay_build_sha256"]
+                            if command == "cat /app/relay-build-id"
+                            else _bootstrap_identity()
+                            if command == _RELAY_BOOTSTRAP_COMMAND
+                            else ""
+                        ),
+                        stderr="",
+                    )
+
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "setup", new=AsyncMock()),
+                self.assertRaisesRegex(RuntimeError, "post-validation authorization"),
+            ):
+                await agent.setup(Environment())  # type: ignore[arg-type]
+            self.assertEqual(
+                commands,
+                [
+                    "cat /app/relay-build-id",
+                    _RELAY_BOOTSTRAP_COMMAND,
+                    _RELAY_AUTHORIZE_COMMAND,
+                ],
+            )
+            self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
     async def test_relay_evidence_is_retained_outside_task_mounted_logs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             trial = Path(raw)
             logs = trial / "agent"
             logs.mkdir()
-            agent = OpenAgentLabCodex(
-                logs,
-                model_name="zai/glm-5.3",
-                version="0.149.0",
-                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
-            )
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    logs,
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
 
             class Environment:
                 async def service_exec(self, command: str, **_kwargs: object) -> object:
@@ -514,15 +1068,18 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_evidence_failure_fails_an_otherwise_successful_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            agent = OpenAgentLabCodex(
-                Path(raw),
-                model_name="zai/glm-5.3",
-                version="0.149.0",
-                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
-            )
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
             agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
             agent.logger.disabled = True
             with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "run", new=AsyncMock()),
                 patch.object(
                     agent,
@@ -538,12 +1095,14 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             trial = Path(raw)
             logs = trial / "agent"
             logs.mkdir()
-            agent = OpenAgentLabCodex(
-                logs,
-                model_name="zai/glm-5.3",
-                version="0.149.0",
-                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
-            )
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    logs,
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
             agent.logger.disabled = True
             context = AgentContext()
             agent.populate_context_post_run(context)
@@ -564,12 +1123,14 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             trial = Path(raw)
             logs = trial / "agent"
             logs.mkdir()
-            agent = OpenAgentLabCodex(
-                logs,
-                model_name="zai/glm-5.3",
-                version="0.149.0",
-                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
-            )
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    logs,
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
             agent._provider_evidence_dir.mkdir(parents=True)
             _write_evidence(agent._provider_evidence_dir)
             (logs / "trajectory.json").write_text(
@@ -591,6 +1152,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(binding["variant_id"], "control-v1")
             self.assertIsNone(binding["requested_developer_instructions_sha256"])
+            self.assertEqual(binding["run_binding"], _RUN_BINDING)
             self.assertEqual(
                 context.metadata["open_agent_lab_provider"]["agent_variant"],
                 {

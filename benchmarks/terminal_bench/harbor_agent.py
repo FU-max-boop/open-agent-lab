@@ -4,7 +4,10 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
+import subprocess
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any, TypedDict, override
 from urllib.parse import urlsplit
@@ -13,6 +16,10 @@ from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from . import harbor_environment as _harbor_environment
+from .harbor_environment import (
+    PinnedRelayDockerEnvironment as _PinnedRelayDockerEnvironment,
+)
 from .relay_evidence import relay_metadata
 
 
@@ -40,6 +47,14 @@ _RELAY_SERVICE = "open-agent-lab-relay"
 _RELAY_SIDECAR = "/var/lib/open-agent-lab/provider-metadata.ndjson"
 _RELAY_SEAL = f"{_RELAY_SIDECAR}.sealed"
 _RELAY_TOKEN_FILE = f"{_RELAY_SIDECAR}.client-token"
+_RELAY_BOOTSTRAP_FILE = f"{_RELAY_SIDECAR}.bootstrap-ready"
+_RELAY_BUILD_ID_FILE = "/app/relay-build-id"
+_RELAY_AUTHORIZE_COMMAND = "kill -USR1 1"
+_RELAY_BOOTSTRAP_COMMAND = f"cat {_RELAY_BOOTSTRAP_FILE}"
+_RELAY_TOKEN_COMMAND = (
+    f"i=0; while [ ! -f {_RELAY_TOKEN_FILE} ]; do i=$((i+1)); "
+    f'[ "$i" -lt 200 ] || exit 1; sleep 0.1; done; cat {_RELAY_TOKEN_FILE}'
+)
 _RELAY_TOKEN_ENV = "OAL_RELAY_TOKEN"
 _RELAY_URL_ENV = "OAL_RELAY_URL"
 _VERIFY_INSTRUCTION_PATH = Path(__file__).with_name("verify-instruction-v1.txt")
@@ -55,6 +70,183 @@ if (
 ):
     raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
 _VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
+_EXPERIMENT_ID = "terminal-bench-2.1-verify-instruction-v1"
+_HARBOR_VERSION = "0.22.0"
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CAPABILITY = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
+_RUN_BINDING_KEYS = {
+    "schema_version",
+    "experiment_id",
+    "replication_id",
+    "source_revision",
+    "experiment_manifest_sha256",
+    "relay_build_sha256",
+    "relay_image_sha256",
+    "preflight_sha256",
+    "task_snapshots_sha256",
+}
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_EXPERIMENT_MANIFEST = (
+    _REPOSITORY_ROOT / "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
+)
+
+
+def _run_binding(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != _RUN_BINDING_KEYS:
+        raise ValueError("run_binding has an invalid schema.")
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["experiment_id"] != _EXPERIMENT_ID
+        or value["replication_id"] not in {"screen-v1", "mirror-v1"}
+        or not isinstance(value["source_revision"], str)
+        or not _SOURCE_REVISION.fullmatch(value["source_revision"])
+        or any(
+            not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key])
+            for key in (
+                "experiment_manifest_sha256",
+                "relay_build_sha256",
+                "relay_image_sha256",
+                "preflight_sha256",
+                "task_snapshots_sha256",
+            )
+        )
+    ):
+        raise ValueError("run_binding has invalid values.")
+    return dict(value)
+
+
+def _unique_json(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate relay control key")
+        value[key] = item
+    return value
+
+
+def _bootstrap_identity(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise RuntimeError("Relay bootstrap identity is invalid.") from error
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {"schemaVersion", "buildId", "provider", "model", "capabilityId"}
+        or type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != 1
+        or not isinstance(value["buildId"], str)
+        or not _DIGEST.fullmatch(value["buildId"])
+        or not isinstance(value["provider"], str)
+        or not isinstance(value["model"], str)
+        or not isinstance(value["capabilityId"], str)
+        or not _CAPABILITY.fullmatch(value["capabilityId"])
+    ):
+        raise RuntimeError("Relay bootstrap identity is invalid.")
+    return value
+
+
+def _validate_harbor_runtime() -> None:
+    try:
+        package = distribution("harbor")
+        direct_url = package.read_text("direct_url.json")
+        metadata = (
+            json.loads(direct_url, object_pairs_hook=_unique_json)
+            if direct_url is not None
+            else {}
+        )
+        directory = metadata.get("dir_info", {})
+        editable = isinstance(directory, dict) and directory.get("editable") is True
+    except (PackageNotFoundError, json.JSONDecodeError, TypeError, ValueError) as error:
+        raise RuntimeError("The frozen Harbor runtime is unavailable.") from error
+    if package.version != _HARBOR_VERSION or editable:
+        raise RuntimeError("Harbor must be the non-editable 0.22.0 distribution.")
+
+
+def _relay_capability(raw: str, capability_id: str) -> str:
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise RuntimeError("Relay capability is invalid.") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schemaVersion", "capabilityId", "bearer"}
+        or type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != 1
+        or value["capabilityId"] != capability_id
+        or not isinstance(value["bearer"], str)
+        or not _CAPABILITY.fullmatch(value["bearer"])
+    ):
+        raise RuntimeError("Relay capability is invalid.")
+    return value["bearer"]
+
+
+def _validate_live_source(binding: dict[str, Any]) -> None:
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=_REPOSITORY_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise RuntimeError("Live source identity could not be verified.")
+        return completed.stdout.strip()
+
+    try:
+        configured_root = (
+            Path(os.environ["OPEN_AGENT_LAB_REPO_ROOT"])
+            .expanduser()
+            .resolve(strict=True)
+        )
+        manifest_bytes = _EXPERIMENT_MANIFEST.read_bytes()
+        manifest = json.loads(manifest_bytes)
+        relay_build_ids = manifest["relayBuildIds"]
+        runtime = manifest["runtime"]
+        if not isinstance(relay_build_ids, dict) or set(relay_build_ids) != {
+            "production",
+            "providerFreeFixture",
+        }:
+            raise TypeError("relayBuildIds has an invalid schema")
+        allowed_relay_build_ids = set(relay_build_ids.values())
+        if len(allowed_relay_build_ids) != 2 or any(
+            not isinstance(value, str) or not _DIGEST.fullmatch(value)
+            for value in allowed_relay_build_ids
+        ):
+            raise ValueError("relayBuildIds has invalid values")
+        if (
+            not isinstance(runtime, dict)
+            or type(runtime.get("hermeticCodexRuntimeReady")) is not bool
+        ):
+            raise ValueError("hermetic Codex runtime gate is invalid")
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        raise RuntimeError("Live source identity could not be verified.") from error
+    manifest_sha = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    if (
+        configured_root != _REPOSITORY_ROOT
+        or git("rev-parse", "--show-toplevel") != str(_REPOSITORY_ROOT)
+        or git("rev-parse", "--verify", "HEAD^{commit}") != binding["source_revision"]
+        or git("status", "--porcelain=v1", "--untracked-files=all")
+        or manifest_sha != binding["experiment_manifest_sha256"]
+        or binding["relay_build_sha256"] not in allowed_relay_build_ids
+        or Path(__file__).resolve(strict=True)
+        != configured_root / "benchmarks/terminal_bench/harbor_agent.py"
+        or Path(_harbor_environment.__file__).resolve(strict=True)
+        != configured_root / "benchmarks/terminal_bench/harbor_environment.py"
+        or _PinnedRelayDockerEnvironment.__module__
+        != "benchmarks.terminal_bench.harbor_environment"
+    ):
+        raise RuntimeError("Live source drifted after the clean preflight.")
+    if (
+        binding["relay_build_sha256"] == relay_build_ids["production"]
+        and not runtime["hermeticCodexRuntimeReady"]
+    ):
+        raise RuntimeError("Live work is blocked until Codex runtime bytes are frozen.")
 
 
 def _relay_url(env: dict[str, str]) -> str:
@@ -96,10 +288,14 @@ class OpenAgentLabCodex(Codex):
         config: Path | str | dict[str, Any] | None = None,
         extra_env: dict[str, str] | None = None,
         enable_verify_instruction_v1: bool = False,
+        run_binding: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        _validate_harbor_runtime()
         if config is not None:
             raise ValueError("OpenAgentLabCodex owns its benchmark config.")
+        if "provider_free_fixture" in kwargs:
+            raise ValueError("Provider-free runs require a prepared source binding.")
         if type(enable_verify_instruction_v1) is not bool:
             raise ValueError(
                 "enable_verify_instruction_v1 must be a boolean experiment switch."
@@ -131,6 +327,10 @@ class OpenAgentLabCodex(Codex):
                 "Provider keys and per-trial relay tokens belong only in the relay service."
             )
         relay_url = _relay_url(agent_env)
+        binding = _run_binding(run_binding)
+        if binding is None:
+            raise RuntimeError("Live provider work requires a prepared run binding.")
+        _validate_live_source(binding)
 
         context_window = profile["context_window"]
         provider_config = {
@@ -162,6 +362,7 @@ class OpenAgentLabCodex(Codex):
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
+        self._open_agent_lab_run_binding = binding
         self._open_agent_lab_variant = {
             "schema_version": 1,
             "variant_id": (
@@ -188,19 +389,62 @@ class OpenAgentLabCodex(Codex):
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
+        binding = self._validate_request_source()
         await super().setup(environment)
-        token_result = await environment.service_exec(
-            f"cat {_RELAY_TOKEN_FILE}",
+        build_result = await environment.service_exec(
+            f"cat {_RELAY_BUILD_ID_FILE}",
             service=_RELAY_SERVICE,
             timeout_sec=10,
             user="1000",
         )
-        relay_token = (token_result.stdout or "").strip()
         if (
-            token_result.return_code != 0
-            or len(relay_token.encode()) != 64
-            or not re.fullmatch(r"[0-9a-f]{64}", relay_token)
+            build_result.return_code != 0
+            or (build_result.stdout or "").strip() != binding["relay_build_sha256"]
         ):
+            raise RuntimeError("Relay build identity does not match the preflight.")
+        bootstrap_result = await environment.service_exec(
+            _RELAY_BOOTSTRAP_COMMAND,
+            service=_RELAY_SERVICE,
+            timeout_sec=10,
+            user="0",
+        )
+        if bootstrap_result.return_code != 0:
+            raise RuntimeError("Relay bootstrap identity is unavailable.")
+        identity = _bootstrap_identity(bootstrap_result.stdout or "")
+        if any(
+            identity[key] != expected
+            for key, expected in {
+                "schemaVersion": 1,
+                "buildId": binding["relay_build_sha256"],
+                "provider": self._open_agent_lab_provider,
+                "model": self._open_agent_lab_model,
+            }.items()
+        ):
+            raise RuntimeError("Relay bootstrap identity does not match this trial.")
+        self._validate_request_source()
+        authorization = await environment.service_exec(
+            _RELAY_AUTHORIZE_COMMAND,
+            service=_RELAY_SERVICE,
+            timeout_sec=10,
+            user="0",
+        )
+        if authorization.return_code != 0:
+            raise RuntimeError("Relay refused post-validation authorization.")
+        token_result = await environment.service_exec(
+            _RELAY_TOKEN_COMMAND,
+            service=_RELAY_SERVICE,
+            timeout_sec=25,
+            user="1000",
+        )
+        try:
+            relay_token = _relay_capability(
+                token_result.stdout or "", identity["capabilityId"]
+            )
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Failed to obtain the per-trial relay capability."
+            ) from error
+        if token_result.return_code != 0:
             raise RuntimeError("Failed to obtain the per-trial relay capability.")
         self._extra_env[_RELAY_TOKEN_ENV] = relay_token
 
@@ -210,6 +454,7 @@ class OpenAgentLabCodex(Codex):
     ) -> None:
         primary_error: BaseException | None = None
         try:
+            self._validate_request_source()
             if _RELAY_TOKEN_ENV not in self._extra_env:
                 raise RuntimeError("Relay capability was not initialized during setup.")
             await super().run(instruction, environment, context)
@@ -233,6 +478,12 @@ class OpenAgentLabCodex(Codex):
                 )
                 if primary_error is None:
                     raise
+
+    def _validate_request_source(self) -> dict[str, Any]:
+        if self._open_agent_lab_run_binding is None:
+            raise RuntimeError("Live provider work requires a prepared run binding.")
+        _validate_live_source(self._open_agent_lab_run_binding)
+        return self._open_agent_lab_run_binding
 
     async def _seal_and_retain(self, environment: BaseEnvironment) -> None:
         command = (
@@ -286,6 +537,7 @@ class OpenAgentLabCodex(Codex):
             metadata = relay_metadata(
                 self._provider_evidence_dir / "provider-metadata.ndjson",
                 self._provider_evidence_dir / "provider-metadata.ndjson.sealed",
+                allow_empty=True,
             )
             reasons = metadata["publication_gate"]["reasons"]
             seal = metadata["seal"]
@@ -336,6 +588,7 @@ class OpenAgentLabCodex(Codex):
             "requested_developer_instructions_sha256": self._open_agent_lab_variant[
                 "requested_developer_instructions_sha256"
             ],
+            "run_binding": self._open_agent_lab_run_binding,
         }
         binding_hash = hashlib.sha256(
             json.dumps(

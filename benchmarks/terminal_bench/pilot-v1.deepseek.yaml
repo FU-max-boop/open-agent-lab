@@ -39,8 +39,8 @@ datasets:
   - name: terminal-bench/terminal-bench-2-1
     ref: "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
     task_names:
-      - model-extraction-relu-logits
-      - multi-source-data-merger
-      - feal-differential-cryptanalysis
-      - video-processing
-      - large-scale-text-editing
+      - terminal-bench/model-extraction-relu-logits
+      - terminal-bench/video-processing
+      - terminal-bench/feal-differential-cryptanalysis
+      - terminal-bench/large-scale-text-editing
+      - terminal-bench/multi-source-data-merger

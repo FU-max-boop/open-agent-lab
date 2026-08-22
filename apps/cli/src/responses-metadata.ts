@@ -49,6 +49,12 @@ function numericUsage(value: unknown): Record<string, number> | null {
     Number.isSafeInteger(inputDetails.cached_tokens) &&
     inputDetails.cached_tokens >= 0
   ) {
+    if (
+      fields.cached_input_tokens !== undefined &&
+      fields.cached_input_tokens !== inputDetails.cached_tokens
+    ) {
+      throw new Error("conflicting cached token aliases");
+    }
     fields.cached_input_tokens = inputDetails.cached_tokens;
   }
   const outputDetails = value.output_tokens_details;
@@ -58,6 +64,12 @@ function numericUsage(value: unknown): Record<string, number> | null {
     Number.isSafeInteger(outputDetails.reasoning_tokens) &&
     outputDetails.reasoning_tokens >= 0
   ) {
+    if (
+      fields.reasoning_output_tokens !== undefined &&
+      fields.reasoning_output_tokens !== outputDetails.reasoning_tokens
+    ) {
+      throw new Error("conflicting reasoning token aliases");
+    }
     fields.reasoning_output_tokens = outputDetails.reasoning_tokens;
   }
   return Object.keys(fields).length > 0 ? fields : null;
@@ -229,7 +241,7 @@ export class SseMetadataObserver {
       }
       const model = safeString(response.model);
       if (model !== null) {
-        this.addModel(`event.${eventType}.response.model`, model);
+        this.addModel(`event.${eventType}.response.model`, model, terminal);
         if (terminal) this.terminalModel = model;
       }
       const headers = response.headers;
@@ -239,6 +251,7 @@ export class SseMetadataObserver {
           this.addModel(
             `event.${eventType}.response.headers.openai-model`,
             headerModel,
+            terminal,
           );
         }
       }
@@ -255,10 +268,12 @@ export class SseMetadataObserver {
     }
   }
 
-  private addModel(source: string, model: string): void {
+  private addModel(source: string, model: string, terminal = false): void {
     if (this.modelValues.size > 0 && !this.modelValues.has(model)) this.modelConflict = true;
     if (this.modelValues.size < 2 || this.modelValues.has(model)) this.modelValues.add(model);
-    if (this.models.size < 16) this.models.set(`${source}.${this.eventIndex}`, model);
+    if (this.models.size < (terminal ? 16 : 15)) {
+      this.models.set(`${source}.${this.eventIndex}`, model);
+    }
   }
 
   private addBounded(values: Set<string>, value: string): void {

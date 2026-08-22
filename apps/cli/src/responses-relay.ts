@@ -445,6 +445,9 @@ export async function startNativeResponsesRelay(
             await requestBody(request, limits.maxRequestBytes),
             options.expectedModel,
           );
+          if (body.length > limits.maxRequestBytes) {
+            throw new RelayHttpError(413, "request_too_large");
+          }
           accepted += 1;
           ordinal = accepted;
           const clientRequestId = safeString(request.headers["x-client-request-id"]);
