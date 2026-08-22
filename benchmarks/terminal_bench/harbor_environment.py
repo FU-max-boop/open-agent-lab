@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import asyncio.subprocess
 import base64
-import binascii
 import fcntl
 import hashlib
 import json
@@ -1396,6 +1395,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         *,
         service: str | None = None,
     ) -> None:
+        # Docker's archive API cannot see runtime files stored on tmpfs.
         limit = _RELAY_ARTIFACT_LIMITS.get(source_path) if service == _RELAY else None
         if limit is None:
             await super().service_download_file(
@@ -1420,7 +1420,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             raise RuntimeError("Relay evidence export failed.")
         try:
             data = base64.b64decode((result.stdout or "").strip(), validate=True)
-        except (ValueError, binascii.Error) as error:
+        except ValueError as error:
             raise RuntimeError("Relay evidence export was not valid base64.") from error
         if len(data) > limit:
             raise RuntimeError("Relay evidence export exceeded its size limit.")
