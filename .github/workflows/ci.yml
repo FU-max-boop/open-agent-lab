@@ -201,6 +201,7 @@ jobs:
           if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e "$control_job"; then
             cat "$control_job"/*/artifacts/manifest.json
+            cat "$control_job"/*/trial.log
             exit 1
           fi
           harbor jobs start \
@@ -211,5 +212,6 @@ jobs:
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
             "$treatment_job" verify-instruction-v1; then
             cat "$treatment_job"/*/artifacts/manifest.json
+            cat "$treatment_job"/*/trial.log
             exit 1
           fi
