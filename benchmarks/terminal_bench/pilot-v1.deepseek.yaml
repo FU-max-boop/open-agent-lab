@@ -11,9 +11,19 @@ orchestrator:
 retry:
   max_retries: 0
 
+artifacts:
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson
+    destination: provider-metadata.ndjson
+    service: open-agent-lab-relay
+  - source: /var/lib/open-agent-lab/provider-metadata.ndjson.sealed
+    destination: provider-metadata.ndjson.sealed
+    service: open-agent-lab-relay
+
 environment:
   type: docker
   delete: true
+  extra_docker_compose:
+    - benchmarks/terminal_bench/relay.deepseek.compose.yaml
 
 agents:
   - name: open-agent-lab-codex
@@ -23,7 +33,7 @@ agents:
       version: "0.149.0"
       reasoning_effort: high
     env:
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      OAL_RELAY_URL: http://open-agent-lab-relay:8080/v1
 
 datasets:
   - name: terminal-bench/terminal-bench-2-1

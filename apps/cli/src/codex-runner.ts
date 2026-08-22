@@ -135,6 +135,10 @@ function invocation(
   if (spec.prompt.trim() === "") throw new Error("Codex prompt cannot be empty.");
 
   const cwd = resolve(spec.workspace);
+  const probeNetwork =
+    selected.scope === "loopback-probe"
+      ? ["--config", "sandbox_workspace_write.network_access=true"]
+      : [];
   return Object.freeze({
     command: spec.codexPath ?? "codex",
     args: Object.freeze([
@@ -148,6 +152,7 @@ function invocation(
       "never",
       "--sandbox",
       "workspace-write",
+      ...probeNetwork,
       "--skip-git-repo-check",
       "--cd",
       cwd,

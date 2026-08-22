@@ -18,6 +18,13 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
 - `codex-run` builds isolated native Responses invocations for DeepSeek and Z.AI,
   keeps credentials in environment variables, validates exact model IDs, and
   provides a secret-free dry-run.
+- A native Responses byte relay now fixes one provider/model per process,
+  strips caller credentials, disables redirects and retries, enforces bounded
+  access, and fsyncs a hash-chained metadata journal.
+- The Harbor adapter now resolves no provider credential. It sends only a
+  per-trial relay token to Codex, seals the listener after the agent phase, and
+  validates a host-only copy while retaining the journal and seal as separate
+  Harbor artifacts.
 
 ## Current slice — Codex provider conformance
 
@@ -26,10 +33,10 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
   `apply_patch`, usage, terminal errors, and cut streams.
 - Run opt-in live conformance for exact GLM and DeepSeek routes; retain redacted
   raw event fixtures and actual returned model identity.
-- Keep provider credentials outside the same-UID Harbor/Codex process tree, then
-  prove the boundary with a Linux `/proc` regression probe.
-- Preserve provider-returned model and transport request metadata beside ATIF;
-  do not substitute Harbor's requested-model fallback.
+- Prove the sidecar boundary with a Linux task-container filesystem,
+  environment, argv, and `/proc` sentinel scan.
+- Run the relay against live GLM and DeepSeek Responses routes with disposable,
+  provider-budget-capped credentials.
 - Add a minimal Harbor subclass of its official Codex adapter; do not rewrite
   installation, container execution, session capture, or ATIF conversion.
 - Freeze a five-task Terminal-Bench 2.1 pilot before observing outcomes.
@@ -49,6 +56,9 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
 - The exact Codex binary/version, provider route, requested model, returned model,
   reasoning setting, retries, and context limit are retained for every attempt.
 - Provider credentials never enter argv, configuration, trajectory, or evidence.
+- A task-container adversarial probe cannot find the durable provider key or
+  access the relay process namespace; the disposable relay token remains
+  request-, model-, time-, network-, and spend-bounded.
 - Fake-server probes cover the Responses events Codex actually consumes.
 - Live text, tool, patch, truncation, and error probes pass or produce a narrow,
   documented compatibility gap.
