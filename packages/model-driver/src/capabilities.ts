@@ -36,14 +36,14 @@ function requirePositiveSafeInteger(
   return value as number;
 }
 
-/** Parse and freeze an untrusted capability probe result. */
+/** Parse and freeze an untrusted effective capability profile. */
 export function parseModelCapabilities(
   value: unknown,
 ): Readonly<ModelCapabilities> {
   if (!isRecord(value)) {
     throw new ModelContractError(
       "invalid_capabilities",
-      "Capability probe must return an object.",
+      "Capability profile must be an object.",
     );
   }
 
@@ -140,12 +140,15 @@ export function requirementsForRequest(
   let text = false;
   let image = false;
   let tools = (request.tools?.length ?? 0) > 0;
+  let reasoning = request.reasoning !== undefined;
 
   for (const message of request.messages) {
     for (const part of message.content) {
       if (part.type === "text") text = true;
+      if (part.type === "reasoning") reasoning = true;
       if (part.type === "image") image = true;
-      if (part.type === "tool_call" || part.type === "tool_result") tools = true;
+      if (part.type === "tool_call" || part.type === "tool_result")
+        tools = true;
     }
   }
 
@@ -162,9 +165,7 @@ export function requirementsForRequest(
       ? { parallelTools: true as const }
       : {}),
     ...(strictSchema ? { strictSchema: true as const } : {}),
-    ...(request.reasoning?.enabled === true
-      ? { reasoning: true as const }
-      : {}),
+    ...(reasoning ? { reasoning: true as const } : {}),
     ...(requestedOutput === undefined ? {} : { minOutput: requestedOutput }),
   };
 }
@@ -177,6 +178,15 @@ export function assertRequestSupported(
     throw new ModelContractError(
       "invalid_request",
       "A model request must contain at least one message.",
+    );
+  }
+  if (
+    request.reasoning?.enabled === false &&
+    request.reasoning.effort !== undefined
+  ) {
+    throw new ModelContractError(
+      "invalid_request",
+      "reasoning.effort cannot be set when reasoning is disabled.",
     );
   }
   if (

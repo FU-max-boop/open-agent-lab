@@ -121,6 +121,36 @@ test("request requirements are derived from content and controls", () => {
   );
 });
 
+test("reasoning replay and explicit disable both require reasoning support", () => {
+  const replay: ModelRequest = {
+    messages: [
+      { role: "assistant", content: [{ type: "reasoning", text: "state" }] },
+    ],
+  };
+  const disabled: ModelRequest = {
+    messages: [{ role: "user", content: [{ type: "text", text: "answer" }] }],
+    reasoning: { enabled: false },
+  };
+
+  assert.deepEqual(requirementsForRequest(replay), { reasoning: true });
+  assert.equal(requirementsForRequest(disabled).reasoning, true);
+  assert.throws(
+    () => assertRequestSupported(disabled, BASE_CAPABILITIES),
+    (error: unknown) =>
+      error instanceof ModelContractError &&
+      error.code === "capability_mismatch",
+  );
+  assert.throws(
+    () =>
+      assertRequestSupported(
+        { ...disabled, reasoning: { enabled: false, effort: "low" } },
+        { ...BASE_CAPABILITIES, reasoning: true },
+      ),
+    (error: unknown) =>
+      error instanceof ModelContractError && error.code === "invalid_request",
+  );
+});
+
 test("request validation catches impossible tool controls before a call", () => {
   assert.throws(
     () =>
