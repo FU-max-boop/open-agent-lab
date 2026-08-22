@@ -150,9 +150,10 @@
     "apps/cli/src/responses-fixture.ts": "sha256:ec5bcea7905db7b4ac15adf0ed3ba919f50c87978b625d7b1d5de94b6e68c478",
     "benchmarks/terminal_bench/harbor-e2e.yaml": "sha256:3aa2b2f07067ac9221a447ec94857592b3e391286e302ed52ebab4ba7c0cd7cd",
     "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:1cbf361ed3452c68fe07b9d3e016bdb0416b32d4f8490d58c88933cfa53564b9",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:749f39ed627516971ad17b870ea0f4d491593d56aab0c2d27ecd99dc25bfbd6f",
-    "benchmarks/terminal_bench/harbor_environment.py": "sha256:7a9ad3a9eeab050cb2b754ffcfb607b3013e3f5d2d3d67f3d370f0fc09d73d1e",
-    "benchmarks/terminal_bench/paired_results.py": "sha256:3c9862c888c89d7a326f06b77fd0a2ea7b71a7c697133d478e688f9c31cccdbe",
+    "benchmarks/terminal_bench/experiment_contract.py": "sha256:3c208dfd2ac060fac90de53876c59e2db114310507e2e8ec2d90ecfc4b00e8e9",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:79e91e07733a539400932a24942b1d9205dfbbf41203c6d83795709566fb17e7",
+    "benchmarks/terminal_bench/harbor_environment.py": "sha256:f2bccdd0d439d4695fe3eaad39351d56fd02aae3b2eba09a9f5a4f09f1f0212d",
+    "benchmarks/terminal_bench/paired_results.py": "sha256:4403a991655efc75794a2dec833d31c8e11404ce1949b5cae8ed00dfb651bcc0",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
@@ -160,7 +161,7 @@
     "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:04aec0f94b40d12117934d27cbf1bd2c52d8e54ec2035cadc78b75be4c5484b2",
     "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:f6aaf15960e951ecf06036f4e8afffab446208f251aafe8211cfa874779bf8a5",
     "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:4360320211ea8966e1072ede35f35c7c35055aede5341e5da35526fa04e69d87",
-    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:19b4c0aa13177c798817d306fbb196dfda6fd4835908613e3c3e05dd5443bf7c",
+    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:9893b97802cdbd8a749b58976fbbd0175d424d75541e85499fd39d6323853c7b",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },
   "metrics": [

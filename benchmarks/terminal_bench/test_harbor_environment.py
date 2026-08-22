@@ -16,14 +16,16 @@ from unittest.mock import AsyncMock, Mock, patch
 import yaml
 from harbor.environments.docker.docker import DockerEnvironment
 
+from benchmarks.terminal_bench.experiment_contract import (
+    EXPERIMENT_ID,
+    canonical_json,
+    digest_bytes,
+)
 from benchmarks.terminal_bench.harbor_environment import (
-    _EXPERIMENT,
     PinnedRelayDockerEnvironment,
     _allowed_main_binds,
     _assert_resolved_graph,
     _assert_runtime_gate,
-    _canonical,
-    _digest,
     _live_task_authority,
     _memfd_path,
     _minimal_compose_env,
@@ -43,7 +45,7 @@ from benchmarks.terminal_bench.harbor_environment import (
 def _binding(**changes: object) -> dict[str, object]:
     value: dict[str, object] = {
         "schema_version": 1,
-        "experiment_id": _EXPERIMENT,
+        "experiment_id": EXPERIMENT_ID,
         "replication_id": "screen-v1",
         "source_revision": "a" * 40,
         "experiment_manifest_sha256": "sha256:" + "b" * 64,
@@ -272,7 +274,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             "read_only": True,
         }
         allowed_binds = _allowed_main_binds(
-            _canonical({"services": {"main": {"volumes": [allowed_mount]}}})
+            canonical_json({"services": {"main": {"volumes": [allowed_mount]}}})
         )
         _assert_resolved_graph(
             graph({"image": "task", "volumes": [allowed_mount]}),
@@ -565,18 +567,18 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             receipt_path = root / "environment-cleanup.json"
             receipt_bytes = receipt_path.read_bytes()
             receipt = json.loads(receipt_bytes)
-            self.assertEqual(receipt_bytes, _canonical(receipt))
+            self.assertEqual(receipt_bytes, canonical_json(receipt))
             self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
             self.assertEqual(
                 receipt,
                 {
                     "schemaVersion": 1,
-                    "experimentId": _EXPERIMENT,
+                    "experimentId": EXPERIMENT_ID,
                     "replicationId": "screen-v1",
                     "sourceRevision": "a" * 40,
                     "experimentManifestSha256": "sha256:" + "b" * 64,
                     "preflightSha256": "sha256:" + "e" * 64,
-                    "runBindingSha256": _digest(_canonical(_binding())),
+                    "runBindingSha256": digest_bytes(canonical_json(_binding())),
                     "relayImageSha256": "sha256:" + "d" * 64,
                     "fullComposeSha256": "sha256:" + "f" * 64,
                     "taskId": None,
@@ -708,7 +710,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             _write_cleanup_receipt(receipt, {"first": True})
             with self.assertRaises(FileExistsError):
                 _write_cleanup_receipt(receipt, {"first": False})
-            self.assertEqual(receipt.read_bytes(), _canonical({"first": True}))
+            self.assertEqual(receipt.read_bytes(), canonical_json({"first": True}))
 
             receipt.unlink()
             target = root / "target.json"
@@ -747,7 +749,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             overlay_path.parent.mkdir(parents=True)
             data = yaml.safe_dump(overlay, sort_keys=False).encode()
             overlay_path.write_bytes(data)
-            digest = _digest(data)
+            digest = digest_bytes(data)
             record = {
                 "relayImages": {
                     "production": binding["relay_image_sha256"],
@@ -763,7 +765,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 ],
             }
             hashes = {
-                "benchmarks/terminal_bench/relay.deepseek.compose.yaml": _digest(
+                "benchmarks/terminal_bench/relay.deepseek.compose.yaml": digest_bytes(
                     source_path.read_bytes()
                 )
             }
@@ -789,6 +791,8 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             module = root / "benchmarks" / "terminal_bench" / "harbor_environment.py"
             module.parent.mkdir(parents=True)
             module.write_text("# frozen module\n")
+            contract = module.with_name("experiment_contract.py")
+            contract.write_text("# frozen contract\n")
             build = "sha256:" + "c" * 64
             runtime = {
                 "terminal-bench/example": {
@@ -809,21 +813,24 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             }
             manifest = {
                 "schemaVersion": 2,
-                "experimentId": _EXPERIMENT,
+                "experimentId": EXPERIMENT_ID,
                 "relayBuildIds": {
                     "production": build,
                     "providerFreeFixture": "sha256:" + "f" * 64,
                 },
                 "fileSha256": {
-                    "benchmarks/terminal_bench/harbor_environment.py": _digest(
+                    "benchmarks/terminal_bench/harbor_environment.py": digest_bytes(
                         module.read_bytes()
-                    )
+                    ),
+                    "benchmarks/terminal_bench/experiment_contract.py": digest_bytes(
+                        contract.read_bytes()
+                    ),
                 },
                 "runtime": {"hermeticCodexRuntimeReady": True},
                 "taskRuntimeBindings": runtime,
             }
             manifest_path = module.with_name("verify-instruction-v1.experiment.json")
-            manifest_path.write_bytes(_canonical(manifest))
+            manifest_path.write_bytes(canonical_json(manifest))
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
             subprocess.run(
                 [
@@ -861,9 +868,9 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             ).stdout.strip()
             binding = _binding(
                 source_revision=revision,
-                experiment_manifest_sha256=_digest(manifest_path.read_bytes()),
+                experiment_manifest_sha256=digest_bytes(manifest_path.read_bytes()),
                 relay_build_sha256=build,
-                task_snapshots_sha256=_digest(_canonical(snapshots)),
+                task_snapshots_sha256=digest_bytes(canonical_json(snapshots)),
             )
             preflight = {
                 "schemaVersion": 1,
@@ -877,7 +884,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 "cleanTree": True,
                 "createdAt": "2026-08-22T00:00:00Z",
             }
-            binding["preflight_sha256"] = _digest(_canonical(preflight))
+            binding["preflight_sha256"] = digest_bytes(canonical_json(preflight))
             record = {
                 "schemaVersion": 1,
                 "preflight": preflight,
@@ -890,10 +897,14 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 "taskSnapshots": snapshots,
                 "providers": [],
             }
-            (output / "run-record.json").write_bytes(_canonical(record) + b"\n")
+            (output / "run-record.json").write_bytes(canonical_json(record) + b"\n")
             with patch.dict(os.environ, {"OPEN_AGENT_LAB_REPO_ROOT": str(root)}):
                 _validate_prepared_source(binding, root)
                 module.write_text("# drift\n")
+                with self.assertRaisesRegex(RuntimeError, "identity|drifted"):
+                    _validate_prepared_source(binding, root)
+                module.write_text("# frozen module\n")
+                contract.write_text("# drift\n")
                 with self.assertRaisesRegex(RuntimeError, "identity|drifted"):
                     _validate_prepared_source(binding, root)
 

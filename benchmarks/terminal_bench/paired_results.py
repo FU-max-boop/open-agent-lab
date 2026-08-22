@@ -37,19 +37,31 @@ from harbor.models.trial.result import TrialResult
 from harbor.publisher.packager import Packager
 from harbor.tasks.client import TaskClient
 
+from .experiment_contract import (
+    ENVIRONMENT_IMPORT,
+    EXPERIMENT_ID,
+    PREFLIGHT_KEYS,
+    RELAY_ARTIFACT_LIMITS,
+    RELAY_JOURNAL_PATH,
+    RELAY_SEAL_PATH,
+    artifact_manifest,
+    canonical_json,
+    digest_bytes,
+    is_revision,
+    is_strict_int,
+)
 from .relay_evidence import _EVENT_FIELDS as _RELAY_FIELDS
 from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
-_EXPERIMENT = "terminal-bench-2.1-verify-instruction-v1"
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:884a116194bf671c62e6e074e6ebdc402aa48db3d1dde5b02fd89195ab622333"
+    "sha256:aef3ceccfc2f980278f8e06cf686892d2eaf07b3de014b4fc60af5eeab5132cb"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = "0.149.0"
 _RELAY_REQUEST_CAP = 256
-_RELAY_JOURNAL_CAP = 4 * 1024 * 1024
-_RELAY_SEAL_CAP = 64 * 1024
+_RELAY_JOURNAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH]
+_RELAY_SEAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_SEAL_PATH]
 _JSON_ARTIFACT_CAP = 4 * 1024 * 1024
 _TRAJECTORY_CAP = 64 * 1024 * 1024
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -89,7 +101,6 @@ _DATASET_DIGEST = (
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _VARIANTS = {
     "control-v1": {
         "name": "open-agent-lab-codex",
@@ -238,9 +249,6 @@ _TEMPLATES = {
 _E2E_TEMPLATES = (
     "harbor-e2e.yaml",
     "harbor-verify-instruction-e2e.yaml",
-)
-_ENVIRONMENT_IMPORT = (
-    "benchmarks.terminal_bench.harbor_environment:PinnedRelayDockerEnvironment"
 )
 _RELAY_BUILD_INPUTS = (
     ".dockerignore",
@@ -439,13 +447,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    return canonical_json(value).decode()
 
 
 def _same_json(left: Any, right: Any) -> bool:
@@ -456,7 +458,7 @@ def _same_json(left: Any, right: Any) -> bool:
 
 
 def _digest_bytes(value: bytes) -> str:
-    return "sha256:" + hashlib.sha256(value).hexdigest()
+    return digest_bytes(value)
 
 
 def _digest(value: Any) -> str:
@@ -627,7 +629,7 @@ def _clean_revision(root: Path) -> str:
     if _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise IntegrityError("prepare requires a clean Git worktree")
     revision = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
-    if not _REVISION.fullmatch(revision):
+    if not is_revision(revision):
         raise IntegrityError("source revision is not a 40-character commit")
     return revision
 
@@ -895,7 +897,7 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     if (
         _digest(manifest) != _POLICY_SHA256
         or manifest.get("schemaVersion") != 2
-        or manifest.get("experimentId") != _EXPERIMENT
+        or manifest.get("experimentId") != EXPERIMENT_ID
         or manifest.get("runClass") != "development"
         or runtime.get("harborVersion") != _HARBOR_VERSION
         or runtime.get("codexVersion") != _CODEX_VERSION
@@ -1046,9 +1048,9 @@ def _validate_template(
     task_root: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     if (
-        type(config.get("n_attempts")) is not int
+        not is_strict_int(config.get("n_attempts"))
         or config["n_attempts"] != 1
-        or type(config.get("n_concurrent_trials")) is not int
+        or not is_strict_int(config.get("n_concurrent_trials"))
         or config["n_concurrent_trials"] != 1
         or not _same_json(config.get("retry"), {"max_retries": 0})
     ):
@@ -1099,7 +1101,7 @@ def _bound_config(
     config["jobs_dir"] = str(jobs_dir)
     environment = _mapping(config.get("environment"), "environment")
     environment["extra_docker_compose"] = [str(compose_path)]
-    environment["import_path"] = _ENVIRONMENT_IMPORT
+    environment["import_path"] = ENVIRONMENT_IMPORT
     environment["kwargs"] = {
         "relay_compose_sha256": compose_sha256,
         "run_binding": binding,
@@ -1144,7 +1146,7 @@ def _write_fixture_configs(
         }
         environment = _mapping(fixture.get("environment"), f"{name} environment")
         environment["extra_docker_compose"] = [str(fixture_compose_path)]
-        environment["import_path"] = _ENVIRONMENT_IMPORT
+        environment["import_path"] = ENVIRONMENT_IMPORT
         environment["kwargs"] = {
             "relay_compose_sha256": fixture_compose_sha256,
             "run_binding": fixture_binding,
@@ -1172,7 +1174,7 @@ def _prepare_run(
     overlays = _render_pinned_overlays(snapshot, temp, images)
     preflight = {
         "schemaVersion": 1,
-        "experimentId": _EXPERIMENT,
+        "experimentId": EXPERIMENT_ID,
         "replicationId": replication_id,
         "sourceRevision": revision,
         "experimentManifestSha256": manifest_sha,
@@ -1308,31 +1310,20 @@ def _validate_record(
             "taskSnapshots",
             "providers",
         }
-        or type(record.get("schemaVersion")) is not int
+        or not is_strict_int(record.get("schemaVersion"))
         or record["schemaVersion"] != 1
     ):
         raise IntegrityError("run record schema drifted")
     preflight = _mapping(record["preflight"], "preflight")
-    if set(preflight) != {
-        "schemaVersion",
-        "experimentId",
-        "replicationId",
-        "sourceRevision",
-        "experimentManifestSha256",
-        "relayBuildSha256",
-        "relayImageSha256",
-        "taskSnapshotsSha256",
-        "cleanTree",
-        "createdAt",
-    }:
+    if set(preflight) != PREFLIGHT_KEYS:
         raise IntegrityError("preflight schema drifted")
     relay_images = _mapping(record.get("relayImages"), "relayImages")
     relay_tags = _mapping(record.get("relayImageTags"), "relayImageTags")
     task_snapshots = _mapping(record.get("taskSnapshots"), "taskSnapshots")
     if (
-        type(preflight.get("schemaVersion")) is not int
+        not is_strict_int(preflight.get("schemaVersion"))
         or preflight["schemaVersion"] != 1
-        or preflight.get("experimentId") != _EXPERIMENT
+        or preflight.get("experimentId") != EXPERIMENT_ID
         or preflight.get("cleanTree") is not True
         or preflight.get("experimentManifestSha256") != manifest_sha
         or preflight.get("relayBuildSha256") != production_build_id
@@ -1341,7 +1332,7 @@ def _validate_record(
         or len(set(relay_images.values())) != len(relay_images)
         or preflight.get("relayImageSha256") != relay_images.get("production")
         or preflight.get("taskSnapshotsSha256") != _digest(task_snapshots)
-        or not _REVISION.fullmatch(str(preflight.get("sourceRevision", "")))
+        or not is_revision(preflight.get("sourceRevision"))
         or relay_tags
         != _relay_image_tags(run_dir.resolve(), str(preflight.get("sourceRevision")))
         or _digest(preflight) != record.get("preflightSha256")
@@ -1355,7 +1346,7 @@ def _validate_record(
 def _expected_binding(preflight: dict[str, Any], preflight_sha: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
-        "experiment_id": _EXPERIMENT,
+        "experiment_id": EXPERIMENT_ID,
         "replication_id": preflight["replicationId"],
         "source_revision": preflight["sourceRevision"],
         "experiment_manifest_sha256": preflight["experimentManifestSha256"],
@@ -1429,28 +1420,7 @@ def _validate_artifact_manifest(trial_dir: Path) -> None:
             "artifact manifest",
         )
     ]
-    expected = [
-        {
-            "source": "/logs/artifacts",
-            "destination": "artifacts/logs/artifacts",
-            "type": "directory",
-            "status": "empty",
-            "service": None,
-        },
-        *[
-            {
-                "source": f"/var/lib/open-agent-lab/{name}",
-                "destination": f"artifacts/{name}",
-                "type": "file",
-                "status": "ok",
-                "service": "open-agent-lab-relay",
-            }
-            for name in (
-                "provider-metadata.ndjson",
-                "provider-metadata.ndjson.sealed",
-            )
-        ],
-    ]
+    expected = artifact_manifest()
     if Counter(_canonical(entry) for entry in entries) != Counter(
         _canonical(entry) for entry in expected
     ):
@@ -1462,8 +1432,8 @@ def _read_relay_evidence(
 ) -> tuple[Path, Path, list[dict[str, Any]], dict[str, Any]]:
     _validate_artifact_manifest(trial_dir)
     evidence = trial_dir / "artifacts" / "provider-evidence"
-    journal = evidence / "provider-metadata.ndjson"
-    seal = evidence / "provider-metadata.ndjson.sealed"
+    journal = evidence / Path(RELAY_JOURNAL_PATH).name
+    seal = evidence / Path(RELAY_SEAL_PATH).name
     try:
         journal_bytes = _artifact_bytes(
             trial_dir,
@@ -1737,7 +1707,7 @@ def _expected_trial_lock(
         "skills": [],
         "environment": {
             "type": "docker",
-            "import_path": _ENVIRONMENT_IMPORT,
+            "import_path": ENVIRONMENT_IMPORT,
             "force_build": False,
             "delete": True,
             "cpu_enforcement_policy": "auto",
@@ -2039,9 +2009,9 @@ def _validate_cleanup_receipt(
             "projectName",
             "stoppedAt",
         }
-        or type(receipt.get("schemaVersion")) is not int
+        or not is_strict_int(receipt.get("schemaVersion"))
         or receipt["schemaVersion"] != 1
-        or receipt.get("experimentId") != _EXPERIMENT
+        or receipt.get("experimentId") != EXPERIMENT_ID
         or receipt.get("replicationId") != binding["replication_id"]
         or receipt.get("sourceRevision") != binding["source_revision"]
         or receipt.get("experimentManifestSha256")
@@ -2070,7 +2040,7 @@ def _provider_binding(
 ) -> dict[str, Any]:
     if (
         set(provider_data) != _PROVIDER_METADATA_FIELDS
-        or type(provider_data.get("schema_version")) is not int
+        or not is_strict_int(provider_data.get("schema_version"))
         or provider_data["schema_version"] != 1
     ):
         raise IntegrityError("embedded provider metadata schema drifted")
@@ -2867,7 +2837,7 @@ def _summary(
     blockers.append("development_experiment_never_promotable")
     return {
         "schemaVersion": 1,
-        "experimentId": _EXPERIMENT,
+        "experimentId": EXPERIMENT_ID,
         "claimClass": "directional_five_task_development_result",
         "integrityOk": True,
         "analysisComplete": analysis_complete,
@@ -3010,7 +2980,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "summarize":
             invalid = {
                 "schemaVersion": 1,
-                "experimentId": _EXPERIMENT,
+                "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
                 "analysisStatus": "invalid",

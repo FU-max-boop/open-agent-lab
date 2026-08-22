@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,33 +15,25 @@ from harbor.models.job.result import JobResult
 from harbor.models.trajectories.trajectory import Trajectory
 from harbor.models.trial.result import TrialResult
 
+from benchmarks.terminal_bench.experiment_contract import (
+    ENVIRONMENT_IMPORT,
+    RUN_BINDING_KEYS,
+    artifact_manifest,
+    canonical_json,
+    is_digest,
+    is_revision,
+)
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 
 _DATASET_DIGEST = (
     "sha256:d10e96e201d6816b22553504e06e7de0153a26381e808d11404cbca530b9d388"
 )
 _TASK_DIGEST = "sha256:38d7a077f07fbee8efc78db5dec9a72f82e727510ad1dcfeac0b55fa845256b7"
-_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MANIFEST = Path(__file__).with_name("verify-instruction-v1.experiment.json")
 _MANIFEST_BYTES = _MANIFEST.read_bytes()
 _MANIFEST_DATA = json.loads(_MANIFEST_BYTES)
 _MANIFEST_SHA256 = "sha256:" + hashlib.sha256(_MANIFEST_BYTES).hexdigest()
 _FIXTURE_BUILD_ID = _MANIFEST_DATA["relayBuildIds"]["providerFreeFixture"]
-_ENVIRONMENT_IMPORT = (
-    "benchmarks.terminal_bench.harbor_environment:PinnedRelayDockerEnvironment"
-)
-_RUN_BINDING_KEYS = {
-    "schema_version",
-    "experiment_id",
-    "replication_id",
-    "source_revision",
-    "experiment_manifest_sha256",
-    "relay_build_sha256",
-    "relay_image_sha256",
-    "preflight_sha256",
-    "task_snapshots_sha256",
-}
 _VERIFY_INSTRUCTION_SHA256 = (
     "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
 )
@@ -83,16 +74,6 @@ printf 'Hello, world!\n' > /app/hello.txt"""
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
-def _canonical(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
 
 
 def _isolation_command(secret: bytes) -> str:
@@ -141,28 +122,7 @@ def _assert_secret_absent(job_dir: Path, secret: bytes) -> None:
 def _assert_collected_relay_evidence(trial_dir: Path, evidence_dir: Path) -> None:
     artifacts = trial_dir / "artifacts"
     manifest = json.loads((artifacts / "manifest.json").read_text())
-    expected_manifest = [
-        {
-            "source": "/logs/artifacts",
-            "destination": "artifacts/logs/artifacts",
-            "type": "directory",
-            "status": "empty",
-            "service": None,
-        },
-        *[
-            {
-                "source": f"/var/lib/open-agent-lab/{name}",
-                "destination": f"artifacts/{name}",
-                "type": "file",
-                "status": "ok",
-                "service": "open-agent-lab-relay",
-            }
-            for name in (
-                "provider-metadata.ndjson",
-                "provider-metadata.ndjson.sealed",
-            )
-        ],
-    ]
+    expected_manifest = artifact_manifest()
     _require(
         manifest == expected_manifest,
         "Harbor artifact manifest does not match the frozen three entries.",
@@ -200,7 +160,7 @@ def _assert_fixture_preflight(
         run_binding["experiment_manifest_sha256"] == _MANIFEST_SHA256,
         "Fixture manifest binding drifted.",
     )
-    preflight_sha = "sha256:" + hashlib.sha256(_canonical(preflight)).hexdigest()
+    preflight_sha = "sha256:" + hashlib.sha256(canonical_json(preflight)).hexdigest()
     _require(
         run_binding["preflight_sha256"] == preflight_sha,
         "Fixture preflight hash drifted.",
@@ -238,7 +198,7 @@ def _assert_cleanup_receipt(
         "experimentManifestSha256": run_binding["experiment_manifest_sha256"],
         "preflightSha256": run_binding["preflight_sha256"],
         "runBindingSha256": "sha256:"
-        + hashlib.sha256(_canonical(run_binding)).hexdigest(),
+        + hashlib.sha256(canonical_json(run_binding)).hexdigest(),
         "relayImageSha256": run_binding["relay_image_sha256"],
         "fullComposeSha256": receipt.get("fullComposeSha256"),
         "taskId": None,
@@ -250,7 +210,7 @@ def _assert_cleanup_receipt(
     }
     _require(receipt == expected, "Cleanup receipt identity drifted.")
     _require(
-        _DIGEST.fullmatch(str(receipt["fullComposeSha256"])),
+        is_digest(receipt["fullComposeSha256"]),
         "Cleanup Compose digest is invalid.",
     )
     _require(
@@ -277,7 +237,7 @@ def _assert_pinned_environment(
     }
     for environment in (job.environment, lock.environment):
         _require(
-            environment.import_path == _ENVIRONMENT_IMPORT
+            environment.import_path == ENVIRONMENT_IMPORT
             and environment.kwargs == expected_kwargs
             and [item.resolve() for item in environment.extra_docker_compose] == [path],
             "Pinned Harbor environment binding drifted.",
@@ -359,13 +319,13 @@ def validate(
     run_binding = job.agents[0].kwargs.get("run_binding")
     _require(
         isinstance(run_binding, dict)
-        and set(run_binding) == _RUN_BINDING_KEYS
+        and set(run_binding) == RUN_BINDING_KEYS
         and run_binding == lock.agent.kwargs.get("run_binding")
         and run_binding.get("schema_version") == 1
         and run_binding.get("experiment_id")
         == "terminal-bench-2.1-verify-instruction-v1"
         and run_binding.get("replication_id") == "screen-v1"
-        and _SOURCE_REVISION.fullmatch(str(run_binding.get("source_revision", "")))
+        and is_revision(run_binding.get("source_revision"))
         and run_binding.get("relay_build_sha256") == _FIXTURE_BUILD_ID,
         "Provider-free E2E source binding drifted.",
     )
@@ -475,7 +435,7 @@ def validate(
     binding_body = {
         key: value for key, value in binding.items() if key != "binding_sha256"
     }
-    binding_hash = "sha256:" + hashlib.sha256(_canonical(binding_body)).hexdigest()
+    binding_hash = "sha256:" + hashlib.sha256(canonical_json(binding_body)).hexdigest()
     _require(
         binding.get("binding_sha256") == binding_hash, "Harbor binding hash failed."
     )

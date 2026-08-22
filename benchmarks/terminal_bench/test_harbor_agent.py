@@ -28,6 +28,9 @@ from benchmarks.terminal_bench.harbor_agent import (
     OpenAgentLabCodexVerifyInstructionV1,
     _validate_live_source,
 )
+from benchmarks.terminal_bench.harbor_environment import (
+    PinnedRelayDockerEnvironment,
+)
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 from benchmarks.terminal_bench.validate_harbor_e2e import (
     _assert_isolation_call,
@@ -47,6 +50,12 @@ _RUN_BINDING = {
     "task_snapshots_sha256": "sha256:" + "9" * 64,
 }
 _CAPABILITY_ID = "e" * 64
+
+
+def _pinned_environment_mock(service_exec: object) -> PinnedRelayDockerEnvironment:
+    environment = object.__new__(PinnedRelayDockerEnvironment)
+    environment.service_exec = AsyncMock(side_effect=service_exec)
+    return environment
 
 
 def _bootstrap_identity(
@@ -768,6 +777,65 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     Path(raw) / "fixture", provider_free_fixture=True, **common
                 )
 
+    async def test_runtime_operations_require_the_exact_pinned_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            parent_setup = AsyncMock()
+            parent_run = AsyncMock()
+            retain = AsyncMock()
+
+            class DerivedPinnedRelayDockerEnvironment(PinnedRelayDockerEnvironment):
+                pass
+
+            for environment in (
+                object(),
+                object.__new__(DerivedPinnedRelayDockerEnvironment),
+            ):
+                with (
+                    self.subTest(environment=type(environment).__name__),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_live_source"
+                    ) as validate_source,
+                    patch.object(Codex, "setup", new=parent_setup),
+                    self.assertRaisesRegex(
+                        TypeError, "exact PinnedRelayDockerEnvironment"
+                    ),
+                ):
+                    await agent.setup(environment)  # type: ignore[arg-type]
+                parent_setup.assert_not_awaited()
+                validate_source.assert_not_called()
+
+                with (
+                    patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_live_source"
+                    ) as validate_source,
+                    patch.object(Codex, "run", new=parent_run),
+                    patch.object(agent, "_seal_and_retain", new=retain),
+                    self.assertRaisesRegex(
+                        TypeError, "exact PinnedRelayDockerEnvironment"
+                    ),
+                ):
+                    await agent.run(  # type: ignore[arg-type]
+                        "instruction", environment, AgentContext()
+                    )
+                parent_run.assert_not_awaited()
+                retain.assert_not_awaited()
+                validate_source.assert_not_called()
+
+                with self.assertRaisesRegex(
+                    TypeError, "exact PinnedRelayDockerEnvironment"
+                ):
+                    await agent._seal_and_retain(environment)  # type: ignore[arg-type]
+
     async def test_setup_fetches_a_per_trial_token_before_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             trial = Path(raw)
@@ -784,22 +852,19 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
 
-            class Environment:
-                async def service_exec(
-                    self, *_args: object, **_kwargs: object
-                ) -> object:
-                    parent_setup.assert_awaited_once()
-                    calls.append((str(_args[0]), _kwargs))
-                    events.append(f"exec:{_args[0]}")
-                    if _args[0] == "cat /app/relay-build-id":
-                        stdout = _RUN_BINDING["relay_build_sha256"]
-                    elif _args[0] == _RELAY_BOOTSTRAP_COMMAND:
-                        stdout = _bootstrap_identity()
-                    elif _args[0] == _RELAY_AUTHORIZE_COMMAND:
-                        stdout = ""
-                    else:
-                        stdout = _relay_capability()
-                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+            async def service_exec(*_args: object, **_kwargs: object) -> object:
+                parent_setup.assert_awaited_once()
+                calls.append((str(_args[0]), _kwargs))
+                events.append(f"exec:{_args[0]}")
+                if _args[0] == "cat /app/relay-build-id":
+                    stdout = _RUN_BINDING["relay_build_sha256"]
+                elif _args[0] == _RELAY_BOOTSTRAP_COMMAND:
+                    stdout = _bootstrap_identity()
+                elif _args[0] == _RELAY_AUTHORIZE_COMMAND:
+                    stdout = ""
+                else:
+                    stdout = _relay_capability()
+                return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
             with (
                 patch(
@@ -814,7 +879,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 ) as parent_setup,
             ):
-                await agent.setup(Environment())  # type: ignore[arg-type]
+                await agent.setup(_pinned_environment_mock(service_exec))
             parent_setup.assert_awaited_once()
             self.assertEqual(
                 calls,
@@ -878,20 +943,52 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
 
-            class Environment:
-                async def service_exec(
-                    self, *_args: object, **_kwargs: object
-                ) -> object:
-                    return SimpleNamespace(
-                        return_code=0, stdout="sha256:" + "f" * 64, stderr=""
-                    )
+            async def service_exec(*_args: object, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    return_code=0, stdout="sha256:" + "f" * 64, stderr=""
+                )
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "build identity"),
             ):
-                await agent.setup(Environment())  # type: ignore[arg-type]
+                await agent.setup(_pinned_environment_mock(service_exec))
+            self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
+
+    async def test_setup_rechecks_source_before_relay_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            commands: list[str] = []
+
+            async def service_exec(command: str, **_kwargs: object) -> object:
+                commands.append(command)
+                stdout = (
+                    _RUN_BINDING["relay_build_sha256"]
+                    if command == "cat /app/relay-build-id"
+                    else _bootstrap_identity()
+                )
+                return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+            with (
+                patch(
+                    "benchmarks.terminal_bench.harbor_agent._validate_live_source",
+                    side_effect=(None, RuntimeError("source drifted")),
+                ),
+                patch.object(Codex, "setup", new=AsyncMock()),
+                self.assertRaisesRegex(RuntimeError, "source drifted"),
+            ):
+                await agent.setup(_pinned_environment_mock(service_exec))
+            self.assertEqual(
+                commands, ["cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND]
+            )
             self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
     async def test_setup_rejects_mixed_provider_or_model_before_authorization(
@@ -919,29 +1016,23 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     )
                 commands: list[str] = []
 
-                class Environment:
-                    def __init__(
-                        self,
-                        selected_provider: str,
-                        selected_model: str,
-                        calls: list[str],
-                    ) -> None:
-                        self.provider = selected_provider
-                        self.model = selected_model
-                        self.calls = calls
-
-                    async def service_exec(
-                        self, command: str, **_kwargs: object
-                    ) -> object:
-                        self.calls.append(command)
-                        stdout = (
-                            _RUN_BINDING["relay_build_sha256"]
-                            if command == "cat /app/relay-build-id"
-                            else _bootstrap_identity(
-                                provider=self.provider, model=self.model
-                            )
+                async def service_exec(
+                    command: str,
+                    *,
+                    selected_provider: str = provider,
+                    selected_model: str = model,
+                    selected_commands: list[str] = commands,
+                    **_kwargs: object,
+                ) -> object:
+                    selected_commands.append(command)
+                    stdout = (
+                        _RUN_BINDING["relay_build_sha256"]
+                        if command == "cat /app/relay-build-id"
+                        else _bootstrap_identity(
+                            provider=selected_provider, model=selected_model
                         )
-                        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+                    )
+                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
                 with (
                     patch(
@@ -950,9 +1041,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     patch.object(Codex, "setup", new=AsyncMock()),
                     self.assertRaisesRegex(RuntimeError, "does not match this trial"),
                 ):
-                    await agent.setup(  # type: ignore[arg-type]
-                        Environment(provider, model, commands)
-                    )
+                    await agent.setup(_pinned_environment_mock(service_exec))
                 self.assertEqual(
                     commands, ["cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND]
                 )
@@ -969,24 +1058,23 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
 
-            class Environment:
-                async def service_exec(self, command: str, **_kwargs: object) -> object:
-                    if command == "cat /app/relay-build-id":
-                        stdout = _RUN_BINDING["relay_build_sha256"]
-                    elif command == _RELAY_BOOTSTRAP_COMMAND:
-                        stdout = _bootstrap_identity()
-                    elif command == _RELAY_AUTHORIZE_COMMAND:
-                        stdout = ""
-                    else:
-                        stdout = _relay_capability(capability_id="f" * 64)
-                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+            async def service_exec(command: str, **_kwargs: object) -> object:
+                if command == "cat /app/relay-build-id":
+                    stdout = _RUN_BINDING["relay_build_sha256"]
+                elif command == _RELAY_BOOTSTRAP_COMMAND:
+                    stdout = _bootstrap_identity()
+                elif command == _RELAY_AUTHORIZE_COMMAND:
+                    stdout = ""
+                else:
+                    stdout = _relay_capability(capability_id="f" * 64)
+                return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "per-trial relay capability"),
             ):
-                await agent.setup(Environment())  # type: ignore[arg-type]
+                await agent.setup(_pinned_environment_mock(service_exec))
             self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
     async def test_setup_never_reads_a_token_when_authorization_fails(self) -> None:
@@ -1001,32 +1089,31 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             commands: list[str] = []
 
-            class Environment:
-                async def service_exec(self, command: str, **_kwargs: object) -> object:
-                    commands.append(command)
-                    return SimpleNamespace(
-                        return_code=(
-                            0
-                            if command
-                            in {"cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND}
-                            else 1
-                        ),
-                        stdout=(
-                            _RUN_BINDING["relay_build_sha256"]
-                            if command == "cat /app/relay-build-id"
-                            else _bootstrap_identity()
-                            if command == _RELAY_BOOTSTRAP_COMMAND
-                            else ""
-                        ),
-                        stderr="",
-                    )
+            async def service_exec(command: str, **_kwargs: object) -> object:
+                commands.append(command)
+                return SimpleNamespace(
+                    return_code=(
+                        0
+                        if command
+                        in {"cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND}
+                        else 1
+                    ),
+                    stdout=(
+                        _RUN_BINDING["relay_build_sha256"]
+                        if command == "cat /app/relay-build-id"
+                        else _bootstrap_identity()
+                        if command == _RELAY_BOOTSTRAP_COMMAND
+                        else ""
+                    ),
+                    stderr="",
+                )
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "post-validation authorization"),
             ):
-                await agent.setup(Environment())  # type: ignore[arg-type]
+                await agent.setup(_pinned_environment_mock(service_exec))
             self.assertEqual(
                 commands,
                 [
@@ -1051,12 +1138,11 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
 
-            class Environment:
-                async def service_exec(self, command: str, **_kwargs: object) -> object:
-                    stdout = "cmV0YWluZWQ=" if command.startswith("base64 ") else ""
-                    return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+            async def service_exec(command: str, **_kwargs: object) -> object:
+                stdout = "cmV0YWluZWQ=" if command.startswith("base64 ") else ""
+                return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
-            await agent._seal_and_retain(Environment())  # type: ignore[arg-type]
+            await agent._seal_and_retain(_pinned_environment_mock(service_exec))
             evidence = trial / "artifacts" / "provider-evidence"
             main_artifact_bind = trial / "artifacts" / "logs" / "artifacts"
             self.assertEqual(agent._provider_evidence_dir, evidence)
@@ -1088,7 +1174,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 ),
                 self.assertRaisesRegex(RuntimeError, "evidence failed"),
             ):
-                await agent.run("instruction", object(), AgentContext())  # type: ignore[arg-type]
+                await agent.run(
+                    "instruction", _pinned_environment_mock(None), AgentContext()
+                )
 
     def test_invalid_metadata_never_raises_into_the_official_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -61,30 +61,36 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check harbor==0.22.0 ruff==0.16.4
           python3 -m ruff format --check \
+            benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
+            benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m ruff check \
+            benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
+            benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m ruff check --select C901 \
+            benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py
           python3 -m unittest \
+            benchmarks.terminal_bench.test_experiment_contract \
             benchmarks.terminal_bench.test_harbor_agent \
             benchmarks.terminal_bench.test_harbor_environment \
             benchmarks.terminal_bench.test_paired_results
@@ -190,8 +196,13 @@ jobs:
           python3 - <<'PY'
           import os
           from pathlib import Path
-          from benchmarks.terminal_bench import harbor_agent, harbor_environment
+          from benchmarks.terminal_bench import (
+              experiment_contract,
+              harbor_agent,
+              harbor_environment,
+          )
           root = Path(os.environ["OPEN_AGENT_LAB_REPO_ROOT"])
+          assert Path(experiment_contract.__file__).resolve() == root / "benchmarks/terminal_bench/experiment_contract.py"
           assert Path(harbor_agent.__file__).resolve() == root / "benchmarks/terminal_bench/harbor_agent.py"
           assert Path(harbor_environment.__file__).resolve() == root / "benchmarks/terminal_bench/harbor_environment.py"
           PY

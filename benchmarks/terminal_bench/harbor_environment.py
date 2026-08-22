@@ -27,39 +27,21 @@ from harbor.environments.docker.docker import (
 )
 from harbor.publisher.packager import Packager
 
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_EXPERIMENT = "terminal-bench-2.1-verify-instruction-v1"
-_RELAY = "open-agent-lab-relay"
+from .experiment_contract import (
+    EXPERIMENT_ID,
+    PREFLIGHT_KEYS,
+    RELAY_ARTIFACT_LIMITS,
+    RELAY_BUILD_ID_PATH,
+    RELAY_SERVICE,
+    RUN_BINDING_KEYS,
+    canonical_json,
+    digest_bytes,
+    is_digest,
+    is_revision,
+    is_strict_int,
+)
+
 _SECRET = "provider-api-key"
-_BUILD_ID_FILE = "/app/relay-build-id"
-_RELAY_ARTIFACT_LIMITS = {
-    "/var/lib/open-agent-lab/provider-metadata.ndjson": 4 * 1024 * 1024,
-    "/var/lib/open-agent-lab/provider-metadata.ndjson.sealed": 64 * 1024,
-}
-_BINDING_KEYS = {
-    "schema_version",
-    "experiment_id",
-    "replication_id",
-    "source_revision",
-    "experiment_manifest_sha256",
-    "relay_build_sha256",
-    "relay_image_sha256",
-    "preflight_sha256",
-    "task_snapshots_sha256",
-}
-_PREFLIGHT_KEYS = {
-    "schemaVersion",
-    "experimentId",
-    "replicationId",
-    "sourceRevision",
-    "experimentManifestSha256",
-    "relayBuildSha256",
-    "relayImageSha256",
-    "taskSnapshotsSha256",
-    "cleanTree",
-    "createdAt",
-}
 _EXTERNAL_KEYS = {"include", "env_file", "extends", "label_file"}
 _MAX_COMPOSE_BYTES = 4 * 1024 * 1024
 _CLEANUP_ATTEMPTS = 3
@@ -121,20 +103,6 @@ def _yaml_mapping(loader: _UniqueLoader, node: yaml.Node, deep: bool = False) ->
 _UniqueLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _yaml_mapping
 )
-
-
-def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-
-
-def _digest(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _utc_now() -> str:
@@ -208,7 +176,7 @@ def _publish_new_bytes(path: Path, data: bytes) -> None:
 
 def _write_cleanup_receipt(path: Path, value: dict[str, Any]) -> None:
     """Publish a new receipt only after its complete contents are durable."""
-    _publish_new_bytes(path, _canonical(value))
+    _publish_new_bytes(path, canonical_json(value))
 
 
 def _unique_json(data: bytes, label: str) -> dict[str, Any]:
@@ -322,25 +290,22 @@ def _reject_external_references(value: Any) -> None:
 
 
 def _validated_run_binding(value: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != _BINDING_KEYS:
+    if not isinstance(value, dict) or set(value) != RUN_BINDING_KEYS:
         raise ValueError("run_binding has an invalid schema.")
-    digest_keys = _BINDING_KEYS - {
+    digest_keys = RUN_BINDING_KEYS - {
         "schema_version",
         "experiment_id",
         "replication_id",
         "source_revision",
     }
     if (
-        type(value["schema_version"]) is not int
+        not is_strict_int(value["schema_version"])
         or value["schema_version"] != 1
-        or value["experiment_id"] != _EXPERIMENT
+        or value["experiment_id"] != EXPERIMENT_ID
         or value["replication_id"] not in {"screen-v1", "mirror-v1"}
         or not isinstance(value["source_revision"], str)
-        or not _REVISION.fullmatch(value["source_revision"])
-        or any(
-            not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key])
-            for key in digest_keys
-        )
+        or not is_revision(value["source_revision"])
+        or any(not is_digest(value[key]) for key in digest_keys)
     ):
         raise ValueError("run_binding has invalid values.")
     return dict(value)
@@ -372,7 +337,7 @@ def _task_authorities(
         raise TypeError("task snapshot authority is unavailable")
     if (
         set(runtime) != set(snapshots)
-        or _digest(_canonical(snapshots)) != binding["task_snapshots_sha256"]
+        or digest_bytes(canonical_json(snapshots)) != binding["task_snapshots_sha256"]
     ):
         raise ValueError("task snapshot authority drifted")
     for task, authority in runtime.items():
@@ -389,9 +354,9 @@ def _task_authorities(
             or snapshot.get("relativePath") != f"tasks/{short}"
             or snapshot.get("taskDigest") != authority.get("taskDigest")
             or snapshot.get("taskChecksum") != authority.get("taskChecksum")
-            or not _DIGEST.fullmatch(str(authority.get("taskDigest", "")))
+            or not is_digest(authority.get("taskDigest"))
             or not re.fullmatch(r"[0-9a-f]{64}", str(authority.get("taskChecksum", "")))
-            or not _DIGEST.fullmatch(str(authority.get("imageConfigDigest", "")))
+            or not is_digest(authority.get("imageConfigDigest"))
             or authority.get("platform") != "linux/amd64"
             or not isinstance(authority.get("declaredImage"), str)
             or not re.fullmatch(
@@ -494,21 +459,21 @@ def _validate_prepared_source(
         file_hashes = manifest["fileSha256"]
         build_ids = manifest["relayBuildIds"]
         module = root / "benchmarks" / "terminal_bench" / "harbor_environment.py"
+        contract = root / "benchmarks" / "terminal_bench" / "experiment_contract.py"
         if (
             configured != root
-            or type(manifest.get("schemaVersion")) is not int
+            or not is_strict_int(manifest.get("schemaVersion"))
             or manifest.get("schemaVersion") != 2
             or manifest.get("experimentId") != binding["experiment_id"]
-            or _digest(manifest_bytes) != binding["experiment_manifest_sha256"]
+            or digest_bytes(manifest_bytes) != binding["experiment_manifest_sha256"]
             or not isinstance(file_hashes, dict)
             or file_hashes.get("benchmarks/terminal_bench/harbor_environment.py")
-            != _digest(_regular_bytes(module))
+            != digest_bytes(_regular_bytes(module))
+            or file_hashes.get("benchmarks/terminal_bench/experiment_contract.py")
+            != digest_bytes(_regular_bytes(contract))
             or not isinstance(build_ids, dict)
             or set(build_ids) != {"production", "providerFreeFixture"}
-            or any(
-                not isinstance(value, str) or not _DIGEST.fullmatch(value)
-                for value in build_ids.values()
-            )
+            or any(not is_digest(value) for value in build_ids.values())
             or len(set(build_ids.values())) != 2
             or binding["relay_build_sha256"] not in set(build_ids.values())
         ):
@@ -531,14 +496,11 @@ def _validate_prepared_source(
                 "taskSnapshots",
                 "providers",
             }
-            or type(record.get("schemaVersion")) is not int
+            or not is_strict_int(record.get("schemaVersion"))
             or record.get("schemaVersion") != 1
             or not isinstance(relay_images, dict)
             or set(relay_images) != {"production", "providerFreeFixture"}
-            or any(
-                not isinstance(value, str) or not _DIGEST.fullmatch(value)
-                for value in relay_images.values()
-            )
+            or any(not is_digest(value) for value in relay_images.values())
             or len(set(relay_images.values())) != 2
             or record.get("relayImageTags")
             != _relay_image_tags(root.parent, binding["source_revision"])
@@ -547,9 +509,9 @@ def _validate_prepared_source(
             raise ValueError("run record drifted")
         _assert_runtime_gate(manifest, record, binding)
         production = record.get("preflight")
-        if isinstance(production, dict) and record.get("preflightSha256") == _digest(
-            _canonical(production)
-        ):
+        if isinstance(production, dict) and record.get(
+            "preflightSha256"
+        ) == digest_bytes(canonical_json(production)):
             matches.append(production)
         fixture_path = root.parent / "fixtures" / "preflight.json"
         if fixture_path.is_file() and not fixture_path.is_symlink():
@@ -557,13 +519,13 @@ def _validate_prepared_source(
         matches = [
             candidate
             for candidate in matches
-            if _digest(_canonical(candidate)) == binding["preflight_sha256"]
+            if digest_bytes(canonical_json(candidate)) == binding["preflight_sha256"]
         ]
         if len(matches) != 1:
             raise ValueError("bound preflight is unavailable")
         preflight = matches[0]
         if (
-            set(preflight) != _PREFLIGHT_KEYS
+            set(preflight) != PREFLIGHT_KEYS
             or preflight
             != {
                 "schemaVersion": 1,
@@ -578,7 +540,7 @@ def _validate_prepared_source(
                 "createdAt": preflight.get("createdAt"),
             }
             or not isinstance(preflight["createdAt"], str)
-            or type(preflight["schemaVersion"]) is not int
+            or not is_strict_int(preflight["schemaVersion"])
         ):
             raise ValueError("bound preflight drifted")
     except (KeyError, OSError, TypeError, ValueError) as error:
@@ -613,7 +575,7 @@ def _expected_overlay(
 ) -> dict[str, Any]:
     relative = f"benchmarks/terminal_bench/relay.{provider}.compose.yaml"
     data = _regular_bytes(root / relative)
-    if _digest(data) != file_hashes.get(relative):
+    if digest_bytes(data) != file_hashes.get(relative):
         raise RuntimeError(f"Frozen {provider} relay Compose drifted.")
     document = _yaml(
         data,
@@ -622,7 +584,7 @@ def _expected_overlay(
     if fixture:
         fixture_relative = "benchmarks/terminal_bench/relay.fixture.compose.yaml"
         fixture_data = _regular_bytes(root / fixture_relative)
-        if _digest(fixture_data) != file_hashes.get(fixture_relative):
+        if digest_bytes(fixture_data) != file_hashes.get(fixture_relative):
             raise RuntimeError("Frozen fixture relay Compose drifted.")
         document = _merge(
             document,
@@ -631,7 +593,7 @@ def _expected_overlay(
                 "frozen fixture relay Compose",
             ),
         )
-    relay = document["services"][_RELAY]
+    relay = document["services"][RELAY_SERVICE]
     relay.pop("build", None)
     relay["image"] = image
     relay["pull_policy"] = "never"
@@ -678,7 +640,7 @@ def _validate_compose_authority(
     if (
         absolute == fixture
         and record["relayImages"].get("providerFreeFixture") == image
-        and _digest(_regular_bytes(fixture)) == digest
+        and digest_bytes(_regular_bytes(fixture)) == digest
     ):
         candidates.append(
             _expected_overlay(root, "deepseek", image, file_hashes, fixture=True)
@@ -692,20 +654,20 @@ def _validate_compose_authority(
 def _validated_compose_bytes(
     path: Path, digest: str, run_binding: dict[str, Any]
 ) -> bytes:
-    if not _DIGEST.fullmatch(digest):
+    if not is_digest(digest):
         raise ValueError("Pinned relay environment binding is invalid.")
     data = _regular_bytes(path)
-    if _digest(data) != digest:
+    if digest_bytes(data) != digest:
         raise ValueError("Pinned relay Compose digest drifted.")
     document = _yaml(data, "pinned relay Compose")
     _reject_external_references(document)
     services = document.get("services")
     secrets = document.get("secrets")
-    relay = services.get(_RELAY) if isinstance(services, dict) else None
+    relay = services.get(RELAY_SERVICE) if isinstance(services, dict) else None
     if (
         set(document) != {"services", "secrets"}
         or not isinstance(services, dict)
-        or set(services) != {"main", _RELAY}
+        or set(services) != {"main", RELAY_SERVICE}
         or not isinstance(relay, dict)
         or "build" in relay
         or relay.get("image") != run_binding["relay_image_sha256"]
@@ -719,9 +681,9 @@ def _validated_compose_bytes(
 
 def _relay_only(data: bytes) -> bytes:
     document = _yaml(data, "pinned relay Compose")
-    return _canonical(
+    return canonical_json(
         {
-            "services": {_RELAY: document["services"][_RELAY]},
+            "services": {RELAY_SERVICE: document["services"][RELAY_SERVICE]},
             "secrets": {_SECRET: document["secrets"][_SECRET]},
         }
     )
@@ -778,9 +740,11 @@ def _resolved_relay(
     expected_services = expected.get("services")
     secrets = actual.get("secrets")
     expected_secrets = expected.get("secrets")
-    relay = services.get(_RELAY) if isinstance(services, dict) else None
+    relay = services.get(RELAY_SERVICE) if isinstance(services, dict) else None
     expected_relay = (
-        expected_services.get(_RELAY) if isinstance(expected_services, dict) else None
+        expected_services.get(RELAY_SERVICE)
+        if isinstance(expected_services, dict)
+        else None
     )
     secret = secrets.get(_SECRET) if isinstance(secrets, dict) else None
     expected_secret = (
@@ -1082,7 +1046,7 @@ def _assert_service_isolated(
     if volumes_from:
         raise ValueError("Service volume inheritance is forbidden.")
     if any(
-        service.get(key) == f"service:{_RELAY}"
+        service.get(key) == f"service:{RELAY_SERVICE}"
         for key in ("network_mode", "pid", "ipc")
     ):
         raise ValueError("A service joins the relay namespace.")
@@ -1100,7 +1064,7 @@ def _assert_resolved_graph(
     protected_paths = protected_paths or _daemon_sockets({})
     services, secret_path, volumes = _resolved_relay(actual, expected, binding)
     for name, service in services.items():
-        if name == _RELAY or not isinstance(service, dict):
+        if name == RELAY_SERVICE or not isinstance(service, dict):
             continue
         _assert_service_isolated(
             name,
@@ -1318,7 +1282,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
                         "--entrypoint",
                         "cat",
                         image,
-                        _BUILD_ID_FILE,
+                        RELAY_BUILD_ID_PATH,
                     ]
                 )
             )
@@ -1337,7 +1301,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         main = services.get("main") if isinstance(services, dict) else None
         if (
             not isinstance(main, dict)
-            or set(services) != {"main", _RELAY}
+            or set(services) != {"main", RELAY_SERVICE}
             or "build" in main
             or main.get("image") != authority["declaredImage"]
         ):
@@ -1396,7 +1360,9 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         service: str | None = None,
     ) -> None:
         # Docker's archive API cannot see runtime files stored on tmpfs.
-        limit = _RELAY_ARTIFACT_LIMITS.get(source_path) if service == _RELAY else None
+        limit = (
+            RELAY_ARTIFACT_LIMITS.get(source_path) if service == RELAY_SERVICE else None
+        )
         if limit is None:
             await super().service_download_file(
                 source_path, target_path, service=service
@@ -1412,7 +1378,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             f"test -f {source_path} && test ! -L {source_path} && "
             f'bytes=$(wc -c < {source_path}) && [ "$bytes" -le {limit} ] '
             f"&& base64 -w0 {source_path}",
-            service=_RELAY,
+            service=RELAY_SERVICE,
             timeout_sec=10,
             user="1000",
         )
@@ -1498,9 +1464,9 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
                 )
                 await self._validate_local_relay_image()
                 await self._pin_task_runtime(actual)
-                full_compose = _canonical(actual)
+                full_compose = canonical_json(actual)
                 self._full_fd = _sealed_memfd(full_compose)
-                self._full_compose_sha256 = _digest(full_compose)
+                self._full_compose_sha256 = digest_bytes(full_compose)
                 replayed = await self._render([self._full_fd])
                 if replayed != actual:
                     raise RuntimeError("Resolved Compose graph is not replay-stable.")
@@ -1607,7 +1573,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         self, task_identity: tuple[str | None, str | None, str | None]
     ) -> dict[str, Any]:
         full_compose = self._full_compose_sha256
-        if not isinstance(full_compose, str) or not _DIGEST.fullmatch(full_compose):
+        if not is_digest(full_compose):
             raise RuntimeError("The sealed Compose identity is unavailable.")
         binding = self._run_binding
         task, task_digest, task_checksum = task_identity
@@ -1618,7 +1584,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             "sourceRevision": binding["source_revision"],
             "experimentManifestSha256": binding["experiment_manifest_sha256"],
             "preflightSha256": binding["preflight_sha256"],
-            "runBindingSha256": _digest(_canonical(binding)),
+            "runBindingSha256": digest_bytes(canonical_json(binding)),
             "relayImageSha256": binding["relay_image_sha256"],
             "fullComposeSha256": full_compose,
             "taskId": task,
