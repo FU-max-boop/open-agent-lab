@@ -2877,16 +2877,15 @@ def _attempt(
             for record in verified["records"]
             if record["event"] == "transport.responses.request"
         ],
-        "providerRequestIds": [
-            record["providerRequestId"]
+        "providerResponseFingerprints": [
+            (
+                record["providerRequestId"],
+                record["responseId"],
+                record["responseSha256"],
+            )
             for record in verified["records"]
             if record["event"] == "transport.responses.closed"
             and record["providerRequestId"] is not None
-        ],
-        "responseIds": [
-            record["responseId"]
-            for record in verified["records"]
-            if record["event"] == "transport.responses.closed"
             and record["responseId"] is not None
         ],
         "chainHead": verified["chain_head"],
@@ -3753,7 +3752,7 @@ def _median(values: list[float | str]) -> float | str | None:
 
 
 def _clean_attempt(item: dict[str, Any]) -> dict[str, Any]:
-    hidden = {"startedAt", "probeStartedAt", "providerRequestIds", "responseIds"}
+    hidden = {"startedAt", "probeStartedAt", "providerResponseFingerprints"}
     return {key: value for key, value in item.items() if key not in hidden}
 
 
@@ -3783,17 +3782,16 @@ def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
     ]
     if len(set(request_ids)) != len(request_ids):
         raise IntegrityError("relay request IDs must be globally unique")
-    for key, label in (
-        ("providerRequestIds", "provider request IDs"),
-        ("responseIds", "response IDs"),
-    ):
-        identities = [
-            (item["provider"], value) for item in attempts for value in item[key]
-        ]
-        if len(set(identities)) != len(identities):
-            raise IntegrityError(
-                f"{label} must be unique within each provider across supplied trials"
-            )
+    provider_responses = [
+        (item["provider"], *fingerprint)
+        for item in attempts
+        for fingerprint in item["providerResponseFingerprints"]
+    ]
+    if len(set(provider_responses)) != len(provider_responses):
+        raise IntegrityError(
+            "provider response lifecycles must be unique within each provider "
+            "across supplied trials"
+        )
 
 
 def _build_pairs(

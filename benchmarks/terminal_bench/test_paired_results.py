@@ -624,7 +624,12 @@ def _rewrite_relay(
         records[4]["providerRequestId"] = records[1]["providerRequestId"]
         records[5]["providerRequestId"] = records[2]["providerRequestId"]
         records[5]["responseId"] = records[2]["responseId"]
-    elif mutation in {"reused-provider-request-id", "reused-response-id"}:
+    elif mutation in {
+        "reused-provider-request-id",
+        "reused-response-id",
+        "reused-upstream-ids",
+        "reused-response-lifecycle",
+    }:
         if source_trial is None or len(records) != 3:
             raise AssertionError(
                 "reused identity mutation requires one source lifecycle"
@@ -636,11 +641,13 @@ def _rewrite_relay(
         ]
         if len(source_records) != 3:
             raise AssertionError("reused identity source requires one lifecycle")
-        if mutation == "reused-provider-request-id":
+        if mutation != "reused-response-id":
             records[1]["providerRequestId"] = source_records[1]["providerRequestId"]
             records[2]["providerRequestId"] = source_records[2]["providerRequestId"]
-        else:
-            for key in ("responseId", "responseBytes", "responseSha256"):
+        if mutation != "reused-provider-request-id":
+            records[2]["responseId"] = source_records[2]["responseId"]
+        if mutation == "reused-response-lifecycle":
+            for key in ("responseBytes", "responseSha256"):
                 records[2][key] = source_records[2][key]
     elif mutation == "setup-time":
         result = json.loads((trial / "result.json").read_text())
@@ -704,6 +711,21 @@ def _rewrite_relay(
     marker_path.write_text(seal)
     (trial / "artifacts" / journal_path.name).write_text(journal)
     (trial / "artifacts" / marker_path.name).write_text(seal)
+
+
+def _rewrite_scored_relay(trial: Path, mutation: str, *, source_trial: Path) -> None:
+    _rewrite_relay(trial, mutation, source_trial=source_trial)
+    evidence = trial / "artifacts" / "provider-evidence"
+    verified = relay_metadata(
+        evidence / "provider-metadata.ndjson",
+        evidence / "provider-metadata.ndjson.sealed",
+    )
+    assert verified["publication_gate"]["ok"]
+    result_path = trial / "result.json"
+    result = json.loads(result_path.read_text())
+    _replace_relay(result, verified)
+    _write_trial_result(result_path, result)
+    _refresh_job_result(trial.parent)
 
 
 def _failure_info(
@@ -3314,10 +3336,13 @@ class PairedResultsTest(unittest.TestCase):
         with self.assertRaisesRegex(paired.IntegrityError, "relayRunId must be unique"):
             paired.summarize([replay.root])
 
-    def test_upstream_identities_are_unique_within_each_provider(self) -> None:
-        for mutation, message in (
-            ("reused-provider-request-id", "provider request IDs"),
-            ("reused-response-id", "response IDs"),
+    def test_partial_upstream_identity_collisions_do_not_invalidate_screen(
+        self,
+    ) -> None:
+        for mutation in (
+            "reused-provider-request-id",
+            "reused-response-id",
+            "reused-upstream-ids",
         ):
             with self.subTest(mutation=mutation):
                 case_root = self.root / mutation
@@ -3326,22 +3351,19 @@ class PairedResultsTest(unittest.TestCase):
                 task = screen.tasks[0]
                 source = screen.trials[("deepseek", task, "control-v1")]
                 target = screen.trials[("deepseek", task, "verify-instruction-v1")]
-                _rewrite_relay(target, mutation, source_trial=source)
-                evidence = target / "artifacts" / "provider-evidence"
-                verified = relay_metadata(
-                    evidence / "provider-metadata.ndjson",
-                    evidence / "provider-metadata.ndjson.sealed",
-                )
-                self.assertTrue(verified["publication_gate"]["ok"])
-                result_path = target / "result.json"
-                result = json.loads(result_path.read_text())
-                _replace_relay(result, verified)
-                _write_trial_result(result_path, result)
-                _refresh_job_result(target.parent)
-                with self.assertRaisesRegex(paired.IntegrityError, message):
-                    paired.summarize([screen.root])
+                _rewrite_scored_relay(target, mutation, source_trial=source)
+                self.assertTrue(paired.summarize([screen.root])["integrityOk"])
 
-    def test_upstream_identity_text_is_namespaced_by_provider(self) -> None:
+    def test_exact_upstream_lifecycle_reuse_is_rejected(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        task = screen.tasks[0]
+        source = screen.trials[("deepseek", task, "control-v1")]
+        target = screen.trials[("deepseek", task, "verify-instruction-v1")]
+        _rewrite_scored_relay(target, "reused-response-lifecycle", source_trial=source)
+        with self.assertRaisesRegex(paired.IntegrityError, "response lifecycles"):
+            paired.summarize([screen.root])
+
+    def test_upstream_lifecycles_are_namespaced_by_provider_and_hidden(self) -> None:
         attempts = [
             {
                 "provider": provider,
@@ -3350,16 +3372,20 @@ class PairedResultsTest(unittest.TestCase):
                 "relayInstanceId": f"instance-{index}",
                 "chainHead": f"chain-{index}",
                 "relayRequestIds": [f"relay-request-{index}"],
-                "providerRequestIds": ["shared-provider-request"],
-                "responseIds": ["shared-response"],
+                "providerResponseFingerprints": [
+                    (
+                        "shared-provider-request",
+                        "shared-response",
+                        "sha256:" + "a" * 64,
+                    )
+                ],
             }
             for index, provider in enumerate(("deepseek", "zai"))
         ]
 
         paired._validate_global_uniqueness(attempts)
         cleaned = paired._clean_attempt(attempts[0])
-        self.assertNotIn("providerRequestIds", cleaned)
-        self.assertNotIn("responseIds", cleaned)
+        self.assertNotIn("providerResponseFingerprints", cleaned)
 
     def test_task_bytes_must_match_across_providers(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
