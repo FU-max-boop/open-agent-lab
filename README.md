@@ -24,9 +24,13 @@ evidence, ATIF validation, and Harbor result/lock validation. This is an
 infrastructure proof, not a model score. The next frozen experiment compares a
 control with one opt-in verification instruction whose exact bytes and hash are
 bound into the run evidence; real Codex request tests ensure it is delivered as
-a developer message. Live-provider conformance and the Terminal-Bench pilot are
-still pending execution. There is no installable release or public benchmark
-result yet.
+a developer message. Hosted CI now runs both frozen DeepSeek and GLM Codex
+profiles through an exact provider-free tool round with zero Codex retries,
+bounded execution, a sealed relay journal, and a retained safe event projection.
+Those bundles are always marked synthetic and never authorize benchmark start.
+No DeepSeek or GLM live probe has run, so live conformance and the
+Terminal-Bench pilot remain pending. There is no installable release or public
+benchmark result yet.
 
 Open Agent Lab is independent from OpenAI and is not an official Codex
 distribution.

@@ -7,6 +7,8 @@ export type OpenModelProvider = "deepseek" | "zai";
 export type CodexProvider = OpenModelProvider | "probe";
 export type ReasoningEffort = "low" | "high" | "max";
 
+export const CODEX_RELAY_ENV_KEY = "OPEN_AGENT_LAB_RELAY_TOKEN";
+
 interface ProviderProfile {
   readonly id: CodexProvider;
   readonly name: string;
@@ -59,6 +61,17 @@ export interface CodexRunSpec {
   codexPath?: string;
 }
 
+export interface CodexRelayRunSpec extends CodexRunSpec {
+  baseUrl: string;
+}
+
+export interface NativeProviderProfile {
+  readonly responsesUrl: string;
+  readonly defaultModel: string;
+  readonly defaultReasoning: ReasoningEffort;
+  readonly contextWindow: number;
+}
+
 export interface CodexInvocation {
   readonly command: string;
   readonly args: readonly string[];
@@ -74,6 +87,12 @@ export interface CodexInvocation {
 export interface CodexRunIo {
   stdout: (chunk: string) => void;
   stderr: (chunk: string) => void;
+}
+
+export interface CodexRunLimits {
+  timeoutMs: number;
+  maxStdoutBytes: number;
+  maxStderrBytes: number;
 }
 
 const defaultIo: CodexRunIo = {
@@ -102,11 +121,22 @@ const PROCESS_ENV = [
   "PATHEXT",
   "USERPROFILE",
 ] as const;
+const SYNTHETIC_ROUTE_CATALOGS = new WeakMap<CodexInvocation, string>();
 
 function profile(provider: OpenModelProvider): ProviderProfile {
   const value: ProviderProfile | undefined = PROFILES[provider];
   if (value === undefined) throw new Error(`Unknown Codex provider: ${provider}`);
   return value;
+}
+
+export function nativeProviderProfile(provider: OpenModelProvider): NativeProviderProfile {
+  const selected = profile(provider);
+  return Object.freeze({
+    responsesUrl: new URL("responses", `${selected.baseUrl.replace(/\/$/u, "")}/`).toString(),
+    defaultModel: selected.defaultModel,
+    defaultReasoning: selected.defaultReasoning,
+    contextWindow: selected.contextWindow,
+  });
 }
 
 function requireModel(value: string): string {
@@ -119,6 +149,39 @@ function requireModel(value: string): string {
 
 function providerToml(value: ProviderProfile): string {
   return `{ name = ${JSON.stringify(value.name)}, base_url = ${JSON.stringify(value.baseUrl)}, env_key = ${JSON.stringify(value.envKey)}, wire_api = "responses", request_max_retries = ${value.requestRetries}, stream_max_retries = ${value.streamRetries}, stream_idle_timeout_ms = 300000, supports_websockets = false }`;
+}
+
+function syntheticRouteCatalog(selected: ProviderProfile): string {
+  const model = selected.defaultModel;
+  const reasoning = selected.defaultReasoning;
+  return `${JSON.stringify({
+    models: [
+      {
+        slug: model,
+        display_name: model,
+        default_reasoning_level: reasoning,
+        supported_reasoning_levels: [
+          { effort: reasoning, description: "Frozen synthetic route-probe effort" },
+        ],
+        shell_type: "shell_command",
+        visibility: "none",
+        supported_in_api: true,
+        priority: 0,
+        model_messages: {
+          instructions_template: "You are a coding agent. Follow the request using the provided tools.",
+        },
+        include_apps_usage_instructions: false,
+        supports_reasoning_summary_parameter: false,
+        default_reasoning_summary: "none",
+        support_verbosity: false,
+        truncation_policy: { mode: "bytes", limit: 10_000 },
+        context_window: selected.contextWindow,
+        max_context_window: selected.contextWindow,
+        experimental_supported_tools: [],
+        input_modalities: ["text"],
+      },
+    ],
+  })}\n`;
 }
 
 function invocation(
@@ -135,7 +198,7 @@ function invocation(
   if (spec.prompt.trim() === "") throw new Error("Codex prompt cannot be empty.");
 
   const cwd = resolve(spec.workspace);
-  const probeNetwork =
+  const network =
     selected.scope === "loopback-probe"
       ? ["--config", "sandbox_workspace_write.network_access=true"]
       : [];
@@ -152,7 +215,7 @@ function invocation(
       "never",
       "--sandbox",
       "workspace-write",
-      ...probeNetwork,
+      ...network,
       "--skip-git-repo-check",
       "--cd",
       cwd,
@@ -185,6 +248,42 @@ function invocation(
 /** Build a secret-free, user-config-independent Codex invocation. */
 export function buildCodexInvocation(spec: CodexRunSpec): CodexInvocation {
   return invocation(spec, profile(spec.provider));
+}
+
+function loopbackBaseUrl(value: string): string {
+  const url = new URL(value);
+  if (
+    url.protocol !== "http:" ||
+    (url.hostname !== "127.0.0.1" && url.hostname !== "[::1]" && url.hostname !== "localhost") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("Codex relay endpoint must be an unauthenticated loopback HTTP URL.");
+  }
+  return url.toString().replace(/\/$/u, "");
+}
+
+/** Build a frozen synthetic route invocation that receives only a relay capability. */
+export function buildCodexRelayInvocation(spec: CodexRelayRunSpec): CodexInvocation {
+  const selected = profile(spec.provider);
+  const relayProfile = {
+    ...selected,
+    baseUrl: loopbackBaseUrl(spec.baseUrl),
+    envKey: CODEX_RELAY_ENV_KEY,
+    requestRetries: 0,
+    streamRetries: 0,
+  };
+  const built = invocation(spec, relayProfile);
+  if (
+    built.model !== selected.defaultModel ||
+    built.reasoning !== selected.defaultReasoning
+  ) {
+    throw new Error(`${selected.name} relay probes require the frozen provider profile.`);
+  }
+  SYNTHETIC_ROUTE_CATALOGS.set(built, syntheticRouteCatalog(relayProfile));
+  return built;
 }
 
 export interface CodexProbeRunSpec {
@@ -223,19 +322,10 @@ function withDeveloperInstruction(
 
 /** Build a deterministic probe invocation; the endpoint must be loopback. */
 export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocation {
-  const url = new URL(spec.baseUrl);
-  if (
-    url.protocol !== "http:" ||
-    (url.hostname !== "127.0.0.1" && url.hostname !== "[::1]" && url.hostname !== "localhost") ||
-    url.username !== "" ||
-    url.password !== ""
-  ) {
-    throw new Error("Codex probe endpoint must be an unauthenticated loopback HTTP URL.");
-  }
   return withDeveloperInstruction(invocation(spec, {
     id: "probe",
     name: "Open Agent Lab loopback probe",
-    baseUrl: url.toString().replace(/\/$/, ""),
+    baseUrl: loopbackBaseUrl(spec.baseUrl),
     envKey: "OPEN_AGENT_LAB_PROBE_KEY",
     defaultModel: "open-agent-lab-probe",
     defaultReasoning: "high",
@@ -247,11 +337,25 @@ export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocat
   }), spec.developerInstruction);
 }
 
+function runtimeArgs(invocation: CodexInvocation, modelCatalogPath: string): string[] {
+  const args = [...invocation.args];
+  if (args.some((value) => /^(?:--config=|-c=?|\s*)model_catalog_json\s*=/u.test(value))) {
+    throw new Error("Codex model catalog paths are managed internally.");
+  }
+  if (!SYNTHETIC_ROUTE_CATALOGS.has(invocation)) return args;
+  if (args.at(-1) !== "-") {
+    throw new Error("Codex invocation no longer reads its prompt from stdin.");
+  }
+  args.splice(-1, 0, "--config", `model_catalog_json=${JSON.stringify(modelCatalogPath)}`);
+  return args;
+}
+
 /** Execute Codex without ever copying the provider secret into argv or config. */
 export async function runCodexInvocation(
   invocation: CodexInvocation,
   env: NodeJS.ProcessEnv = process.env,
   io: CodexRunIo = defaultIo,
+  limits?: CodexRunLimits,
 ): Promise<number> {
   const apiKey = env[invocation.requiredEnv];
   if (apiKey === undefined || apiKey.trim() === "") {
@@ -269,17 +373,80 @@ export async function runCodexInvocation(
 
   try {
     await writeFile(join(codexHome, "auth.json"), "{}\n", { mode: 0o600 });
+    const modelCatalogPath = join(codexHome, "model-catalog.json");
+    const modelCatalog = SYNTHETIC_ROUTE_CATALOGS.get(invocation);
+    const args = runtimeArgs(invocation, modelCatalogPath);
+    if (modelCatalog !== undefined) {
+      await writeFile(modelCatalogPath, modelCatalog, { flag: "wx", mode: 0o600 });
+    }
+    if (
+      limits !== undefined &&
+      Object.entries(limits).some(([, value]) => !Number.isSafeInteger(value) || value <= 0)
+    ) {
+      throw new Error("Codex execution limits must be positive integers.");
+    }
     return await new Promise<number>((resolveExit, reject) => {
-      const child = spawn(invocation.command, invocation.args, {
+      const detached = limits !== undefined && process.platform !== "win32";
+      const child = spawn(invocation.command, args, {
         cwd: invocation.cwd,
         env: childEnv,
+        detached,
         stdio: ["pipe", "pipe", "pipe"],
       });
-      child.once("error", reject);
-      child.stdin.once("error", reject);
-      child.stdout.on("data", (chunk: Buffer) => io.stdout(chunk.toString("utf8")));
-      child.stderr.on("data", (chunk: Buffer) => io.stderr(chunk.toString("utf8")));
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let failure: Error | undefined;
+      const stop = (error: Error): void => {
+        if (failure !== undefined) return;
+        failure = error;
+        try {
+          if (detached && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      };
+      const interrupted = (): void => stop(new Error("Codex execution was interrupted."));
+      if (limits !== undefined) {
+        process.once("SIGINT", interrupted);
+        process.once("SIGTERM", interrupted);
+      }
+      const removeSignalHandlers = (): void => {
+        process.off("SIGINT", interrupted);
+        process.off("SIGTERM", interrupted);
+      };
+      const timer =
+        limits === undefined
+          ? undefined
+          : setTimeout(
+              () => stop(new Error(`Codex exceeded its ${limits.timeoutMs}ms execution limit.`)),
+              limits.timeoutMs,
+            );
+      child.once("error", (error) => stop(error));
+      child.stdin.once("error", (error) => stop(error));
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdoutBytes += chunk.length;
+        if (limits !== undefined && stdoutBytes > limits.maxStdoutBytes) {
+          stop(new Error("Codex exceeded its stdout limit."));
+        } else {
+          io.stdout(chunk.toString("utf8"));
+        }
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.length;
+        if (limits !== undefined && stderrBytes > limits.maxStderrBytes) {
+          stop(new Error("Codex exceeded its stderr limit."));
+        } else {
+          io.stderr(chunk.toString("utf8"));
+        }
+      });
       child.once("close", (code, signal) => {
+        if (timer !== undefined) clearTimeout(timer);
+        removeSignalHandlers();
+        if (failure !== undefined) {
+          reject(failure);
+          return;
+        }
         if (signal !== null) {
           reject(new Error(`Codex terminated by signal ${signal}.`));
           return;

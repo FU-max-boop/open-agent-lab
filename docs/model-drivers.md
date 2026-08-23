@@ -74,6 +74,24 @@ system fingerprint when supplied, and a hash of the redacted raw event stream.
 Missing usage stays missing rather than becoming zero. Private reasoning and API
 keys are never published.
 
+The provider-free route harness is the first executable slice of this gate. It
+fixes each model/reasoning pair to the frozen Terminal-Bench variant, verifies
+the pinned Linux Codex executable, and routes Codex through the native Responses
+relay with exactly two fixture requests and zero Codex retries. Success requires
+one exact shell command, one regular effect file, one Codex turn, two complete
+relay lifecycles, exact returned-model identity, unique request/response IDs,
+valid usage arithmetic, no metadata conflict or rejection, and a valid seal.
+Only event types and the fixed command lifecycle are retained; model text,
+reasoning, command output, prompts, and capabilities are not.
+
+Hosted CI runs this path for both the DeepSeek and GLM profiles, with shell
+networking disabled and hard time/output/process-tree bounds. Every bundle is
+synthetic and records `liveProviderConformance=false` and
+`benchmarkStartAuthorized=false`. A live host-side variant is intentionally not
+exposed: Codex workspace-write sandboxing permits host reads, so a durable key
+must remain in a separate Harbor relay container. The next gate will produce
+and bind that isolated live receipt before any scored pilot starts.
+
 The Harbor path adds an isolated native-Responses byte relay rather than a
 protocol adapter. Each relay generates one short-lived, fixed-model capability,
 injects the durable provider key, and stores response identity, request ID,
