@@ -84,7 +84,7 @@ _POLICY_SHA256 = (
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
-_SUMMARY_SCHEMA_VERSION = 3
+_SUMMARY_SCHEMA_VERSION = 4
 _PAIRED_BOOTSTRAP_RESAMPLES = 10_000
 _PAIRED_BOOTSTRAP_SEED = 20260822
 _RELAY_REQUEST_CAP = 256
@@ -2446,6 +2446,7 @@ def _validate_agent_totals(
 
 def _telemetry_gaps(
     totals: dict[str, int | None] | None,
+    cost_usd: float | None,
     tool_calls: int | None,
     agent_wall: float | None,
     agent_tokens_complete: bool,
@@ -2460,6 +2461,8 @@ def _telemetry_gaps(
             for key in ("cached_input_tokens", "reasoning_output_tokens")
             if totals[key] is None
         )
+    if cost_usd is None:
+        gaps.append("cost_usd")
     if tool_calls is None:
         gaps.append("trajectory")
     elif not trajectory_metrics_complete:
@@ -2825,11 +2828,13 @@ def _attempt(
         scored_failure,
     )
     agent_tokens_complete = _validate_agent_totals(agent_result, totals, scored_failure)
+    agent_totals = _job_agent_totals(agent_result)
     tool_calls, steps, trajectory_metrics_complete = _validate_trajectory(
         trial_dir, model, harbor_binding, totals, scored_failure
     )
     telemetry_missing = _telemetry_gaps(
         totals,
+        agent_totals["cost_usd"],
         tool_calls,
         agent_wall,
         agent_tokens_complete,
@@ -2851,7 +2856,8 @@ def _attempt(
         "stepExceptions": [],
         "telemetryComplete": not telemetry_missing,
         "telemetryMissing": telemetry_missing,
-        "harborAgentTotals": _job_agent_totals(agent_result),
+        "costUsd": agent_totals["cost_usd"],
+        "harborAgentTotals": agent_totals,
         "relayPublicationGate": verified["publication_gate"],
         "tokens": totals,
         "providerRequests": len(verified["records"]) // 3,
@@ -3593,12 +3599,12 @@ class LiveRouteRun:
 
 
 def _optional_total(attempts: list[dict[str, Any]], field: str) -> int | float | None:
-    values = [
-        item["harborAgentTotals"][field]
-        for item in attempts
-        if item["harborAgentTotals"][field] is not None
-    ]
-    return sum(values) if values else None
+    total = None
+    for item in attempts:
+        value = item["harborAgentTotals"][field]
+        if value is not None:
+            total = (total or 0) + value
+    return total
 
 
 def _expected_eval_cores(
@@ -3992,6 +3998,7 @@ def _summary(
         "exceptionCounts": exception_counts,
         "telemetryCoverage": {
             "completeAttempts": sum(item["telemetryComplete"] for item in attempts),
+            "costUsdAttempts": sum(item["costUsd"] is not None for item in attempts),
             "totalAttempts": len(attempts),
         },
         "attempts": [_clean_attempt(item) for item in attempts],

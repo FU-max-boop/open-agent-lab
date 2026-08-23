@@ -1132,6 +1132,7 @@ class RunFixture:
                             "n_input_tokens": 3,
                             "n_cache_tokens": 0,
                             "n_output_tokens": 2,
+                            "cost_usd": 0.01,
                             "metadata": {"open_agent_lab_provider": provider_data},
                         },
                         "verifier_result": {
@@ -1320,7 +1321,7 @@ class StrictInputTest(unittest.TestCase):
         self.assertEqual(
             invalid,
             {
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
@@ -1961,7 +1962,7 @@ class PairedResultsTest(unittest.TestCase):
         second = paired.summarize([screen.root])
         self.assertEqual(first, second)
         self.assertTrue(first["integrityOk"])
-        self.assertEqual(first["schemaVersion"], 3)
+        self.assertEqual(first["schemaVersion"], 4)
         self.assertFalse(first["analysisComplete"])
         self.assertEqual(first["analysisStatus"], "valid_incomplete")
         self.assertEqual(
@@ -2073,6 +2074,11 @@ class PairedResultsTest(unittest.TestCase):
         self.assertTrue(result["analysisComplete"])
         self.assertEqual(result["analysisStatus"], "valid")
         self.assertEqual(result["denominator"]["attempts"], 40)
+        self.assertEqual(
+            result["telemetryCoverage"],
+            {"completeAttempts": 40, "costUsdAttempts": 40, "totalAttempts": 40},
+        )
+        self.assertTrue(all(item["costUsd"] == 0.01 for item in result["attempts"]))
         self.assertEqual(result["promotion"]["status"], "not_promotable")
         self.assertTrue(result["promotion"]["directionalCriteriaMet"])
         self.assertIn(
@@ -2089,6 +2095,35 @@ class PairedResultsTest(unittest.TestCase):
                 ],
                 0,
             )
+
+    def test_missing_cost_is_public_and_blocks_complete_analysis(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        mirror = RunFixture(self.root, "mirror-v1")
+        trial = mirror.trials[("deepseek", mirror.tasks[0], "control-v1")]
+        result_path = trial / "result.json"
+        trial_result = json.loads(result_path.read_text())
+        trial_result["agent_result"]["cost_usd"] = None
+        _write_trial_result(result_path, trial_result)
+        _refresh_job_result(trial.parent)
+
+        summary = paired.summarize([screen.root, mirror.root])
+
+        attempt = next(
+            item
+            for item in summary["attempts"]
+            if item["trialId"] == trial_result["id"]
+        )
+        self.assertFalse(summary["analysisComplete"])
+        self.assertEqual(summary["analysisStatus"], "valid_incomplete")
+        self.assertEqual(
+            summary["telemetryCoverage"],
+            {"completeAttempts": 39, "costUsdAttempts": 39, "totalAttempts": 40},
+        )
+        self.assertIsNone(attempt["costUsd"])
+        self.assertEqual(attempt["telemetryMissing"], ["cost_usd"])
+        self.assertIn(
+            "attempt_telemetry_missing", summary["promotion"]["blockingReasons"]
+        )
 
     def test_missing_duplicate_and_symlink_trials_fail_closed(self) -> None:
         for mutation in ("missing", "duplicate", "symlink"):
@@ -2796,6 +2831,7 @@ class PairedResultsTest(unittest.TestCase):
             summary["telemetryCoverage"],
             {
                 "completeAttempts": 19,
+                "costUsdAttempts": 20,
                 "totalAttempts": 20,
             },
         )
