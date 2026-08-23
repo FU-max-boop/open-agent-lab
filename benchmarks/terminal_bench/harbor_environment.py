@@ -329,6 +329,24 @@ def _validated_run_binding(value: dict[str, Any]) -> dict[str, Any]:
     return dict(value)
 
 
+def _binding_from_preflight(value: object, digest: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(digest, str):
+        raise TypeError("preflight binding is unavailable")
+    return _validated_run_binding(
+        {
+            "schema_version": 1,
+            "experiment_id": value["experimentId"],
+            "replication_id": value["replicationId"],
+            "source_revision": value["sourceRevision"],
+            "experiment_manifest_sha256": value["experimentManifestSha256"],
+            "relay_build_sha256": value["relayBuildSha256"],
+            "relay_image_sha256": value["relayImageSha256"],
+            "preflight_sha256": digest,
+            "task_snapshots_sha256": value["taskSnapshotsSha256"],
+        }
+    )
+
+
 def _git(root: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args], cwd=root, text=True, capture_output=True, check=False
@@ -742,9 +760,27 @@ def _validate_prepared_source(
             or not isinstance(record.get("liveRouteProbes"), list)
         ):
             raise ValueError("run record drifted")
+        production_binding = _binding_from_preflight(
+            record.get("preflight"), record.get("preflightSha256")
+        )
+        if (
+            production_binding["relay_build_sha256"] != build_ids["production"]
+            or production_binding["relay_image_sha256"] != relay_images["production"]
+            or any(
+                production_binding[key] != binding[key]
+                for key in RUN_BINDING_KEYS
+                - {
+                    "relay_build_sha256",
+                    "relay_image_sha256",
+                    "preflight_sha256",
+                }
+            )
+        ):
+            raise ValueError("production run binding drifted")
+        _validate_bound_preflight(root.parent, production_binding, record)
         _validate_live_route_probe_authorities(
             root.parent,
-            binding,
+            production_binding,
             manifest,
             record["liveRouteProbes"],
             relay_images,

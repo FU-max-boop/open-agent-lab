@@ -1401,6 +1401,25 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 ),
             ):
                 _validate_prepared_source(binding, root)
+                fixture_preflight = {
+                    **preflight,
+                    "relayBuildSha256": manifest["relayBuildIds"][
+                        "providerFreeFixture"
+                    ],
+                    "relayImageSha256": record["relayImages"]["providerFreeFixture"],
+                }
+                fixture_binding = {
+                    **binding,
+                    "relay_build_sha256": fixture_preflight["relayBuildSha256"],
+                    "relay_image_sha256": fixture_preflight["relayImageSha256"],
+                    "preflight_sha256": digest_bytes(canonical_json(fixture_preflight)),
+                }
+                fixtures = output / "fixtures"
+                fixtures.mkdir()
+                (fixtures / "preflight.json").write_bytes(
+                    canonical_json(fixture_preflight) + b"\n"
+                )
+                _validate_prepared_source(fixture_binding, root)
                 module.write_text("# drift\n")
                 with self.assertRaisesRegex(RuntimeError, "identity|drifted"):
                     _validate_prepared_source(binding, root)
