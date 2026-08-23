@@ -82,7 +82,7 @@
     "concurrency": 1,
     "harborRetries": 0,
     "relayRequestCapPerTrial": 256,
-    "hermeticCodexRuntimeReady": false,
+    "hermeticCodexRuntimeReady": true,
     "taskOrder": [
       "terminal-bench/model-extraction-relu-logits",
       "terminal-bench/video-processing",
@@ -217,7 +217,7 @@
     "benchmarks/terminal_bench/experiment_contract.py": "sha256:3c208dfd2ac060fac90de53876c59e2db114310507e2e8ec2d90ecfc4b00e8e9",
     "benchmarks/terminal_bench/harbor_agent.py": "sha256:50126a47eb7585ce90875a56454d12dfe8c7f56afa7d363e6d96031b93c159a2",
     "benchmarks/terminal_bench/harbor_environment.py": "sha256:069b32c7e3c8af4a137eb847137321d5c1a6ab04d22368872344f7be7789ddc4",
-    "benchmarks/terminal_bench/paired_results.py": "sha256:65c6eb1e687c59938c90d32321b94c27d8f9a5b20febbf33256acbfe2bb15564",
+    "benchmarks/terminal_bench/paired_results.py": "sha256:9b9a94bc36783d5a3d5e1849609fd78b62d4e0e20f10d584259c861279d99552",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
@@ -226,6 +226,7 @@
     "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:f6aaf15960e951ecf06036f4e8afffab446208f251aafe8211cfa874779bf8a5",
     "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:4360320211ea8966e1072ede35f35c7c35055aede5341e5da35526fa04e69d87",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:94ac6cacdd8985cd067b0fdfbb821c5ed6e77fca03a26abf8350511e51152e78",
+    "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:a6e665c525d3df9aaf0b28a2129ceb8dba4a79e776eaa68e9260316d9765f538",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },
   "metrics": [

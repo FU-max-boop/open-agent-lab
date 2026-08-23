@@ -886,7 +886,7 @@ class RunFixture:
                     result = {
                         "id": trial_id,
                         "trial_name": trial_dir.name,
-                        "task_name": task.removeprefix("terminal-bench/"),
+                        "task_name": task,
                         "trial_uri": trial_dir.resolve().as_uri(),
                         "task_id": task_id,
                         "source": paired._DATASET,

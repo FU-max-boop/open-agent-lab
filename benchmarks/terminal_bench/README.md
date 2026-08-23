@@ -43,6 +43,16 @@ Harbor result/lock records, and a matching ATIF trajectory. The production relay
 image is also scanned as an OCI archive to ensure fixture code is absent from
 every image layer.
 
+CI separately runs the unmodified prepared DeepSeek production config with
+Harbor's `--install-only` switch and an isolated job namespace. All five tasks
+and both frozen arms must start through the production binding. Each of the ten
+trials must pin the declared task image to its immutable digest, seal the full
+Compose graph, mount the byte-frozen Codex tree read-only, complete Codex setup,
+and publish a cleanup receipt after proving that no project container remains.
+The validator rejects any agent execution, trajectory, verifier output, reward,
+token usage, provider evidence, exception, missing task-arm pair, or leaked
+dummy credential. This is a compatibility proof, not a scored benchmark run.
+
 That green gate proves the adapter and isolation machinery, not DeepSeek, GLM,
 or Terminal-Bench capability. Fixture metadata is labeled `synthetic-fixture`
 and fails both publication gates by design. Before any result is publishable,
@@ -112,20 +122,21 @@ freeze opposite within-provider orders. A screen alone is always
 `not_promotable`; even both repetitions remain a five-task directional
 development result, never a significance, official, or leaderboard claim.
 
-The current frozen policy deliberately keeps
-`runtime.hermeticCodexRuntimeReady` at `false` while the new byte-frozen runtime
-is proved in hosted provider-free control and treatment trials. Every production
-agent therefore still fails closed before a provider request. Only a reviewed
-follow-up policy change may flip the gate after that proof is green. Do not
-create or mount provider key files for this experiment yet, and do not report a
-live score from it.
+The frozen policy sets `runtime.hermeticCodexRuntimeReady` to `true` only after
+the native provider-free tool round, direct five-image compatibility preflight,
+and production-bound Harbor install-only lifecycle all pass on hosted Linux.
+This removes only the runtime blocker. It does not prove provider conformance,
+model capability, a benchmark score, or permission to publish one. A live pilot
+still requires disposable provider credentials, a provider-side spend cap, and
+the evidence gates described above.
 
-After a reviewed policy revision flips that gate, prepare both predeclared
-repetitions **before the first live request**, while the same commit is still
-clean. The output roots and provider key files must be outside this repository.
+For a live pilot, prepare both predeclared repetitions **before the first live
+request**, while the same commit is still clean. The output roots and provider
+key files must be outside this repository.
 Preparation and execution must use the same Linux Docker daemon; immutable local
 relay image IDs are intentionally not portable aliases. The following commands
-document that future operator procedure and are not currently authorized:
+document the operator procedure; do not run it until the disposable credentials
+and spend caps are in place:
 
 ```bash
 python -m benchmarks.terminal_bench.paired_results prepare \
