@@ -30,8 +30,8 @@ export interface CodexProbeResult {
   sawDeveloperInstruction: boolean;
 }
 
-function codexEventTypes(stdout: string): Set<string> {
-  const types = new Set<string>();
+function codexEventTypes(stdout: string): string[] {
+  const types: string[] = [];
   for (const [index, line] of stdout.split(/\r?\n/u).entries()) {
     if (line === "") continue;
     let event: unknown;
@@ -47,7 +47,7 @@ function codexEventTypes(stdout: string): Set<string> {
     if (typeof type !== "string") {
       throw new Error(`Codex probe emitted an untyped JSONL event at line ${index + 1}.`);
     }
-    types.add(type);
+    types.push(type);
   }
   return types;
 }
@@ -187,11 +187,22 @@ export async function runCodexProbe(
       );
     }
     const eventTypes = codexEventTypes(stdout);
-    if (!eventTypes.has("thread.started")) {
-      throw new Error("Codex probe did not observe thread.started.");
+    for (const type of ["thread.started", "turn.started", "turn.completed"] as const) {
+      const count = eventTypes.filter((eventType) => eventType === type).length;
+      if (count !== 1) {
+        throw new Error(`Codex probe expected exactly one ${type}, observed ${count}.`);
+      }
     }
-    if (!eventTypes.has("turn.completed")) {
-      throw new Error("Codex probe did not observe turn.completed.");
+    if (
+      eventTypes.indexOf("thread.started") > eventTypes.indexOf("turn.started") ||
+      eventTypes.indexOf("turn.started") > eventTypes.indexOf("turn.completed")
+    ) {
+      throw new Error(
+        "Codex probe requires thread.started before turn.started before turn.completed.",
+      );
+    }
+    for (const type of ["turn.failed", "error"] as const) {
+      if (eventTypes.includes(type)) throw new Error(`Codex probe observed ${type}.`);
     }
     return {
       ok: true,

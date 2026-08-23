@@ -18,32 +18,83 @@ test(
     const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-probe-filter-"));
     t.after(async () => rm(directory, { force: true, recursive: true }));
 
-    for (const { name, event, extraOutput, expected } of [
+    for (const { name, renderOutput, expected } of [
       {
         name: "thread.started",
-        event: "thread.started",
-        extraOutput: "",
+        renderOutput: `grep -Fv ${shellQuote('"type":"thread.started"')} "$output" || :`,
         expected: /thread\.started/u,
       },
       {
         name: "turn.completed",
-        event: "turn.completed",
-        extraOutput: "",
+        renderOutput: `grep -Fv ${shellQuote('"type":"turn.completed"')} "$output" || :`,
         expected: /turn\.completed/u,
       },
       {
+        name: "turn.started",
+        renderOutput: `grep -Fv ${shellQuote('"type":"turn.started"')} "$output" || :`,
+        expected: /turn\.started/u,
+      },
+      {
         name: "malformed lifecycle spoof",
-        event: "thread.started",
-        extraOutput: `printf '%s\\n' ${shellQuote('not-json "type":"thread.started"')}`,
+        renderOutput: `grep -Fv ${shellQuote('"type":"thread.started"')} "$output" || :
+printf '%s\\n' ${shellQuote('not-json "type":"thread.started"')}`,
         expected: /invalid JSONL/u,
       },
       {
         name: "nested lifecycle spoof",
-        event: "thread.started",
-        extraOutput: `printf '%s\\n' ${shellQuote(
+        renderOutput: `grep -Fv ${shellQuote('"type":"thread.started"')} "$output" || :
+printf '%s\\n' ${shellQuote(
           '{"type":"item.completed","item":{"type":"thread.started"}}',
         )}`,
         expected: /thread\.started/u,
+      },
+      {
+        name: "duplicate thread start",
+        renderOutput: `cat "$output"
+grep -F ${shellQuote('"type":"thread.started"')} "$output"`,
+        expected: /exactly one thread\.started/u,
+      },
+      {
+        name: "duplicate turn completion",
+        renderOutput: `cat "$output"
+grep -F ${shellQuote('"type":"turn.completed"')} "$output"`,
+        expected: /exactly one turn\.completed/u,
+      },
+      {
+        name: "duplicate turn start",
+        renderOutput: `cat "$output"
+grep -F ${shellQuote('"type":"turn.started"')} "$output"`,
+        expected: /exactly one turn\.started/u,
+      },
+      {
+        name: "failed turn after completion",
+        renderOutput: `cat "$output"
+printf '%s\\n' ${shellQuote('{"type":"turn.failed"}')}`,
+        expected: /turn\.failed/u,
+      },
+      {
+        name: "error after completion",
+        renderOutput: `cat "$output"
+printf '%s\\n' ${shellQuote('{"type":"error"}')}`,
+        expected: /error/u,
+      },
+      {
+        name: "reversed lifecycle",
+        renderOutput: `grep -Fv ${shellQuote('"type":"thread.started"')} "$output" | grep -Fv ${shellQuote(
+          '"type":"turn.completed"',
+        )} || :
+grep -F ${shellQuote('"type":"turn.completed"')} "$output"
+grep -F ${shellQuote('"type":"thread.started"')} "$output"`,
+        expected: /thread\.started before turn\.started before turn\.completed/u,
+      },
+      {
+        name: "completion before turn start",
+        renderOutput: `grep -Fv ${shellQuote('"type":"turn.started"')} "$output" | grep -Fv ${shellQuote(
+          '"type":"turn.completed"',
+        )} || :
+grep -F ${shellQuote('"type":"turn.completed"')} "$output"
+grep -F ${shellQuote('"type":"turn.started"')} "$output"`,
+        expected: /thread\.started before turn\.started before turn\.completed/u,
       },
     ]) {
       await t.test(name, async () => {
@@ -55,8 +106,7 @@ output="$(mktemp)"
 trap 'rm -f "$output"' EXIT HUP INT TERM
 ${shellQuote(codex)} "$@" >"$output"
 status=$?
-grep -Fv ${shellQuote(`"type":"${event}"`)} "$output" || :
-${extraOutput}
+${renderOutput}
 exit "$status"
 `,
         );

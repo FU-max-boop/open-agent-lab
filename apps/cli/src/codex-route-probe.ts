@@ -190,20 +190,32 @@ export async function cleanRepositoryRevision(root = REPOSITORY_ROOT): Promise<s
   if ((await realpath(topLevel)) !== (await realpath(root))) {
     throw new Error("Route probes require the current clean repository revision.");
   }
-  const status = await executeFile(
+  const snapshot = await executeFile(
     "git",
-    ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+    [
+      "-C",
+      root,
+      "status",
+      "--porcelain=v2",
+      "--branch",
+      "--untracked-files=all",
+      "--no-ahead-behind",
+      "--ignore-submodules=none",
+    ],
     { encoding: "utf8" },
   );
-  const resolved = (
-    await executeFile("git", ["-C", root, "rev-parse", "--verify", "HEAD^{commit}"], {
-      encoding: "utf8",
-    })
-  ).stdout.trim();
-  if (!/^[a-f0-9]{40}$/u.test(resolved) || status.stdout !== "") {
+  const lines = snapshot.stdout.split("\n");
+  const revisions = lines
+    .filter((line) => line.startsWith("# branch.oid "))
+    .map((line) => line.slice("# branch.oid ".length));
+  if (
+    revisions.length !== 1 ||
+    !/^[a-f0-9]{40}$/u.test(revisions[0] ?? "") ||
+    lines.some((line) => line !== "" && !line.startsWith("# "))
+  ) {
     throw new Error("Route probes require the current clean repository revision.");
   }
-  return resolved;
+  return revisions[0] as string;
 }
 
 async function verifyCodex(path: string, contract: RouteProbeContract): Promise<void> {
