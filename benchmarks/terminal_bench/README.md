@@ -144,10 +144,17 @@ model capability, a benchmark score, or permission to publish one. A live pilot
 still requires disposable provider credentials, a provider-side spend cap, and
 the evidence gates described above.
 
-For a live pilot, prepare both predeclared repetitions **before the first live
-request**, while the same commit is still clean. The analyzer enforces output
-roots outside this repository; the operator must also keep provider key files
-outside it.
+For a live pilot, the operator procedure is to finish preparing both predeclared
+repetitions **before the first live request**, while the same commit is still
+clean. Preparation and live authorization are gated independently for each
+output root; no gate for one root checks its peer. A combined summary later
+rejects evidence whose observed probe or trial times predate the later recorded
+`preflight.createdAt`, but that retrospective check is not a cross-run launch
+lock and cannot prove that both roots were fully published before the first live
+request. Treat both roots as precommitted: do not use the screen result to decide
+whether to finish or discard the mirror. The analyzer enforces output roots
+outside this repository; the operator must also keep provider key files outside
+it.
 Preparation and execution must use the same Linux Docker daemon; immutable local
 relay image IDs are intentionally not portable aliases. The following commands
 document the operator procedure; do not run it until the disposable credentials
@@ -243,15 +250,25 @@ closed; prepare a fresh output root instead of deleting or rewriting a claim.
 The probe observes a bounded live route and model identity only; its receipt
 sets `liveProviderConformance` to `false` and is not a benchmark score.
 
-Then produce a deterministic redacted screen summary. It exits 0 only when the
-evidence is valid; the result is still `not_promotable` until the separately
-prepared mirror is run and included, and this development experiment never
-becomes a leaderboard result:
+To inspect the screen alone, produce a deterministic redacted partial diagnostic.
+It exits 0 only when the screen evidence is valid; without the separately
+prepared mirror, the result remains `not_promotable`:
 
 ```bash
 python -m benchmarks.terminal_bench.paired_results summarize \
   /absolute/path/to/oal-screen \
   --output /absolute/path/to/oal-screen-summary.json
+```
+
+After the mirror finishes, pass both roots to the combined retrospective check
+for paired directional analysis. Even this complete five-task development result
+is never a significance, official, or leaderboard claim:
+
+```bash
+python -m benchmarks.terminal_bench.paired_results summarize \
+  /absolute/path/to/oal-screen \
+  /absolute/path/to/oal-mirror \
+  --output /absolute/path/to/oal-paired-summary.json
 ```
 
 After all trials, validation, and any intended reruns are finished, remove only
