@@ -10,6 +10,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { canonicalJson } from "@open-agent-lab/contracts";
+import { sha256 } from "@open-agent-lab/evidence";
 
 import {
   startNativeResponsesRelay,
@@ -114,6 +115,25 @@ function records(content: string): Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+function rechain(entries: Record<string, unknown>[]): string {
+  let previous: string | null = null;
+  return `${entries
+    .map((entry) => {
+      const body: Record<string, unknown> = { ...entry, previousEventSha256: previous };
+      delete body.eventSha256;
+      const eventSha256 = sha256(canonicalJson(body));
+      previous = eventSha256;
+      return canonicalJson({ ...body, eventSha256 });
+    })
+    .join("\n")}\n`;
+}
+
+function reseal(marker: Record<string, unknown>): string {
+  const body = { ...marker };
+  delete body.markerSha256;
+  return `${canonicalJson({ ...body, markerSha256: sha256(canonicalJson(body)) })}\n`;
+}
+
 async function assertRelayError(response: Response, status: number, code: string): Promise<void> {
   assert.equal(response.status, status);
   assert.deepEqual(await response.json(), { error: { code } });
@@ -196,6 +216,76 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
     verifyRelaySeal(journal, await readFile(relay.sealPath, "utf8")),
     summary,
   );
+  const sealText = await readFile(relay.sealPath, "utf8");
+  const seal = JSON.parse(sealText) as Record<string, unknown>;
+  const widened = records(journal);
+  widened[0] = { ...widened[0], authorization: "must-not-be-accepted" };
+  assert.throws(() => verifyRelayJournal(rechain(widened)), /record/u);
+  const widenedUsage = records(journal);
+  widenedUsage[2] = {
+    ...widenedUsage[2],
+    usage: { ...(widenedUsage[2]?.usage as Record<string, unknown>), secret: 1 },
+  };
+  assert.throws(() => verifyRelayJournal(rechain(widenedUsage)), /record/u);
+  const widenedSources = records(journal);
+  widenedSources[2] = {
+    ...widenedSources[2],
+    modelSources: { ...(widenedSources[2]?.modelSources as object), secret: MODEL },
+  };
+  assert.throws(() => verifyRelayJournal(rechain(widenedSources)), /record/u);
+  for (const [index, field] of [
+    [0, "at"],
+    [0, "clientRequestId"],
+    [1, "modelHeader"],
+    [2, "systemFingerprint"],
+  ] as const) {
+    const widenedScalar = records(journal);
+    widenedScalar[index] = {
+      ...widenedScalar[index],
+      [field]: { authorization: "must-not-be-accepted" },
+    };
+    assert.throws(() => verifyRelayJournal(rechain(widenedScalar)), /record/u);
+  }
+  const oversizedSourceIndex = records(journal);
+  oversizedSourceIndex[2] = {
+    ...oversizedSourceIndex[2],
+    modelSources: { "event.response.completed.response.model.999999999999999999999": MODEL },
+  };
+  assert.throws(() => verifyRelayJournal(rechain(oversizedSourceIndex)), /record/u);
+  const unicodeSource = records(journal);
+  unicodeSource[2] = {
+    ...unicodeSource[2],
+    modelSources: { "event.response.\u2028probe.response.model.1": MODEL },
+  };
+  assert.doesNotThrow(() => verifyRelayJournal(rechain(unicodeSource)));
+  assert.throws(
+    () => verifyRelaySeal(journal, reseal({ ...seal, authorization: "must-not-be-accepted" })),
+    /marker/u,
+  );
+  assert.throws(
+    () => verifyRelaySeal(journal, reseal({ ...seal, rejectedRequests: { unknown: 1 } })),
+    /marker/u,
+  );
+  for (const count of [0, 2]) {
+    assert.throws(
+      () =>
+        verifyRelaySeal(
+          journal,
+          reseal({ ...seal, rejectedRequests: { client_disconnected_after_close: count } }),
+        ),
+      /marker/u,
+    );
+  }
+  const audited = reseal({
+    ...seal,
+    rejectedRequests: { client_disconnected_after_close: 1 },
+  });
+  assert.doesNotThrow(() => verifyRelaySeal(journal, audited));
+  assert.throws(
+    () => verifyRelaySeal(journal, audited.replace("after_close\":1", "after_close\":1.0")),
+    /canonical/u,
+  );
+  assert.throws(() => verifyRelayJournal(journal.trimEnd()), /newline/u);
   assert.equal(summary.eventCount, 3);
   assert.ok(!journal.includes(PROVIDER_BEARER));
   assert.ok(!journal.includes(CLIENT_BEARER));
