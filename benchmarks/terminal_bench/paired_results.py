@@ -80,7 +80,7 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:9f378a9f1bf9f74d9fcb576bf8287da58980a9c788548542f72ef29ae4fe22dc"
+    "sha256:89fa7c63fb7b65c3dec8f84fc4255ab20b24f061011efd8837128dc085eefbe5"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -3600,7 +3600,7 @@ class LiveRouteRun:
 
 def _optional_total(attempts: list[dict[str, Any]], field: str) -> int | float | None:
     total = None
-    for item in attempts:
+    for item in sorted(attempts, key=lambda attempt: attempt["startedAt"]):
         value = item["harborAgentTotals"][field]
         if value is not None:
             total = (total or 0) + value

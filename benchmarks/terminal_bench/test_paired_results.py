@@ -2620,6 +2620,35 @@ class PairedResultsTest(unittest.TestCase):
             paired.summarize([screen.root])["analysisStatus"], "valid_incomplete"
         )
 
+    def test_job_cost_aggregate_uses_harbor_execution_order(self) -> None:
+        costs = [
+            0.00885441,
+            0.00403959,
+            0.00794773,
+            0.00933489,
+            0.00441002,
+            0.00042451,
+            0.00271494,
+            0.00536111,
+            0.00509533,
+            0.00424605,
+        ]
+        started = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        attempts = [
+            {
+                "startedAt": started + timedelta(seconds=index),
+                "harborAgentTotals": {"cost_usd": cost},
+            }
+            for index, cost in enumerate(costs)
+        ]
+        expected = 0.0
+        for cost in costs:
+            expected += cost
+        self.assertNotEqual(expected, sum(costs))
+        self.assertEqual(
+            paired._optional_total(list(reversed(attempts)), "cost_usd"), expected
+        )
+
     def test_missing_usage_reward_and_model_fail_closed(self) -> None:
         mutations = (
             "reward",
