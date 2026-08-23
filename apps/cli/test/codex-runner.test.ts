@@ -169,6 +169,23 @@ test("runner fails before spawning when the provider key is absent", async () =>
   );
 });
 
+test("runner rejects an invalid structural context window", async () => {
+  const built = buildCodexInvocation({
+    provider: "deepseek",
+    workspace: ".",
+    prompt: "run",
+    codexPath: "/definitely/not/executed",
+  });
+  await assert.rejects(
+    runCodexInvocation(
+      Object.freeze({ ...built, contextWindow: 0 }),
+      { DEEPSEEK_API_KEY: "fixture-key" },
+      { stdout: () => undefined, stderr: () => undefined },
+    ),
+    /context window is invalid/u,
+  );
+});
+
 test("runner rejects caller-managed model catalog paths", async () => {
   const base = buildCodexInvocation({
     provider: "deepseek",
@@ -336,13 +353,14 @@ test("runner materializes the model catalog only inside its private home", async
     { provider: "deepseek" as const, model: "deepseek-v4-pro", reasoning: "high", context: 1_048_576 },
     { provider: "zai" as const, model: "glm-5.3", reasoning: "max", context: 1_000_000 },
   ]) {
-    const invocation = buildCodexRelayInvocation({
+    const built = buildCodexRelayInvocation({
       provider: expected.provider,
       workspace: directory,
       prompt: "perform one tool round",
       baseUrl: "http://127.0.0.1:43123/v1",
       codexPath: fakeCodex,
     });
+    const invocation = Object.freeze({ ...built });
     let output = "";
     const code = await runCodexInvocation(
       invocation,
@@ -392,6 +410,7 @@ test("runner materializes the model catalog only inside its private home", async
     ]);
     assert.equal(model?.slug, expected.model);
     assert.equal(model?.default_reasoning_level, expected.reasoning);
+    assert.equal(invocation.contextWindow, expected.context);
     assert.equal(model?.apply_patch_tool_type, "freeform");
     assert.equal(model?.context_window, expected.context);
     assert.equal(model?.max_context_window, expected.context);

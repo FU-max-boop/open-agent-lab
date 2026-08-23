@@ -1312,6 +1312,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             environment = _pinned_environment_mock(None)
             suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
             agent._codex_run_active = True
+            agent._codex_launch_allowed = True
             with patch.object(Codex, "exec_as_agent", new=parent_exec):
                 result = await agent.exec_as_agent(
                     environment,
@@ -1401,6 +1402,52 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             parent_run.assert_not_awaited()
             retain.assert_not_awaited()
+            self.assertFalse(agent._codex_run_active)
+
+    async def test_failed_run_closes_launch_phase_before_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            environment = _pinned_environment_mock(None)
+            parent_exec = AsyncMock()
+            suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
+
+            async def retain(
+                _environment: object, primary_error: BaseException | None
+            ) -> None:
+                self.assertIsInstance(primary_error, RuntimeError)
+                self.assertFalse(agent._codex_launch_allowed)
+                with self.assertRaisesRegex(RuntimeError, "exactly once"):
+                    await agent.exec_as_agent(
+                        environment, HARBOR_CODEX_EXEC_PREFIX + suffix
+                    )
+
+            with (
+                patch.object(Codex, "exec_as_agent", new=parent_exec),
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
+                patch.object(
+                    agent,
+                    "_run_once",
+                    new=AsyncMock(side_effect=RuntimeError("prelaunch failure")),
+                ),
+                patch.object(agent, "_retain_after_run", new=retain),
+                self.assertRaisesRegex(RuntimeError, "prelaunch failure"),
+            ):
+                await agent.run("instruction", environment, AgentContext())
+
+            parent_exec.assert_not_awaited()
+            self.assertEqual(agent._codex_launches, 0)
+            self.assertFalse(agent._codex_launch_allowed)
             self.assertFalse(agent._codex_run_active)
 
     async def test_run_guard_covers_evidence_retention(self) -> None:

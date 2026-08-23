@@ -1,1 +1,2 @@
-benchmarks/terminal_bench/codex-0.149.0-base-instructions.md whitespace=-blank-at-eol
+benchmarks/terminal_bench/codex-0.149.0-base-instructions.md text eol=lf whitespace=-blank-at-eol
+benchmarks/terminal_bench/verify-instruction-v1.txt text eol=lf

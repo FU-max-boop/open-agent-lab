@@ -81,6 +81,7 @@ export interface CodexInvocation {
   readonly provider: CodexProvider;
   readonly model: string;
   readonly reasoning: ReasoningEffort;
+  readonly contextWindow: number;
   readonly requiredEnv: string;
   readonly apiScope: ProviderProfile["scope"];
 }
@@ -122,7 +123,6 @@ const PROCESS_ENV = [
   "PATHEXT",
   "USERPROFILE",
 ] as const;
-const MODEL_CATALOG_PROFILES = new WeakMap<CodexInvocation, ProviderProfile>();
 const BASE_INSTRUCTIONS = new URL(
   "../../../benchmarks/terminal_bench/codex-0.149.0-base-instructions.md",
   import.meta.url,
@@ -160,9 +160,11 @@ function providerToml(value: ProviderProfile): string {
 
 function modelCatalog(
   invocation: CodexInvocation,
-  selected: ProviderProfile,
   instructions: string,
 ): string {
+  if (!Number.isSafeInteger(invocation.contextWindow) || invocation.contextWindow <= 0) {
+    throw new Error("Codex invocation context window is invalid.");
+  }
   const model = invocation.model;
   const reasoning = invocation.reasoning;
   return `${JSON.stringify({
@@ -189,22 +191,14 @@ function modelCatalog(
         support_verbosity: false,
         apply_patch_tool_type: "freeform",
         truncation_policy: { mode: "bytes", limit: 10_000 },
-        context_window: selected.contextWindow,
-        max_context_window: selected.contextWindow,
+        context_window: invocation.contextWindow,
+        max_context_window: invocation.contextWindow,
         effective_context_window_percent: 95,
         experimental_supported_tools: [],
         input_modalities: ["text"],
       },
     ],
   })}\n`;
-}
-
-function withModelCatalog(
-  invocation: CodexInvocation,
-  selected: ProviderProfile,
-): CodexInvocation {
-  MODEL_CATALOG_PROFILES.set(invocation, selected);
-  return invocation;
 }
 
 async function baseInstructions(): Promise<string> {
@@ -274,6 +268,7 @@ function invocation(
     provider: selected.id,
     model,
     reasoning,
+    contextWindow: selected.contextWindow,
     requiredEnv: selected.envKey,
     apiScope: selected.scope,
   });
@@ -282,7 +277,7 @@ function invocation(
 /** Build a secret-free, user-config-independent Codex invocation. */
 export function buildCodexInvocation(spec: CodexRunSpec): CodexInvocation {
   const selected = profile(spec.provider);
-  return withModelCatalog(invocation(spec, selected), selected);
+  return invocation(spec, selected);
 }
 
 function loopbackBaseUrl(value: string): string {
@@ -317,7 +312,7 @@ export function buildCodexRelayInvocation(spec: CodexRelayRunSpec): CodexInvocat
   ) {
     throw new Error(`${selected.name} relay probes require the frozen provider profile.`);
   }
-  return withModelCatalog(built, relayProfile);
+  return built;
 }
 
 export interface CodexProbeRunSpec {
@@ -369,10 +364,7 @@ export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocat
     requestRetries: 0,
     streamRetries: 0,
   };
-  return withModelCatalog(
-    withDeveloperInstruction(invocation(spec, selected), spec.developerInstruction),
-    selected,
-  );
+  return withDeveloperInstruction(invocation(spec, selected), spec.developerInstruction);
 }
 
 function runtimeArgs(invocation: CodexInvocation, modelCatalogPath: string): string[] {
@@ -380,7 +372,6 @@ function runtimeArgs(invocation: CodexInvocation, modelCatalogPath: string): str
   if (args.some((value) => /^(?:--config=|-c=?|\s*)model_catalog_json\s*=/u.test(value))) {
     throw new Error("Codex model catalog paths are managed internally.");
   }
-  if (!MODEL_CATALOG_PROFILES.has(invocation)) return args;
   if (args.at(-1) !== "-") {
     throw new Error("Codex invocation no longer reads its prompt from stdin.");
   }
@@ -412,15 +403,9 @@ export async function runCodexInvocation(
   try {
     await writeFile(join(codexHome, "auth.json"), "{}\n", { mode: 0o600 });
     const modelCatalogPath = join(codexHome, "model-catalog.json");
-    const catalogProfile = MODEL_CATALOG_PROFILES.get(invocation);
-    const catalog =
-      catalogProfile === undefined
-        ? undefined
-        : modelCatalog(invocation, catalogProfile, await baseInstructions());
+    const catalog = modelCatalog(invocation, await baseInstructions());
     const args = runtimeArgs(invocation, modelCatalogPath);
-    if (catalog !== undefined) {
-      await writeFile(modelCatalogPath, catalog, { flag: "wx", mode: 0o600 });
-    }
+    await writeFile(modelCatalogPath, catalog, { flag: "wx", mode: 0o600 });
     if (
       limits !== undefined &&
       Object.entries(limits).some(([, value]) => !Number.isSafeInteger(value) || value <= 0)
@@ -510,6 +495,7 @@ export function publicInvocation(invocation: CodexInvocation): object {
     provider: invocation.provider,
     model: invocation.model,
     reasoning: invocation.reasoning,
+    contextWindow: invocation.contextWindow,
     requiredEnv: invocation.requiredEnv,
     apiScope: invocation.apiScope,
     promptBytes: Buffer.byteLength(invocation.stdin),

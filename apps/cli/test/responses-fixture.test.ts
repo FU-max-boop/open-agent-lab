@@ -12,6 +12,32 @@ const TOOLS = [
   },
 ];
 
+test("Responses fixture detects an empty apply_patch grammar", async (t) => {
+  const fixture = await startResponsesFixture({
+    bearer: "fixture-secret",
+    model: "fixture-model",
+    command: "printf fixture",
+  });
+  t.after(() => fixture.close());
+  const response = await fetch(`${fixture.baseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-secret",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "fixture-model",
+      stream: true,
+      input: "run",
+      tools: [
+        TOOLS[0],
+        { ...TOOLS[1], format: { type: "grammar", syntax: "lark", definition: " " } },
+      ],
+    }),
+  });
+  assert.match(await response.text(), /apply_patch grammar/u);
+});
+
 test("Responses fixture completes one real function-tool round", async (t) => {
   const fixture = await startResponsesFixture({
     bearer: "fixture-secret",

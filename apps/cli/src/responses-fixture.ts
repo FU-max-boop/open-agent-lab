@@ -91,12 +91,15 @@ function execTool(body: Record<string, unknown>): string {
       tool.name === "apply_patch",
   );
   const format = applyPatch?.format;
+  const grammar =
+    typeof format === "object" && format !== null && !Array.isArray(format)
+      ? (format as Record<string, unknown>)
+      : undefined;
   if (
-    typeof format !== "object" ||
-    format === null ||
-    Array.isArray(format) ||
-    (format as Record<string, unknown>).type !== "grammar" ||
-    (format as Record<string, unknown>).syntax !== "lark"
+    grammar?.type !== "grammar" ||
+    grammar.syntax !== "lark" ||
+    typeof grammar.definition !== "string" ||
+    grammar.definition.trim() === ""
   ) {
     throw new Error("Codex did not advertise the native apply_patch grammar.");
   }
