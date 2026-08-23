@@ -1295,7 +1295,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             environment = _pinned_environment_mock(None)
             suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
             agent._codex_run_active = True
-            agent._codex_launch_allowed = True
+            agent._codex_launch_task = asyncio.current_task()
             with patch.object(Codex, "exec_as_agent", new=parent_exec):
                 result = await agent.exec_as_agent(
                     environment,
@@ -1405,7 +1405,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 _environment: object, primary_error: BaseException | None
             ) -> None:
                 self.assertIsInstance(primary_error, RuntimeError)
-                self.assertFalse(agent._codex_launch_allowed)
+                self.assertIsNone(agent._codex_launch_task)
                 with self.assertRaisesRegex(RuntimeError, "exactly once"):
                     await agent.exec_as_agent(
                         environment, HARBOR_CODEX_EXEC_PREFIX + suffix
@@ -1430,7 +1430,61 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
             parent_exec.assert_not_awaited()
             self.assertEqual(agent._codex_launches, 0)
-            self.assertFalse(agent._codex_launch_allowed)
+            self.assertIsNone(agent._codex_launch_task)
+            self.assertFalse(agent._codex_run_active)
+
+    async def test_concurrent_task_cannot_steal_the_codex_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            environment = _pinned_environment_mock(None)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            parent_exec = AsyncMock(return_value="sentinel")
+            suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
+
+            async def parent_run(*_args: object, **_kwargs: object) -> None:
+                entered.set()
+                await release.wait()
+                await agent.exec_as_agent(
+                    environment, HARBOR_CODEX_EXEC_PREFIX + suffix
+                )
+
+            with (
+                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+                patch.object(Codex, "run", new=parent_run),
+                patch.object(Codex, "exec_as_agent", new=parent_exec),
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
+                patch.object(agent, "_seal_and_retain", new=AsyncMock()),
+            ):
+                running = asyncio.create_task(
+                    agent.run("instruction", environment, AgentContext())
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    with self.assertRaisesRegex(RuntimeError, "exactly once"):
+                        await agent.exec_as_agent(
+                            environment, HARBOR_CODEX_EXEC_PREFIX + suffix
+                        )
+                    self.assertEqual(agent._codex_launches, 0)
+                finally:
+                    release.set()
+                    [outcome] = await asyncio.gather(running, return_exceptions=True)
+
+            self.assertIsNone(outcome)
+            parent_exec.assert_awaited_once()
+            self.assertEqual(agent._codex_launches, 1)
+            self.assertIsNone(agent._codex_launch_task)
             self.assertFalse(agent._codex_run_active)
 
     async def test_run_guard_covers_evidence_retention(self) -> None:
