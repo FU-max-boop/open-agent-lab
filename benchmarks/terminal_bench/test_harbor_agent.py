@@ -1294,8 +1294,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             parent_exec = AsyncMock(return_value="sentinel")
             environment = _pinned_environment_mock(None)
             suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
-            agent._codex_run_active = True
-            agent._codex_launch_allowed = True
+            agent._codex_launches = 0
             with patch.object(Codex, "exec_as_agent", new=parent_exec):
                 result = await agent.exec_as_agent(
                     environment,
@@ -1399,17 +1398,21 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             environment = _pinned_environment_mock(None)
             parent_exec = AsyncMock()
-            suffix = "--dangerously-bypass-approvals-and-sandbox -- task"
+            prelaunch_error = RuntimeError("prelaunch failure")
 
             async def retain(
                 _environment: object, primary_error: BaseException | None
             ) -> None:
-                self.assertIsInstance(primary_error, RuntimeError)
-                self.assertFalse(agent._codex_launch_allowed)
-                with self.assertRaisesRegex(RuntimeError, "exactly once"):
+                self.assertIs(primary_error, prelaunch_error)
+                self.assertIsNone(agent._codex_launches)
+                with self.assertRaisesRegex(RuntimeError, "launch exactly once"):
                     await agent.exec_as_agent(
-                        environment, HARBOR_CODEX_EXEC_PREFIX + suffix
+                        environment,
+                        HARBOR_CODEX_EXEC_PREFIX
+                        + "--dangerously-bypass-approvals-and-sandbox -- task",
                     )
+
+            retained = AsyncMock(side_effect=retain)
 
             with (
                 patch.object(Codex, "exec_as_agent", new=parent_exec),
@@ -1419,18 +1422,16 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(return_value="a" * 64),
                 ),
                 patch.object(
-                    agent,
-                    "_run_once",
-                    new=AsyncMock(side_effect=RuntimeError("prelaunch failure")),
+                    agent, "_run_once", new=AsyncMock(side_effect=prelaunch_error)
                 ),
-                patch.object(agent, "_retain_after_run", new=retain),
+                patch.object(agent, "_retain_after_run", new=retained),
                 self.assertRaisesRegex(RuntimeError, "prelaunch failure"),
             ):
                 await agent.run("instruction", environment, AgentContext())
 
             parent_exec.assert_not_awaited()
-            self.assertEqual(agent._codex_launches, 0)
-            self.assertFalse(agent._codex_launch_allowed)
+            retained.assert_awaited_once_with(environment, prelaunch_error)
+            self.assertIsNone(agent._codex_launches)
             self.assertFalse(agent._codex_run_active)
 
     async def test_run_guard_covers_evidence_retention(self) -> None:
@@ -1447,8 +1448,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             release = asyncio.Event()
 
             async def retain(
-                _environment: object, _primary_error: BaseException | None
+                _environment: object, primary_error: BaseException | None
             ) -> None:
+                self.assertIsNone(primary_error)
+                self.assertIsNone(agent._codex_launches)
                 entered.set()
                 await release.wait()
 
@@ -1477,6 +1480,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     release.set()
                     await first
+            self.assertIsNone(agent._codex_launches)
             self.assertFalse(agent._codex_run_active)
 
     async def test_live_run_fetches_a_per_trial_token_after_setup(self) -> None:
@@ -1812,6 +1816,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             agent.logger.disabled = True
 
             async def one_launch(*_args: object, **_kwargs: object) -> None:
+                self.assertEqual(agent._codex_launches, 0)
                 agent._codex_launches = 1
 
             with (

@@ -565,8 +565,7 @@ class OpenAgentLabCodex(Codex):
         self._codex_model_catalog = _model_catalog(model, profile)
         self._open_agent_lab_run_binding = binding
         self._codex_runtime_spec = codex_runtime_spec()
-        self._codex_launches = 0
-        self._codex_launch_allowed = False
+        self._codex_launches: int | None = None
         self._codex_run_active = False
         self._open_agent_lab_variant = _variant(
             enable_verify_instruction_v1,
@@ -628,18 +627,14 @@ class OpenAgentLabCodex(Codex):
         timeout_sec: int | None = None,
     ) -> Any:
         if command.startswith(HARBOR_CODEX_EXEC_PREFIX):
-            if (
-                not self._codex_run_active
-                or not self._codex_launch_allowed
-                or self._codex_launches
-            ):
+            if self._codex_launches != 0:
                 raise RuntimeError("Codex must launch exactly once inside agent.run().")
             command = (
                 build_full_tree_verification_command(self._codex_runtime_spec)
                 + "; "
                 + rewrite_harbor_launch(command)
             )
-            self._codex_launches += 1
+            self._codex_launches = 1
         elif _AMBIENT_CODEX_EXEC.search(command):
             raise RuntimeError("Unexpected ambient Codex launch command.")
         return await super().exec_as_agent(
@@ -771,24 +766,23 @@ class OpenAgentLabCodex(Codex):
         if self._codex_run_active:
             raise RuntimeError("Concurrent Codex runs are not supported.")
         self._codex_run_active = True
-        self._codex_launches = 0
+        self._codex_launches = None
         try:
             relay_token = await self._authorize_relay(environment)
             primary_error: BaseException | None = None
             try:
                 with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
-                    self._codex_launch_allowed = True
+                    self._codex_launches = 0
                     try:
                         await self._run_once(instruction, environment, context)
                     finally:
-                        self._codex_launch_allowed = False
+                        self._codex_launches = None
             except BaseException as error:
                 primary_error = error
                 raise
             finally:
                 await self._retain_after_run(environment, primary_error)
         finally:
-            self._codex_launch_allowed = False
             self._codex_run_active = False
 
     async def _run_once(
