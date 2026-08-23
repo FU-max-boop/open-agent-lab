@@ -769,19 +769,17 @@ class OpenAgentLabCodex(Codex):
         self._codex_launches = 0
         try:
             relay_token = await self._authorize_relay(environment)
-        except BaseException:
-            self._codex_run_active = False
-            raise
-        primary_error: BaseException | None = None
-        try:
-            with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
-                await self._run_once(instruction, environment, context)
-        except BaseException as error:
-            primary_error = error
-            raise
+            primary_error: BaseException | None = None
+            try:
+                with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
+                    await self._run_once(instruction, environment, context)
+            except BaseException as error:
+                primary_error = error
+                raise
+            finally:
+                await self._retain_after_run(environment, primary_error)
         finally:
             self._codex_run_active = False
-            await self._retain_after_run(environment, primary_error)
 
     async def _run_once(
         self,

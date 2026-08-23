@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -1400,6 +1401,52 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 )
             parent_run.assert_not_awaited()
             retain.assert_not_awaited()
+            self.assertFalse(agent._codex_run_active)
+
+    async def test_run_guard_covers_evidence_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def retain(
+                _environment: object, _primary_error: BaseException | None
+            ) -> None:
+                entered.set()
+                await release.wait()
+
+            with (
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
+                patch.object(agent, "_run_once", new=AsyncMock()),
+                patch.object(agent, "_retain_after_run", new=retain),
+            ):
+                first = asyncio.create_task(
+                    agent.run(
+                        "instruction", _pinned_environment_mock(None), AgentContext()
+                    )
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    with self.assertRaisesRegex(RuntimeError, "Concurrent Codex runs"):
+                        await agent.run(
+                            "instruction",
+                            _pinned_environment_mock(None),
+                            AgentContext(),
+                        )
+                finally:
+                    release.set()
+                    await first
             self.assertFalse(agent._codex_run_active)
 
     async def test_live_run_fetches_a_per_trial_token_after_setup(self) -> None:
