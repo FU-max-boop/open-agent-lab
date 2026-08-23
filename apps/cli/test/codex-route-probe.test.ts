@@ -146,7 +146,7 @@ test("synthetic route probes reject an unbound source revision before inspecting
   );
 });
 
-test("repository revision rejects Git metadata inherited from a parent", async (t) => {
+test("repository revision rejects inherited Git metadata and dirty roots", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-parent-repository-"));
   t.after(async () => rm(parent, { force: true, recursive: true }));
   await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
@@ -170,6 +170,12 @@ test("repository revision rejects Git metadata inherited from a parent", async (
 
   await assert.rejects(cleanRepositoryRevision(inherited), /current clean repository/u);
   assert.match(await cleanRepositoryRevision(parent), /^[a-f0-9]{40}$/u);
+  await writeFile(join(parent, ".gitignore"), "ignored/\nchanged\n", "utf8");
+  await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
+  await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
+  assert.match(await cleanRepositoryRevision(parent), /^[a-f0-9]{40}$/u);
+  await writeFile(join(parent, "untracked"), "dirty\n", "utf8");
+  await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
 });
 
 test(
