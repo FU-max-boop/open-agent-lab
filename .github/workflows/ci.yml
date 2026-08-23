@@ -82,6 +82,7 @@ jobs:
           python3 -m ruff format --check \
             benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
+            benchmarks/terminal_bench/failure_classification.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/live_route_probe.py \
@@ -101,6 +102,7 @@ jobs:
           python3 -m ruff check \
             benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
+            benchmarks/terminal_bench/failure_classification.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/live_route_probe.py \
@@ -120,6 +122,7 @@ jobs:
           python3 -m ruff check --select C901 \
             benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
+            benchmarks/terminal_bench/failure_classification.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/live_route_probe.py \
