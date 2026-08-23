@@ -73,6 +73,7 @@ jobs:
           [ "$apparmor_userns" != 1 ] || sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
           OPEN_AGENT_LAB_CODEX_BIN="$codex_runtime/vendor/x86_64-unknown-linux-musl/bin/codex" \
             node --import tsx --test --test-name-pattern="installed Codex" \
+            apps/cli/test/codex-probe.test.ts \
             apps/cli/test/codex-runner.test.ts \
             apps/cli/test/codex-route-probe.test.ts
 
