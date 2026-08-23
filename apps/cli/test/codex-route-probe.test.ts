@@ -148,9 +148,12 @@ test("synthetic route probes reject an unbound source revision before inspecting
 
 test("repository revision rejects inherited Git metadata and dirty roots", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-parent-repository-"));
+  const submodule = await mkdtemp(join(tmpdir(), "open-agent-lab-submodule-"));
   t.after(async () => rm(parent, { force: true, recursive: true }));
+  t.after(async () => rm(submodule, { force: true, recursive: true }));
   await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
   execFileSync("git", ["init", "--quiet"], { cwd: parent });
+  await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
   execFileSync("git", ["add", ".gitignore"], { cwd: parent });
   execFileSync(
     "git",
@@ -165,14 +168,60 @@ test("repository revision rejects inherited Git metadata and dirty roots", async
     ],
     { cwd: parent },
   );
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: parent,
+    encoding: "utf8",
+  }).trim();
   const inherited = join(parent, "ignored", "source");
   await mkdir(inherited, { recursive: true });
 
   await assert.rejects(cleanRepositoryRevision(inherited), /current clean repository/u);
-  assert.match(await cleanRepositoryRevision(parent), /^[a-f0-9]{40}$/u);
+  assert.equal(await cleanRepositoryRevision(parent), revision);
+  execFileSync("git", ["checkout", "--detach", "--quiet"], { cwd: parent });
+  assert.equal(await cleanRepositoryRevision(parent), revision);
   await writeFile(join(parent, ".gitignore"), "ignored/\nchanged\n", "utf8");
   await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
   await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
+  assert.equal(await cleanRepositoryRevision(parent), revision);
+
+  await writeFile(join(submodule, "tracked"), "clean\n", "utf8");
+  execFileSync("git", ["init", "--quiet"], { cwd: submodule });
+  execFileSync("git", ["add", "tracked"], { cwd: submodule });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Open Agent Lab",
+      "-c",
+      "user.email=open-agent-lab@example.invalid",
+      "commit",
+      "--quiet",
+      "--message=fixture",
+    ],
+    { cwd: submodule },
+  );
+  execFileSync(
+    "git",
+    ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule, "dependency"],
+    { cwd: parent },
+  );
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Open Agent Lab",
+      "-c",
+      "user.email=open-agent-lab@example.invalid",
+      "commit",
+      "--quiet",
+      "--message=submodule",
+    ],
+    { cwd: parent },
+  );
+  execFileSync("git", ["config", "submodule.dependency.ignore", "all"], { cwd: parent });
+  await writeFile(join(parent, "dependency", "tracked"), "dirty\n", "utf8");
+  await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
+  await writeFile(join(parent, "dependency", "tracked"), "clean\n", "utf8");
   assert.match(await cleanRepositoryRevision(parent), /^[a-f0-9]{40}$/u);
   await writeFile(join(parent, "untracked"), "dirty\n", "utf8");
   await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
