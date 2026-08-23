@@ -150,8 +150,8 @@
     }
   },
   "relayBuildIds": {
-    "production": "sha256:7a28015382b0858d2e865292eda4fb9e21114f0ed85ce6d6f4a6aca55adef941",
-    "providerFreeFixture": "sha256:7c04007f6ad4fcd03f87dc9b52e912da944ef60cedf6d48e90555060aa40c92b"
+    "production": "sha256:7ae693b124e31ba57bb68f4f249a1950fceb650a43d34f352e3d5bdd9ae40431",
+    "providerFreeFixture": "sha256:c043a71a2ba7f3a5ac2ad3282aee9794e301602411752a3ebab419f4e4c679ad"
   },
   "arms": [
     {
@@ -215,10 +215,10 @@
   },
   "fileSha256": {
     ".dockerignore": "sha256:92f7b031b96a1eb4b9898ec77be2638a66f626a720ed64db94919892ee87918c",
-    "apps/cli/src/codex-probe.ts": "sha256:121fa23e5751974455fc30dbdd916c0ba819c304e91df371875c4508eb19158c",
+    "apps/cli/src/codex-probe.ts": "sha256:46a77160f2ba67c5cd0b77041d8e39ff07687be372d00303bfceb320a2a4425d",
     "apps/cli/src/codex-route-probe.ts": "sha256:619c93d4bebef92256a289ecf9f9de973d3e76b18866a58c5b0095941da49898",
     "apps/cli/src/codex-runner.ts": "sha256:0dce996eb670dd3e8ac780ad8b8b0ba06ab6785a8dd778d76fbca7e59e70013f",
-    "apps/cli/src/relay-command.ts": "sha256:2e40424edf2711385d5697edafcdf78f93bb127b7b7b762f65298c933d73a140",
+    "apps/cli/src/relay-command.ts": "sha256:29ca5cd72acc6905e615c1974a535414ea60d465b6059d106962007e9f20ae72",
     "apps/cli/src/relay-fixture-entry.ts": "sha256:d3ba67816ebcaf0a9c42f9f5dca9bd445e5383a355e37b4fbc96bfa432802d53",
     "apps/cli/src/responses-fixture.ts": "sha256:e2558dcb985c1db67f629fd1676b5623c5c64585931c329b69b85402fdfe029d",
     "benchmarks/terminal_bench/harbor-e2e.yaml": "sha256:3aa2b2f07067ac9221a447ec94857592b3e391286e302ed52ebab4ba7c0cd7cd",
@@ -233,15 +233,15 @@
     "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",
     "benchmarks/terminal_bench/live-route-probe-task/task.toml": "sha256:d5b5d5fc2289b5c1a185014234de82d6b8927e515ba069a8c197e001b2bbb19e",
     "benchmarks/terminal_bench/live-route-probe-task/tests/test.sh": "sha256:ca91b28c4d53dd5f916e0fc9fad20fcbbf04e8f1fa0dcef97b0884d0bd68caf2",
-    "benchmarks/terminal_bench/live_route_probe.py": "sha256:f9121a576c07740c0941758282cdbe8e41b1056256ae83bc3bcbc858f4a8e128",
+    "benchmarks/terminal_bench/live_route_probe.py": "sha256:f2783ee9e59e6b3e950369e24842fc853e7a232a9c5b502da3fd4770bb4552b1",
     "benchmarks/terminal_bench/paired_results.py": "sha256:0d91f6bcbdce1d6dd1788a6320a4820af1e86df1a3fb74a3a3401273baac0bae",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
-    "benchmarks/terminal_bench/relay_evidence.py": "sha256:e05d33fb06f1ac645850370b4771ae44793ddbd13cd1a4a311af10b82d025136",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:d94ea28db586726e4933accbbdda30fa33791fdf292587f2dde5eb9786a18ac2",
-    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:8fc42a9ff4b83312b7e383779db64e78532e42097745f4f399c5b520923d6499",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:858d50c1b61baa69287d6d0da4e982235ad6bc2a077a2438574179df4219c34f",
+    "benchmarks/terminal_bench/relay_evidence.py": "sha256:13ea3406f3dcc5d019ae78d249687d3053a0a41af0269be3568ae554481ac2ea",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:e67f1b4e96ec0f0cc0e3afdbcf25cbfca35c635391acdc787d312a2073b4262b",
+    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:844279ae0b606b2ef466db9071896053f3649797b5fd85db6307f45673b4ee1c",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:07c6e430bc336328f21a369f39389cecfe04ec2763252f9687814d0a54c5bd3d",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:35d638534600059716b47206270c5dea46604db5305b92e2a06abfcfd8738fde",
     "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:6cb5fc5bd6922504e1d50b7c81ffd8018b479c6eb095af798fbf296ad6b079d0",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
