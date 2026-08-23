@@ -42,6 +42,7 @@ _MANIFEST_DATA = json.loads(_MANIFEST_BYTES)
 _MANIFEST_SHA256 = "sha256:" + hashlib.sha256(_MANIFEST_BYTES).hexdigest()
 _RUNTIME_SPEC = validate_codex_runtime_spec(_MANIFEST_DATA["runtime"]["codexRuntime"])
 _FIXTURE_BUILD_ID = _MANIFEST_DATA["relayBuildIds"]["providerFreeFixture"]
+_EFFECTIVE_MODEL_CONTEXT_WINDOW = 996_147
 _VERIFY_INSTRUCTION_SHA256 = (
     "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
 )
@@ -82,6 +83,35 @@ printf 'Hello, world!\n' > /app/hello.txt"""
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def _assert_codex_model_metadata(trial_dir: Path) -> None:
+    rollouts = sorted((trial_dir / "agent" / "sessions").rglob("rollout-*.jsonl"))
+    _require(len(rollouts) == 1, "Expected one native Codex rollout.")
+    contexts = []
+    try:
+        for line in rollouts[0].read_text().splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise TypeError("rollout event must be an object")
+            payload = event.get("payload")
+            if (
+                event.get("type") == "event_msg"
+                and isinstance(payload, dict)
+                and payload.get("type") == "task_started"
+            ):
+                contexts.append(payload.get("model_context_window"))
+    except (OSError, TypeError, UnicodeError, ValueError) as error:
+        raise RuntimeError("Native Codex rollout metadata is invalid.") from error
+    _require(
+        contexts == [_EFFECTIVE_MODEL_CONTEXT_WINDOW],
+        "Codex did not use the frozen DeepSeek context window.",
+    )
+    output = (trial_dir / "agent" / "codex.txt").read_text()
+    _require(
+        "Defaulting to fallback metadata" not in output,
+        "Codex used fallback model metadata.",
+    )
 
 
 def _isolation_command(secret: bytes) -> str:
@@ -294,6 +324,7 @@ def validate(
     trajectory = Trajectory.model_validate_json(
         (trial_dir / "agent" / "trajectory.json").read_text()
     )
+    _assert_codex_model_metadata(trial_dir)
 
     _require(result.exception_info is None, "Harbor recorded a trial exception.")
     _require(job_result.finished_at is not None, "Harbor job did not finish.")

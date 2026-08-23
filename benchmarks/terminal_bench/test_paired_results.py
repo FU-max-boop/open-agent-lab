@@ -20,6 +20,10 @@ from benchmarks.terminal_bench.experiment_contract import (
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
 )
+from benchmarks.terminal_bench.failure_classification import (
+    CLASSIFIED_EXCEPTION_TYPES,
+    classify_failure,
+)
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 
 
@@ -1282,6 +1286,33 @@ class RunFixture:
 
 
 class StrictInputTest(unittest.TestCase):
+    def test_invalid_cli_summary_uses_the_current_schema(self) -> None:
+        with (
+            patch.object(
+                paired,
+                "summarize",
+                side_effect=paired.IntegrityError("frozen input drifted"),
+            ),
+            patch("builtins.print") as emit,
+        ):
+            self.assertEqual(paired.main(["summarize", "/missing"]), 1)
+        invalid = json.loads(emit.call_args.args[0])
+        self.assertEqual(
+            invalid,
+            {
+                "schemaVersion": 2,
+                "experimentId": EXPERIMENT_ID,
+                "integrityOk": False,
+                "analysisComplete": False,
+                "analysisStatus": "invalid",
+                "promotion": {
+                    "ok": False,
+                    "status": "not_promotable",
+                    "blockingReasons": ["frozen input drifted"],
+                },
+            },
+        )
+
     def test_manifest_policy_has_one_frozen_authority(self) -> None:
         root = paired._repo_root()
         manifest = json.loads((root / paired._MANIFEST).read_text())
@@ -1297,9 +1328,34 @@ class StrictInputTest(unittest.TestCase):
     def test_scorable_exceptions_match_harbor_codex_failure_types(self) -> None:
         classified = {pattern.exception.__name__ for pattern in Codex.ERROR_PATTERNS}
         self.assertEqual(
-            paired._SCORABLE_EXCEPTIONS,
+            CLASSIFIED_EXCEPTION_TYPES,
             classified | {"AgentTimeoutError", "NonZeroAgentExitCodeError"},
         )
+
+    def test_failure_classes_are_stable_and_unknown_types_fail_closed(self) -> None:
+        expected = {
+            "AgentTimeoutError": "agent_timeout",
+            "NonZeroAgentExitCodeError": "agent_runtime",
+            "AgentAuthenticationError": "provider_configuration",
+            "ApiProviderResourceNotFoundError": "provider_configuration",
+            "ModelNotFoundError": "provider_configuration",
+            "ApiRateLimitError": "provider_quota",
+            "ApiUsageLimitError": "provider_quota",
+            "ApiInternalServerError": "provider_availability",
+            "ApiOverloadedError": "provider_availability",
+            "UnknownApiError": "unknown_api",
+            "ApiConnectionClosedError": "provider_transport",
+            "ApiResponseStalledError": "provider_timeout",
+            "NetworkConnectionError": "provider_transport",
+            "ContextWindowExceededError": "model_budget",
+            "OutputTokenExceededError": "model_budget",
+            "AgentSafetyRefusalError": "safety_refusal",
+        }
+        self.assertEqual(
+            {name: classify_failure(name).value for name in expected}, expected
+        )
+        with self.assertRaisesRegex(ValueError, "not classified"):
+            classify_failure("FutureHarborError")
 
     def test_duplicate_keys_and_nonfinite_numbers_are_rejected(self) -> None:
         for value in ('{"key":1,"key":2}', '{"key":NaN}', '{"key":Infinity}'):
@@ -1837,10 +1893,17 @@ class PairedResultsTest(unittest.TestCase):
         second = paired.summarize([screen.root])
         self.assertEqual(first, second)
         self.assertTrue(first["integrityOk"])
+        self.assertEqual(first["schemaVersion"], 2)
         self.assertFalse(first["analysisComplete"])
         self.assertEqual(first["analysisStatus"], "valid_incomplete")
         self.assertEqual(
-            first["denominator"], {"attempts": 20, "pairs": 10, "tasksPerProvider": 5}
+            first["denominator"],
+            {
+                "attempts": 20,
+                "erroredAttempts": 0,
+                "pairs": 10,
+                "tasksPerProvider": 5,
+            },
         )
         self.assertEqual(first["promotion"]["status"], "not_promotable")
         self.assertIn(
@@ -2540,6 +2603,40 @@ class PairedResultsTest(unittest.TestCase):
         )
         self.assertEqual(attempt["reward"], expected_reward)
         self.assertEqual(attempt["topLevelException"], "ApiRateLimitError")
+        self.assertEqual(attempt["failureClass"], "provider_quota")
+        self.assertEqual(summary["denominator"]["erroredAttempts"], 1)
+        self.assertEqual(summary["exceptionCounts"], {"provider_quota": 1})
+
+    def test_successes_are_not_classified_as_failures(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+
+        summary = paired.summarize([screen.root])
+
+        self.assertEqual(summary["denominator"]["erroredAttempts"], 0)
+        self.assertEqual(summary["exceptionCounts"], {})
+        self.assertTrue(
+            all(item["failureClass"] is None for item in summary["attempts"])
+        )
+
+    def test_zero_reward_without_an_exception_is_not_counted_as_errored(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = screen.trials[("zai", screen.tasks[0], "control-v1")]
+        result_path = trial / "result.json"
+        result = json.loads(result_path.read_text())
+        result["verifier_result"]["rewards"]["reward"] = 0.0
+        _write_trial_result(result_path, result)
+        _refresh_job_result(trial.parent)
+
+        summary = paired.summarize([screen.root])
+
+        attempt = next(
+            item for item in summary["attempts"] if item["trialId"] == result["id"]
+        )
+        self.assertEqual(attempt["reward"], 0)
+        self.assertIsNone(attempt["topLevelException"])
+        self.assertIsNone(attempt["failureClass"])
+        self.assertEqual(summary["denominator"]["erroredAttempts"], 0)
+        self.assertEqual(summary["exceptionCounts"], {})
 
     def test_scored_failure_preserves_relay_tokens_when_derivations_are_missing(
         self,

@@ -82,6 +82,27 @@ function execTool(body: Record<string, unknown>): string {
       tool.name === "exec_command",
   );
   if (found === undefined) throw new Error("Codex did not advertise exec_command.");
+  const applyPatch = tools.find(
+    (tool): tool is Record<string, unknown> =>
+      typeof tool === "object" &&
+      tool !== null &&
+      !Array.isArray(tool) &&
+      tool.type === "custom" &&
+      tool.name === "apply_patch",
+  );
+  const format = applyPatch?.format;
+  const grammar =
+    typeof format === "object" && format !== null && !Array.isArray(format)
+      ? (format as Record<string, unknown>)
+      : undefined;
+  if (
+    grammar?.type !== "grammar" ||
+    grammar.syntax !== "lark" ||
+    typeof grammar.definition !== "string" ||
+    grammar.definition.trim() === ""
+  ) {
+    throw new Error("Codex did not advertise the native apply_patch grammar.");
+  }
   return "exec_command";
 }
 

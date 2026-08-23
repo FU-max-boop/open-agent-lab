@@ -3,6 +3,41 @@ import test from "node:test";
 
 import { startResponsesFixture } from "../src/responses-fixture.js";
 
+const TOOLS = [
+  { type: "function", name: "exec_command" },
+  {
+    type: "custom",
+    name: "apply_patch",
+    format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+  },
+];
+
+test("Responses fixture detects an empty apply_patch grammar", async (t) => {
+  const fixture = await startResponsesFixture({
+    bearer: "fixture-secret",
+    model: "fixture-model",
+    command: "printf fixture",
+  });
+  t.after(() => fixture.close());
+  const response = await fetch(`${fixture.baseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-secret",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "fixture-model",
+      stream: true,
+      input: "run",
+      tools: [
+        TOOLS[0],
+        { ...TOOLS[1], format: { type: "grammar", syntax: "lark", definition: " " } },
+      ],
+    }),
+  });
+  assert.match(await response.text(), /apply_patch grammar/u);
+});
+
 test("Responses fixture completes one real function-tool round", async (t) => {
   const fixture = await startResponsesFixture({
     bearer: "fixture-secret",
@@ -29,7 +64,7 @@ test("Responses fixture completes one real function-tool round", async (t) => {
         model: "fixture-model",
         stream: true,
         input,
-        tools: [{ type: "function", name: "exec_command" }],
+        tools: TOOLS,
       }),
     });
 
@@ -54,7 +89,7 @@ test("Responses fixture completes one real function-tool round", async (t) => {
           model: "fixture-model",
           stream: true,
           input: "run the fixture",
-          tools: [{ type: "function", name: "exec_command" }],
+          tools: TOOLS,
         },
       },
       {
@@ -70,7 +105,7 @@ test("Responses fixture completes one real function-tool round", async (t) => {
               output: "fixture output",
             },
           ],
-          tools: [{ type: "function", name: "exec_command" }],
+          tools: TOOLS,
         },
       },
     ],
@@ -115,7 +150,7 @@ test("Responses fixture binds an exact developer-instruction marker", async (t) 
                 },
               ]),
         ],
-        tools: [{ type: "function", name: "exec_command" }],
+        tools: TOOLS,
       }),
     });
 

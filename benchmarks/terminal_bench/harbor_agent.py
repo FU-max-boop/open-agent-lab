@@ -100,6 +100,21 @@ if (
 ):
     raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
 _VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
+_CODEX_BASE_INSTRUCTIONS_PATH = Path(__file__).with_name(
+    "codex-0.149.0-base-instructions.md"
+)
+_CODEX_BASE_INSTRUCTIONS_SHA256 = (
+    "sha256:ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807"
+)
+_CODEX_BASE_INSTRUCTIONS_BYTES = _CODEX_BASE_INSTRUCTIONS_PATH.read_bytes()
+if (
+    "sha256:" + hashlib.sha256(_CODEX_BASE_INSTRUCTIONS_BYTES).hexdigest()
+    != _CODEX_BASE_INSTRUCTIONS_SHA256
+    or not _CODEX_BASE_INSTRUCTIONS_BYTES.endswith(b"\n")
+):
+    raise RuntimeError("The pinned Codex base instructions drifted.")
+_CODEX_BASE_INSTRUCTIONS = _CODEX_BASE_INSTRUCTIONS_BYTES.decode("utf-8")
+_CODEX_MODEL_CATALOG_PATH = "/tmp/codex-home/model-catalog.json"
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = "0.149.0"
 _CAPABILITY = re.compile(r"^[0-9a-f]{64}$")
@@ -391,6 +406,7 @@ def _provider_config(
     context_window = profile["context_window"]
     config: dict[str, Any] = {
         "model_provider": "open-agent-lab",
+        "model_catalog_json": _CODEX_MODEL_CATALOG_PATH,
         "model_context_window": context_window,
         "model_auto_compact_token_limit": context_window * 9 // 10,
         "model_reasoning_effort": profile["reasoning"],
@@ -424,6 +440,49 @@ def _provider_config(
     if enable_verification:
         config["developer_instructions"] = _VERIFY_INSTRUCTION
     return config
+
+
+def _model_catalog(model: str, profile: _Profile) -> str:
+    context_window = profile["context_window"]
+    catalog = {
+        "models": [
+            {
+                "slug": model,
+                "display_name": model,
+                "default_reasoning_level": profile["reasoning"],
+                "supported_reasoning_levels": [
+                    {
+                        "effort": profile["reasoning"],
+                        "description": "Frozen Open Agent Lab effort",
+                    }
+                ],
+                "shell_type": "shell_command",
+                "visibility": "none",
+                "supported_in_api": True,
+                "priority": 0,
+                "model_messages": {
+                    "instructions_template": _CODEX_BASE_INSTRUCTIONS,
+                },
+                "include_skills_usage_instructions": False,
+                "include_plugin_usage_instructions": False,
+                "include_apps_usage_instructions": False,
+                "supports_reasoning_summary_parameter": False,
+                "default_reasoning_summary": "none",
+                "support_verbosity": False,
+                "apply_patch_tool_type": "freeform",
+                "truncation_policy": {"mode": "bytes", "limit": 10_000},
+                "context_window": context_window,
+                "max_context_window": context_window,
+                "effective_context_window_percent": 95,
+                "experimental_supported_tools": [],
+                "input_modalities": ["text"],
+            }
+        ]
+    }
+    return (
+        json.dumps(catalog, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    )
 
 
 def _variant(enable_verification: bool, *, live_route_probe: bool) -> dict[str, Any]:
@@ -503,9 +562,11 @@ class OpenAgentLabCodex(Codex):
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
+        self._codex_model_catalog = _model_catalog(model, profile)
         self._open_agent_lab_run_binding = binding
         self._codex_runtime_spec = codex_runtime_spec()
         self._codex_launches = 0
+        self._codex_launch_allowed = False
         self._codex_run_active = False
         self._open_agent_lab_variant = _variant(
             enable_verify_instruction_v1,
@@ -524,6 +585,23 @@ class OpenAgentLabCodex(Codex):
             version=version,
             **kwargs,
         )
+
+    @override
+    async def _upload_effective_config(
+        self,
+        environment: BaseEnvironment,
+        config: dict[str, Any],
+        remote_path: str,
+    ) -> None:
+        if config.get("model_catalog_json") != _CODEX_MODEL_CATALOG_PATH:
+            raise RuntimeError("The effective Codex model catalog path drifted.")
+        await self._upload_config_text(
+            environment,
+            content=self._codex_model_catalog,
+            remote_path=_CODEX_MODEL_CATALOG_PATH,
+            filename="model-catalog.json",
+        )
+        await super()._upload_effective_config(environment, config, remote_path)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
@@ -550,7 +628,11 @@ class OpenAgentLabCodex(Codex):
         timeout_sec: int | None = None,
     ) -> Any:
         if command.startswith(HARBOR_CODEX_EXEC_PREFIX):
-            if not self._codex_run_active or self._codex_launches:
+            if (
+                not self._codex_run_active
+                or not self._codex_launch_allowed
+                or self._codex_launches
+            ):
                 raise RuntimeError("Codex must launch exactly once inside agent.run().")
             command = (
                 build_full_tree_verification_command(self._codex_runtime_spec)
@@ -692,19 +774,22 @@ class OpenAgentLabCodex(Codex):
         self._codex_launches = 0
         try:
             relay_token = await self._authorize_relay(environment)
-        except BaseException:
-            self._codex_run_active = False
-            raise
-        primary_error: BaseException | None = None
-        try:
-            with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
-                await self._run_once(instruction, environment, context)
-        except BaseException as error:
-            primary_error = error
-            raise
+            primary_error: BaseException | None = None
+            try:
+                with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
+                    self._codex_launch_allowed = True
+                    try:
+                        await self._run_once(instruction, environment, context)
+                    finally:
+                        self._codex_launch_allowed = False
+            except BaseException as error:
+                primary_error = error
+                raise
+            finally:
+                await self._retain_after_run(environment, primary_error)
         finally:
+            self._codex_launch_allowed = False
             self._codex_run_active = False
-            await self._retain_after_run(environment, primary_error)
 
     async def _run_once(
         self,

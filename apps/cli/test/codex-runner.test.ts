@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,6 +90,9 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
     [
       "#!/usr/bin/env node",
       'import { readFileSync } from "node:fs";',
+      "const setting = process.argv.find((value) => value.startsWith('model_catalog_json='));",
+      "if (setting === undefined) process.exit(2);",
+      "const catalogPath = JSON.parse(setting.slice(setting.indexOf('=') + 1));",
       'let input = "";',
       'process.stdin.setEncoding("utf8");',
       'process.stdin.on("data", (chunk) => { input += chunk; });',
@@ -100,6 +104,7 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
       '    keyPresent: Boolean(process.env.DEEPSEEK_API_KEY),',
       '    unrelatedSecretPresent: Boolean(process.env.AWS_SECRET_ACCESS_KEY),',
       '    authSecretPresent: readFileSync(`${process.env.CODEX_HOME}/auth.json`, "utf8").includes("test-secret"),',
+      "    catalog: JSON.parse(readFileSync(catalogPath, 'utf8')),",
       "  }));",
       "});",
     ].join("\n"),
@@ -132,6 +137,7 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
     keyPresent: boolean;
     unrelatedSecretPresent: boolean;
     authSecretPresent: boolean;
+    catalog: { models: Record<string, unknown>[] };
   };
 
   assert.equal(code, 0);
@@ -140,7 +146,13 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
   assert.equal(observed.keyPresent, true);
   assert.equal(observed.unrelatedSecretPresent, false);
   assert.equal(observed.authSecretPresent, false);
-  assert.deepEqual(observed.argv, invocation.args);
+  const catalogArg = observed.argv.findIndex((value) => value.startsWith("model_catalog_json="));
+  assert.ok(catalogArg > 0);
+  const publicArgs = [...observed.argv];
+  publicArgs.splice(catalogArg - 1, 2);
+  assert.deepEqual(publicArgs, invocation.args);
+  assert.equal(observed.catalog.models[0]?.slug, "deepseek-model_catalog_json-alias");
+  assert.equal(observed.catalog.models[0]?.apply_patch_tool_type, "freeform");
   assert.ok(!observed.argv.join(" ").includes("test-secret"));
 });
 
@@ -154,6 +166,23 @@ test("runner fails before spawning when the provider key is absent", async () =>
   await assert.rejects(
     runCodexInvocation(invocation, {}, { stdout: () => undefined, stderr: () => undefined }),
     /ZAI_API_KEY is required/,
+  );
+});
+
+test("runner rejects an invalid structural context window", async () => {
+  const built = buildCodexInvocation({
+    provider: "deepseek",
+    workspace: ".",
+    prompt: "run",
+    codexPath: "/definitely/not/executed",
+  });
+  await assert.rejects(
+    runCodexInvocation(
+      Object.freeze({ ...built, contextWindow: 0 }),
+      { DEEPSEEK_API_KEY: "fixture-key" },
+      { stdout: () => undefined, stderr: () => undefined },
+    ),
+    /context window is invalid/u,
   );
 });
 
@@ -297,7 +326,7 @@ test("route-probe invocation keeps exact provider identity behind a zero-retry r
   );
 });
 
-test("runner materializes the route catalog only inside its private home", async (t) => {
+test("runner materializes the model catalog only inside its private home", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-catalog-test-"));
   t.after(async () => rm(directory, { force: true, recursive: true }));
   const fakeCodex = join(directory, "catalog-codex.mjs");
@@ -324,13 +353,14 @@ test("runner materializes the route catalog only inside its private home", async
     { provider: "deepseek" as const, model: "deepseek-v4-pro", reasoning: "high", context: 1_048_576 },
     { provider: "zai" as const, model: "glm-5.3", reasoning: "max", context: 1_000_000 },
   ]) {
-    const invocation = buildCodexRelayInvocation({
+    const built = buildCodexRelayInvocation({
       provider: expected.provider,
       workspace: directory,
       prompt: "perform one tool round",
       baseUrl: "http://127.0.0.1:43123/v1",
       codexPath: fakeCodex,
     });
+    const invocation = Object.freeze({ ...built });
     let output = "";
     const code = await runCodexInvocation(
       invocation,
@@ -355,12 +385,16 @@ test("runner materializes the route catalog only inside its private home", async
     assert.equal(observed.mode, 0o600);
     assert.equal(observed.catalog.models.length, 1);
     assert.deepEqual(Object.keys(model as object).sort(), [
+      "apply_patch_tool_type",
       "context_window",
       "default_reasoning_level",
       "default_reasoning_summary",
       "display_name",
+      "effective_context_window_percent",
       "experimental_supported_tools",
       "include_apps_usage_instructions",
+      "include_plugin_usage_instructions",
+      "include_skills_usage_instructions",
       "input_modalities",
       "max_context_window",
       "model_messages",
@@ -376,9 +410,20 @@ test("runner materializes the route catalog only inside its private home", async
     ]);
     assert.equal(model?.slug, expected.model);
     assert.equal(model?.default_reasoning_level, expected.reasoning);
+    assert.equal(invocation.contextWindow, expected.context);
+    assert.equal(model?.apply_patch_tool_type, "freeform");
     assert.equal(model?.context_window, expected.context);
+    assert.equal(model?.max_context_window, expected.context);
+    assert.equal(model?.effective_context_window_percent, 95);
     assert.equal(model?.supports_reasoning_summary_parameter, false);
     assert.deepEqual(model?.input_modalities, ["text"]);
+    const messages = model?.model_messages as Record<string, unknown>;
+    const instructions = messages.instructions_template;
+    assert.equal(typeof instructions, "string");
+    assert.equal(
+      createHash("sha256").update(instructions as string).digest("hex"),
+      "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807",
+    );
     await assert.rejects(readFile(observed.path, "utf8"), /ENOENT/u);
   }
 });
