@@ -473,6 +473,14 @@ class ProbeFixture:
             )
         )
 
+    def bind_credential(self, value: bytes) -> None:
+        self.credential.write_bytes(value)
+        self.write_cap()
+        cleanup_path = self.trial / "environment-cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup["providerCredentialSha256"] = paired._digest_bytes(value)
+        _write(cleanup_path, cleanup)
+
     def write_probe_claim(self) -> Path:
         lock_sha256 = paired._digest(self.probe_lock)
         path = self.authorizations / relay_claim_name(
@@ -693,6 +701,32 @@ class LiveRouteProbeTest(unittest.TestCase):
         fixture.cap.write_bytes(canonical_json(cap))
         with self.assertRaisesRegex(paired.IntegrityError, "relay lifetime"):
             fixture.validate_cap()
+
+    def test_credential_boundary_matches_relay_ascii_trim(self) -> None:
+        fixture = self._new_fixture()
+        fixture.bind_credential(b"\t fixture-provider-secret \r\n")
+        self.assertTrue(fixture.verify()["liveProviderRouteObserved"])
+
+        for label, credentials in (
+            ("bom", b"\xef\xbb\xbffixturesafe\n"),
+            ("nbsp", "\u00a0fixturesafe\u00a0".encode()),
+        ):
+            fixture = self._new_fixture()
+            fixture.bind_credential(credentials)
+            with (
+                self.subTest(label=label, phase="probe authorization"),
+                self.assertRaisesRegex(paired.IntegrityError, "only ASCII bytes"),
+            ):
+                fixture.validate_cap()
+            self.assertFalse(list(fixture.authorizations.glob("*.claim.json")))
+
+            output = fixture.authorization
+            with (
+                self.subTest(label=label, phase="receipt"),
+                self.assertRaisesRegex(paired.IntegrityError, "only ASCII bytes"),
+            ):
+                fixture.verify(output)
+            self.assertFalse(output.exists())
 
     def test_probe_gate_rejects_an_invalid_other_provider_before_claiming(self) -> None:
         probes = json.loads((self.fixture.root / "run-record.json").read_text())[
