@@ -333,28 +333,6 @@ def verify_tree(root: str | os.PathLike[str], spec: object) -> dict[str, object]
     return _tree_receipt(validated)
 
 
-def _archive_members(
-    bundle: tarfile.TarFile,
-    expected: dict[str, dict[str, object]],
-) -> dict[str, tarfile.TarInfo]:
-    members: dict[str, tarfile.TarInfo] = {}
-    for member in bundle.getmembers():
-        if member.name in members:
-            raise ValueError("Codex archive contains a duplicate member")
-        entry = expected.get(member.name)
-        if (
-            entry is None
-            or not member.isfile()
-            or member.size != entry["bytes"]
-            or member.mode != int(entry["mode"], 8)  # type: ignore[arg-type]
-        ):
-            raise ValueError("Codex archive member set or metadata drifted")
-        members[member.name] = member
-    if set(members) != set(expected):
-        raise ValueError("Codex archive member set or metadata drifted")
-    return members
-
-
 def _write_member(
     bundle: tarfile.TarFile,
     member: tarfile.TarInfo,
@@ -384,12 +362,25 @@ def _write_member(
 
 def _write_tree(
     bundle: tarfile.TarFile,
-    members: dict[str, tarfile.TarInfo],
     expected: dict[str, dict[str, object]],
     root: Path,
 ) -> None:
-    for name, entry in expected.items():
-        _write_member(bundle, members[name], root / entry["path"], entry)  # type: ignore[operator]
+    members: set[str] = set()
+    for member in bundle:
+        if member.name in members:
+            raise ValueError("Codex archive contains a duplicate member")
+        entry = expected.get(member.name)
+        if (
+            entry is None
+            or not member.isfile()
+            or member.size != entry["bytes"]
+            or member.mode != int(entry["mode"], 8)  # type: ignore[arg-type]
+        ):
+            raise ValueError("Codex archive member set or metadata drifted")
+        members.add(member.name)
+        _write_member(bundle, member, root / entry["path"], entry)  # type: ignore[operator]
+    if members != set(expected):
+        raise ValueError("Codex archive member set or metadata drifted")
 
 
 def prepare_tree(
@@ -419,9 +410,9 @@ def prepare_tree(
                 archive["bytes"],  # type: ignore[arg-type]
                 archive["sha256"].removeprefix("sha256:"),  # type: ignore[union-attr]
             ) as stream,
-            tarfile.open(fileobj=stream, mode="r:gz") as bundle,
+            tarfile.open(fileobj=stream, mode="r|gz") as bundle,
         ):
-            _write_tree(bundle, _archive_members(bundle, expected), expected, root)
+            _write_tree(bundle, expected, root)
         for relative in _expected_directories(files):
             (root / relative).chmod(0o755)
         root.chmod(0o755)
