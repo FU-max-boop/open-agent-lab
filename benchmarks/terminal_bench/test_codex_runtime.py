@@ -49,11 +49,13 @@ def _tiny_spec(archive: Path, files: dict[str, bytes]) -> dict[str, object]:
 def _write_tar(
     archive: Path,
     members: list[tuple[str, bytes | None]],
+    *,
+    mode: int = 0o644,
 ) -> None:
     with tarfile.open(archive, "w:gz") as bundle:
         for name, content in members:
             member = tarfile.TarInfo(name)
-            member.mode = 0o644
+            member.mode = mode
             member.mtime = 0
             if content is None:
                 member.type = tarfile.SYMTYPE
@@ -219,12 +221,20 @@ class CodexRuntimeTest(unittest.TestCase):
             )
             spec = _tiny_spec(archive, files)
             root = base / "prepared"
-            with patch(
-                "benchmarks.terminal_bench.codex_runtime.validate_codex_runtime_spec",
-                return_value=spec,
+            with (
+                patch(
+                    "benchmarks.terminal_bench.codex_runtime."
+                    "validate_codex_runtime_spec",
+                    return_value=spec,
+                ),
+                patch(
+                    "benchmarks.terminal_bench.codex_runtime.tarfile.open",
+                    wraps=tarfile.open,
+                ) as open_archive,
             ):
                 receipt = prepare_tree(archive, root, spec)
                 self.assertEqual(receipt, verify_tree(root, spec))
+            self.assertEqual(open_archive.call_args.kwargs["mode"], "r|gz")
             self.assertEqual(
                 {
                     path.relative_to(root).as_posix()
@@ -237,20 +247,24 @@ class CodexRuntimeTest(unittest.TestCase):
                 self.assertEqual((root / path).read_bytes(), content)
                 self.assertEqual((root / path).stat().st_mode & 0o777, 0o644)
 
-    def test_prepare_rejects_traversal_link_extra_and_duplicate_members(self) -> None:
+    def test_prepare_rejects_member_and_byte_drift_and_cleans_up(self) -> None:
         files = {"a.txt": b"alpha", "nested/b.bin": b"beta"}
         valid = [(f"package/{path}", content) for path, content in files.items()]
         mutations = {
-            "traversal": valid + [("package/../escape", b"escape")],
-            "link": [("package/a.txt", None), valid[1]],
-            "extra": valid + [("package/extra", b"extra")],
-            "duplicate": valid + [valid[0]],
+            "traversal": (valid + [("package/../escape", b"escape")], 0o644),
+            "link": ([("package/a.txt", None), valid[1]], 0o644),
+            "extra": (valid + [("package/extra", b"extra")], 0o644),
+            "duplicate": (valid + [valid[0]], 0o644),
+            "missing": (valid[:1], 0o644),
+            "size": ([("package/a.txt", b"alpha!"), valid[1]], 0o644),
+            "hash": ([("package/a.txt", b"ALPHA"), valid[1]], 0o644),
+            "mode": (valid, 0o600),
         }
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            for name, members in mutations.items():
+            for name, (members, mode) in mutations.items():
                 archive = base / f"{name}.tgz"
-                _write_tar(archive, members)
+                _write_tar(archive, members, mode=mode)
                 spec = _tiny_spec(archive, files)
                 destination = base / name
                 with (
