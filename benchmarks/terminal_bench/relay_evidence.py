@@ -430,15 +430,57 @@ def _valid_transport_measurements(group: list[dict[str, Any]]) -> bool:
     )
 
 
-def _canonical_hash(value: dict[str, Any]) -> str:
-    canonical = json.dumps(
-        value,
+def _canonical(value: object) -> str:
+    # JavaScript's canonicalJson follows JCS and sorts by UTF-16 code units.
+    def javascript_order(item: object) -> object:
+        if isinstance(item, dict):
+            return {
+                key: javascript_order(item[key])
+                for key in sorted(item, key=lambda key: key.encode("utf-16-be"))
+            }
+        if isinstance(item, list):
+            return [javascript_order(child) for child in item]
+        return item
+
+    return json.dumps(
+        javascript_order(value),
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
-        sort_keys=True,
     )
-    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _canonical_hash(value: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("Duplicate JSON key.")
+        value[key] = item
+    return value
+
+
+def _parse_canonical_json(text: str, label: str) -> object:
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+        )
+        if text != _canonical(value):
+            raise ValueError
+    except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
+        raise ValueError(f"{label} is not valid canonical JSON.") from None
+    return value
+
+
+def _decode_utf8(data: bytes, label: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{label} is not valid UTF-8.") from None
 
 
 def _read_limited(path: Path, limit: int, label: str) -> bytes:
@@ -451,10 +493,14 @@ def _read_limited(path: Path, limit: int, label: str) -> bytes:
 
 def _read_records(journal_path: Path) -> tuple[list[dict[str, Any]], str | None]:
     journal = _read_limited(journal_path, _MAX_JOURNAL_BYTES, "Provider metadata")
+    text = _decode_utf8(journal, "Provider metadata")
+    if text and (not text.endswith("\n") or text.endswith("\n\n")):
+        raise ValueError("Provider metadata must end with exactly one newline.")
     records: list[dict[str, Any]] = []
     previous: str | None = None
-    for line_number, line in enumerate(journal.decode().splitlines(), 1):
-        record = json.loads(line)
+    lines = text[:-1].split("\n") if text else []
+    for line_number, line in enumerate(lines, 1):
+        record = _parse_canonical_json(line, "Provider metadata record")
         if not isinstance(record, dict) or not isinstance(
             record.get("eventSha256"), str
         ):
@@ -478,7 +524,10 @@ def _read_records(journal_path: Path) -> tuple[list[dict[str, Any]], str | None]
 
 def _read_marker(seal_path: Path) -> tuple[dict[str, Any], str, str]:
     data = _read_limited(seal_path, _MAX_SEAL_BYTES, "Provider metadata seal")
-    marker = json.loads(data)
+    text = _decode_utf8(data, "Provider metadata seal")
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        raise ValueError("Provider metadata seal must end with exactly one newline.")
+    marker = _parse_canonical_json(text[:-1], "Provider metadata seal")
     if not isinstance(marker, dict) or not isinstance(marker.get("markerSha256"), str):
         raise TypeError("Invalid provider metadata seal.")
     if set(marker) != _SEAL_FIELDS:

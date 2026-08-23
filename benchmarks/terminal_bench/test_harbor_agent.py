@@ -38,7 +38,7 @@ from benchmarks.terminal_bench.harbor_agent import (
 from benchmarks.terminal_bench.harbor_environment import (
     PinnedRelayDockerEnvironment,
 )
-from benchmarks.terminal_bench.relay_evidence import relay_metadata
+from benchmarks.terminal_bench.relay_evidence import _canonical, relay_metadata
 from benchmarks.terminal_bench.validate_harbor_e2e import (
     _assert_isolation_call,
     _isolation_command,
@@ -87,16 +87,6 @@ def _relay_capability(
 ) -> str:
     return _canonical(
         {"schemaVersion": 1, "capabilityId": capability_id, "bearer": bearer}
-    )
-
-
-def _canonical(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
     )
 
 
@@ -233,6 +223,10 @@ def _write_evidence(
 
 
 class RelayMetadataTest(unittest.TestCase):
+    def test_canonical_keys_follow_javascript_utf16_order(self) -> None:
+        value = _canonical({"\ue000": 2, "\U00010000": 1})
+        self.assertLess(value.index("\U00010000"), value.index("\ue000"))
+
     def test_complete_sealed_lifecycle_passes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -242,6 +236,38 @@ class RelayMetadataTest(unittest.TestCase):
                 directory / "provider-metadata.ndjson.sealed",
             )
             self.assertEqual(metadata["publication_gate"], {"ok": True, "reasons": []})
+
+    def test_raw_evidence_requires_unique_canonical_json(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            journal = directory / "provider-metadata.ndjson"
+            seal = directory / "provider-metadata.ndjson.sealed"
+            mutations = (
+                (
+                    journal,
+                    lambda value: value.replace(
+                        '"input_tokens":1',
+                        '"input_tokens":"TOP_SECRET","input_tokens":1',
+                        1,
+                    ),
+                ),
+                (journal, lambda value: value.replace('"ordinal":1', '"ordinal": 1')),
+                (
+                    seal,
+                    lambda value: value.replace(
+                        '"state":"sealed"',
+                        '"state":"TOP_SECRET","state":"sealed"',
+                    ),
+                ),
+                (seal, lambda value: value.rstrip("\n")),
+            )
+            for path, mutate in mutations:
+                with self.subTest(path=path.name, mutation=mutate):
+                    _write_evidence(directory)
+                    path.write_text(mutate(path.read_text()))
+                    with self.assertRaises(ValueError) as caught:
+                        relay_metadata(journal, seal)
+                    self.assertNotIn("TOP_SECRET", str(caught.exception))
 
     def test_synthetic_provider_can_validate_transport_but_never_publish(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

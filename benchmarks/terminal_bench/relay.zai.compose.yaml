@@ -30,7 +30,7 @@ services:
       - --build-id-file
       - /app/relay-build-id
     environment:
-      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:338d1c4edcd9174717d5339667afeaeffc4c3007347e0266f513da1b3bfed697"
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:0984a7f7a03bdff3eeed0656ba156279813860cf19baed01551e66e70745dbab"
       OAL_RELAY_GID: "1000"
       OAL_RELAY_UID: "1000"
       ZAI_API_KEY_FILE: /run/secrets/provider-api-key
