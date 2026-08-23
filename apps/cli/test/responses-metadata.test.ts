@@ -82,9 +82,25 @@ test("conflicting flat and nested token aliases fail closed", () => {
   assert.equal(metadata.usage, null);
 });
 
+test("nullable and omitted token detail objects normalize identically", () => {
+  const expected = { input_tokens: 10, output_tokens: 5, total_tokens: 15 };
+  for (const optionalDetails of [
+    "",
+    ',"input_tokens_details":null,"output_tokens_details":null',
+  ]) {
+    const metadata = observe(
+      `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15${optionalDetails}}}}\n\n`,
+    );
+    assert.equal(metadata.parseErrors, 0);
+    assert.equal(metadata.terminalEvent, "response.completed");
+    assert.deepEqual(metadata.usage, expected);
+  }
+});
+
 test("invalid or impossible optional token usage fails closed", () => {
   for (const usage of [
     '"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_input_tokens":-1',
+    '"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":"invalid"',
     '"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":11}',
     '"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":6}',
     '"input_tokens":10,"output_tokens":5,"total_tokens":16',
