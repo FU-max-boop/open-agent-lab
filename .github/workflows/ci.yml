@@ -88,6 +88,7 @@ jobs:
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_codex_model_catalog.py \
             benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
@@ -106,6 +107,7 @@ jobs:
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
+            benchmarks/terminal_bench/test_codex_model_catalog.py \
             benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
@@ -127,6 +129,7 @@ jobs:
             benchmarks/terminal_bench/validate_harbor_install_only.py
           python3 -m unittest \
             benchmarks.terminal_bench.test_codex_runtime \
+            benchmarks.terminal_bench.test_codex_model_catalog \
             benchmarks.terminal_bench.test_experiment_contract \
             benchmarks.terminal_bench.test_harbor_agent \
             benchmarks.terminal_bench.test_harbor_environment \
