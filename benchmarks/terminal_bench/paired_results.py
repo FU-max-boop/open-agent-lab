@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import shutil
 import stat
@@ -79,11 +80,13 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:1e248f60c4bd2f71ac244bbc2bccb553cbe321594b4c12433885ff05e132f525"
+    "sha256:53547972b1f9cdbe2f33ed7e093dc85e7d1f33ccdab534b00ac9f739505fcabe"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
-_SUMMARY_SCHEMA_VERSION = 2
+_SUMMARY_SCHEMA_VERSION = 3
+_PAIRED_BOOTSTRAP_RESAMPLES = 10_000
+_PAIRED_BOOTSTRAP_SEED = 20260822
 _RELAY_REQUEST_CAP = 256
 _RELAY_JOURNAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH]
 _RELAY_SEAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_SEAL_PATH]
@@ -3869,6 +3872,41 @@ def _build_pairs(
     return pairs
 
 
+def _task_reward_deltas(pairs: list[dict[str, Any]], tasks: list[str]) -> list[float]:
+    deltas = []
+    for task in tasks:
+        task_pairs = [pair for pair in pairs if pair["task"] == task]
+        control = statistics.fmean(pair["reward"]["control"] for pair in task_pairs)
+        treatment = statistics.fmean(pair["reward"]["treatment"] for pair in task_pairs)
+        deltas.append(treatment - control)
+    return deltas
+
+
+def _paired_reward_bootstrap(task_deltas: list[float]) -> dict[str, Any]:
+    if not task_deltas:
+        raise ValueError("paired bootstrap requires at least one task")
+    rng = random.Random(_PAIRED_BOOTSTRAP_SEED)
+    means = sorted(
+        statistics.fmean(
+            task_deltas[rng.randrange(len(task_deltas))] for _ in task_deltas
+        )
+        for _ in range(_PAIRED_BOOTSTRAP_RESAMPLES)
+    )
+    lower = means[math.ceil(0.025 * len(means)) - 1]
+    upper = means[math.ceil(0.975 * len(means)) - 1]
+    return {
+        "resamplingUnit": "task",
+        "taskCount": len(task_deltas),
+        "method": "percentile_nearest_rank",
+        "confidenceLevel": 0.95,
+        "sidedness": "two-sided",
+        "resamples": _PAIRED_BOOTSTRAP_RESAMPLES,
+        "seed": _PAIRED_BOOTSTRAP_SEED,
+        "meanDeltaPercentagePoints": 100 * statistics.fmean(task_deltas),
+        "confidenceIntervalPercentagePoints": [100 * lower, 100 * upper],
+    }
+
+
 def _summary(
     attempts: list[dict[str, Any]], manifest: dict[str, Any], tasks: list[str]
 ) -> dict[str, Any]:
@@ -3890,6 +3928,7 @@ def _summary(
     for provider in _PROVIDERS:
         own = [pair for pair in pairs if pair["provider"] == provider]
         deltas = [pair["reward"]["delta"] for pair in own]
+        task_deltas = _task_reward_deltas(own, tasks)
         token_values = [
             pair["primaryTokenIncrease"]
             for pair in own
@@ -3904,7 +3943,7 @@ def _summary(
             _median(token_values) if len(token_values) == len(own) else None
         )
         wall_overhead = _median(wall_values) if len(wall_values) == len(own) else None
-        mean_delta = statistics.fmean(deltas)
+        mean_delta = statistics.fmean(task_deltas)
         wins = sum(value > 0 for value in deltas)
         ties = sum(value == 0 for value in deltas)
         losses = sum(value < 0 for value in deltas)
@@ -3913,6 +3952,7 @@ def _summary(
                 "provider": provider,
                 "pairs": len(own),
                 "meanPairedRewardDelta": mean_delta,
+                "pairedRewardBootstrap": _paired_reward_bootstrap(task_deltas),
                 "winTieLoss": [wins, ties, losses],
                 "medianPrimaryTokenIncrease": token_overhead,
                 "primaryTokenCoveragePairs": len(token_values),
