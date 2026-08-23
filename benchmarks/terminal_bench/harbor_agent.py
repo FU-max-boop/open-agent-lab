@@ -10,7 +10,7 @@ import re
 import subprocess
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from typing import Any, TypedDict, cast, override
+from typing import Any, Literal, TypedDict, cast, override
 
 from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment
@@ -57,6 +57,7 @@ class _Profile(TypedDict):
     models: frozenset[str]
     reasoning: str
     context_window: int
+    truncation_mode: Literal["bytes", "tokens"]
 
 
 _PROFILES: dict[str, _Profile] = {
@@ -64,11 +65,13 @@ _PROFILES: dict[str, _Profile] = {
         "models": frozenset({"deepseek-v4-flash", "deepseek-v4-pro"}),
         "reasoning": "high",
         "context_window": 1_048_576,
+        "truncation_mode": "tokens",
     },
     "zai": {
         "models": frozenset({"glm-5.3"}),
         "reasoning": "max",
         "context_window": 1_000_000,
+        "truncation_mode": "bytes",
     },
 }
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -470,7 +473,10 @@ def _model_catalog(model: str, profile: _Profile) -> str:
                 "default_reasoning_summary": "none",
                 "support_verbosity": False,
                 "apply_patch_tool_type": "freeform",
-                "truncation_policy": {"mode": "bytes", "limit": 10_000},
+                "truncation_policy": {
+                    "mode": profile["truncation_mode"],
+                    "limit": 10_000,
+                },
                 "context_window": context_window,
                 "max_context_window": context_window,
                 "effective_context_window_percent": 95,

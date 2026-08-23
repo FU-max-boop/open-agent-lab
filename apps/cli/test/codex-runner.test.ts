@@ -351,8 +351,20 @@ test("runner materializes the model catalog only inside its private home", async
   );
   await chmod(fakeCodex, 0o755);
   for (const expected of [
-    { provider: "deepseek" as const, model: "deepseek-v4-pro", reasoning: "high", context: 1_048_576 },
-    { provider: "zai" as const, model: "glm-5.3", reasoning: "max", context: 1_000_000 },
+    {
+      provider: "deepseek" as const,
+      model: "deepseek-v4-pro",
+      reasoning: "high",
+      context: 1_048_576,
+      truncationMode: "tokens",
+    },
+    {
+      provider: "zai" as const,
+      model: "glm-5.3",
+      reasoning: "max",
+      context: 1_000_000,
+      truncationMode: "bytes",
+    },
   ]) {
     const built = buildCodexRelayInvocation({
       provider: expected.provider,
@@ -416,6 +428,10 @@ test("runner materializes the model catalog only inside its private home", async
     assert.equal(model?.context_window, expected.context);
     assert.equal(model?.max_context_window, expected.context);
     assert.equal(model?.effective_context_window_percent, 95);
+    assert.deepEqual(model?.truncation_policy, {
+      mode: expected.truncationMode,
+      limit: 10_000,
+    });
     assert.equal(model?.supports_reasoning_summary_parameter, false);
     assert.deepEqual(model?.input_modalities, ["text"]);
     const messages = model?.model_messages as Record<string, unknown>;
@@ -428,6 +444,53 @@ test("runner materializes the model catalog only inside its private home", async
     await assert.rejects(readFile(observed.path, "utf8"), /ENOENT/u);
   }
 });
+
+test(
+  "installed Codex applies provider-specific tool-output budgets",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async (t) => {
+    const codexPath = process.env.OPEN_AGENT_LAB_CODEX_BIN;
+    assert.ok(codexPath);
+    const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-output-test-"));
+    t.after(async () => rm(directory, { force: true, recursive: true }));
+    const bearer = "open-agent-lab-output-probe";
+    const fullOutput = "x".repeat(20_000);
+
+    for (const expected of [
+      { provider: "deepseek" as const, complete: true },
+      { provider: "zai" as const, complete: false },
+    ]) {
+      const profile = nativeProviderProfile(expected.provider);
+      const fixture = await startResponsesFixture({
+        bearer,
+        model: profile.defaultModel,
+        command: "head -c 20000 /dev/zero | tr '\\000' x",
+      });
+      let stderr = "";
+      try {
+        const invocation = buildCodexRelayInvocation({
+          provider: expected.provider,
+          workspace: directory,
+          prompt: "Use the available shell tool exactly once, then report completion.",
+          baseUrl: fixture.baseUrl,
+          codexPath,
+        });
+        const code = await runCodexInvocation(
+          invocation,
+          { ...process.env, [CODEX_RELAY_ENV_KEY]: bearer },
+          { stdout: () => undefined, stderr: (chunk) => (stderr += chunk) },
+        );
+        assert.equal(code, 0, stderr.slice(-2_000));
+        const output = fixture.snapshot().toolOutput;
+        assert.equal(output.includes(fullOutput), expected.complete);
+        if (expected.complete) assert.doesNotMatch(output, /truncated/u);
+        else assert.match(output, /truncated/u);
+      } finally {
+        await fixture.close();
+      }
+    }
+  },
+);
 
 test(
   "installed Codex completes a provider-free Responses tool round",

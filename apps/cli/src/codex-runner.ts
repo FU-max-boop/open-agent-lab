@@ -190,7 +190,10 @@ function modelCatalog(
         default_reasoning_summary: "none",
         support_verbosity: false,
         apply_patch_tool_type: "freeform",
-        truncation_policy: { mode: "bytes", limit: 10_000 },
+        truncation_policy: {
+          mode: invocation.provider === "deepseek" ? "tokens" : "bytes",
+          limit: 10_000,
+        },
         context_window: invocation.contextWindow,
         max_context_window: invocation.contextWindow,
         effective_context_window_percent: 95,

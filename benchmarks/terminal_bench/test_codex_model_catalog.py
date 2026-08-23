@@ -70,9 +70,9 @@ class CodexModelCatalogTest(unittest.IsolatedAsyncioTestCase):
 
     def test_catalog_preserves_the_exact_model_prompt_tools_and_context(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            for provider, model, reasoning, context_window in (
-                ("deepseek", "deepseek-v4-pro", "high", 1_048_576),
-                ("zai", "glm-5.3", "max", 1_000_000),
+            for provider, model, reasoning, context_window, truncation_mode in (
+                ("deepseek", "deepseek-v4-pro", "high", 1_048_576, "tokens"),
+                ("zai", "glm-5.3", "max", 1_000_000, "bytes"),
             ):
                 with self.subTest(provider=provider):
                     agent = self._agent(Path(raw) / provider, provider, model)
@@ -95,6 +95,10 @@ class CodexModelCatalogTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(metadata["context_window"], context_window)
                     self.assertEqual(metadata["max_context_window"], context_window)
                     self.assertEqual(metadata["effective_context_window_percent"], 95)
+                    self.assertEqual(
+                        metadata["truncation_policy"],
+                        {"mode": truncation_mode, "limit": 10_000},
+                    )
                     prompt = metadata["model_messages"][
                         "instructions_template"
                     ].encode()
