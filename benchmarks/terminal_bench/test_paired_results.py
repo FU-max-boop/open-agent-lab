@@ -1286,6 +1286,33 @@ class RunFixture:
 
 
 class StrictInputTest(unittest.TestCase):
+    def test_invalid_cli_summary_uses_the_current_schema(self) -> None:
+        with (
+            patch.object(
+                paired,
+                "summarize",
+                side_effect=paired.IntegrityError("frozen input drifted"),
+            ),
+            patch("builtins.print") as emit,
+        ):
+            self.assertEqual(paired.main(["summarize", "/missing"]), 1)
+        invalid = json.loads(emit.call_args.args[0])
+        self.assertEqual(
+            invalid,
+            {
+                "schemaVersion": 2,
+                "experimentId": EXPERIMENT_ID,
+                "integrityOk": False,
+                "analysisComplete": False,
+                "analysisStatus": "invalid",
+                "promotion": {
+                    "ok": False,
+                    "status": "not_promotable",
+                    "blockingReasons": ["frozen input drifted"],
+                },
+            },
+        )
+
     def test_manifest_policy_has_one_frozen_authority(self) -> None:
         root = paired._repo_root()
         manifest = json.loads((root / paired._MANIFEST).read_text())

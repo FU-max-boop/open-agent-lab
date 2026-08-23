@@ -83,6 +83,7 @@ _POLICY_SHA256 = (
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
+_SUMMARY_SCHEMA_VERSION = 2
 _RELAY_REQUEST_CAP = 256
 _RELAY_JOURNAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH]
 _RELAY_SEAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_SEAL_PATH]
@@ -3913,7 +3914,7 @@ def _summary(
     directional_criteria_met = not blockers
     blockers.append("development_experiment_never_promotable")
     return {
-        "schemaVersion": 2,
+        "schemaVersion": _SUMMARY_SCHEMA_VERSION,
         "experimentId": EXPERIMENT_ID,
         "claimClass": "directional_five_task_development_result",
         "integrityOk": True,
@@ -4072,7 +4073,7 @@ def main(argv: list[str] | None = None) -> int:
     except IntegrityError as error:
         if args.command == "summarize":
             invalid = {
-                "schemaVersion": 1,
+                "schemaVersion": _SUMMARY_SCHEMA_VERSION,
                 "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
