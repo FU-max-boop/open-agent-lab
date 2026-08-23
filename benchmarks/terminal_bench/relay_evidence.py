@@ -823,6 +823,8 @@ def _publication_reasons(
         reasons.add("synthetic_provider")
     if not _BUILD_ID.fullmatch(build_id):
         reasons.add("unverifiable_relay_build")
+    if rejected_requests.get("model_mismatch", 0) > 0:
+        reasons.add("requested_model_mismatch")
     # Clients may close after terminal SSE instead of waiting for EOF.
     if any(
         count
