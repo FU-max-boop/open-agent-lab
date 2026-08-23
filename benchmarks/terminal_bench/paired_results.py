@@ -3600,7 +3600,7 @@ class LiveRouteRun:
 
 def _optional_total(attempts: list[dict[str, Any]], field: str) -> int | float | None:
     total = None
-    for item in attempts:
+    for item in sorted(attempts, key=lambda attempt: attempt["startedAt"]):
         value = item["harborAgentTotals"][field]
         if value is not None:
             total = (total or 0) + value
