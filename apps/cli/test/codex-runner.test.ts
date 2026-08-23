@@ -112,6 +112,7 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
     provider: "deepseek",
     workspace: directory,
     prompt,
+    model: "deepseek-model_catalog_json-alias",
     codexPath: fakeCodex,
   });
   let output = "";
@@ -139,6 +140,7 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
   assert.equal(observed.keyPresent, true);
   assert.equal(observed.unrelatedSecretPresent, false);
   assert.equal(observed.authSecretPresent, false);
+  assert.deepEqual(observed.argv, invocation.args);
   assert.ok(!observed.argv.join(" ").includes("test-secret"));
 });
 
@@ -152,6 +154,32 @@ test("runner fails before spawning when the provider key is absent", async () =>
   await assert.rejects(
     runCodexInvocation(invocation, {}, { stdout: () => undefined, stderr: () => undefined }),
     /ZAI_API_KEY is required/,
+  );
+});
+
+test("runner rejects caller-managed model catalog paths", async () => {
+  const base = buildCodexInvocation({
+    provider: "deepseek",
+    workspace: ".",
+    prompt: "run",
+    codexPath: "/definitely/not/executed",
+  });
+  const invocation = Object.freeze({
+    ...base,
+    args: Object.freeze([
+      ...base.args.slice(0, -1),
+      "--config",
+      'model_catalog_json = "/tmp/caller.json"',
+      "-",
+    ]),
+  });
+  await assert.rejects(
+    runCodexInvocation(
+      invocation,
+      { DEEPSEEK_API_KEY: "fixture-key" },
+      { stdout: () => undefined, stderr: () => undefined },
+    ),
+    /managed internally/u,
   );
 });
 
@@ -235,6 +263,7 @@ test("route-probe invocation keeps exact provider identity behind a zero-retry r
   assert.match(args, /stream_max_retries = 0/u);
   assert.doesNotMatch(args, /sandbox_workspace_write\.network_access=true/u);
   assert.match(args, /shell_environment_policy\.set\.OPEN_AGENT_LAB_RELAY_TOKEN=""/u);
+  assert.doesNotMatch(args, /model_catalog_json/u);
   assert.throws(
     () =>
       buildCodexRelayInvocation({
@@ -255,6 +284,103 @@ test("route-probe invocation keeps exact provider identity behind a zero-retry r
       }),
     /loopback HTTP URL/u,
   );
+  assert.throws(
+    () =>
+      buildCodexRelayInvocation({
+        provider: "deepseek",
+        workspace: ".",
+        prompt: "probe",
+        model: "deepseek-v4-flash",
+        baseUrl: "http://127.0.0.1:43123/v1",
+      }),
+    /frozen provider profile/u,
+  );
+});
+
+test("runner materializes the route catalog only inside its private home", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-catalog-test-"));
+  t.after(async () => rm(directory, { force: true, recursive: true }));
+  const fakeCodex = join(directory, "catalog-codex.mjs");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      'import { readFileSync, statSync } from "node:fs";',
+      "const setting = process.argv.find((value) => value.startsWith('model_catalog_json='));",
+      "if (setting === undefined) process.exit(2);",
+      "const path = JSON.parse(setting.slice(setting.indexOf('=') + 1));",
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => process.stdout.write(JSON.stringify({",
+      "  path,",
+      "  privatePath: path === `${process.env.CODEX_HOME}/model-catalog.json`,",
+      "  mode: statSync(path).mode & 0o777,",
+      "  catalog: JSON.parse(readFileSync(path, 'utf8'))",
+      "})));",
+    ].join("\n"),
+    "utf8",
+  );
+  await chmod(fakeCodex, 0o755);
+  for (const expected of [
+    { provider: "deepseek" as const, model: "deepseek-v4-pro", reasoning: "high", context: 1_048_576 },
+    { provider: "zai" as const, model: "glm-5.3", reasoning: "max", context: 1_000_000 },
+  ]) {
+    const invocation = buildCodexRelayInvocation({
+      provider: expected.provider,
+      workspace: directory,
+      prompt: "perform one tool round",
+      baseUrl: "http://127.0.0.1:43123/v1",
+      codexPath: fakeCodex,
+    });
+    let output = "";
+    const code = await runCodexInvocation(
+      invocation,
+      {
+        ...process.env,
+        HOME: "/caller/home/must-not-be-used",
+        CODEX_HOME: "/caller/codex-home/must-not-be-used",
+        [CODEX_RELAY_ENV_KEY]: "fixture-capability",
+      },
+      { stdout: (chunk) => (output += chunk), stderr: () => undefined },
+    );
+    const observed = JSON.parse(output) as {
+      path: string;
+      privatePath: boolean;
+      mode: number;
+      catalog: { models: Record<string, unknown>[] };
+    };
+    const model = observed.catalog.models[0];
+
+    assert.equal(code, 0);
+    assert.equal(observed.privatePath, true);
+    assert.equal(observed.mode, 0o600);
+    assert.equal(observed.catalog.models.length, 1);
+    assert.deepEqual(Object.keys(model as object).sort(), [
+      "context_window",
+      "default_reasoning_level",
+      "default_reasoning_summary",
+      "display_name",
+      "experimental_supported_tools",
+      "include_apps_usage_instructions",
+      "input_modalities",
+      "max_context_window",
+      "model_messages",
+      "priority",
+      "shell_type",
+      "slug",
+      "support_verbosity",
+      "supported_in_api",
+      "supported_reasoning_levels",
+      "supports_reasoning_summary_parameter",
+      "truncation_policy",
+      "visibility",
+    ]);
+    assert.equal(model?.slug, expected.model);
+    assert.equal(model?.default_reasoning_level, expected.reasoning);
+    assert.equal(model?.context_window, expected.context);
+    assert.equal(model?.supports_reasoning_summary_parameter, false);
+    assert.deepEqual(model?.input_modalities, ["text"]);
+    await assert.rejects(readFile(observed.path, "utf8"), /ENOENT/u);
+  }
 });
 
 test(

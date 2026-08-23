@@ -121,6 +121,7 @@ const PROCESS_ENV = [
   "PATHEXT",
   "USERPROFILE",
 ] as const;
+const SYNTHETIC_ROUTE_CATALOGS = new WeakMap<CodexInvocation, string>();
 
 function profile(provider: OpenModelProvider): ProviderProfile {
   const value: ProviderProfile | undefined = PROFILES[provider];
@@ -148,6 +149,39 @@ function requireModel(value: string): string {
 
 function providerToml(value: ProviderProfile): string {
   return `{ name = ${JSON.stringify(value.name)}, base_url = ${JSON.stringify(value.baseUrl)}, env_key = ${JSON.stringify(value.envKey)}, wire_api = "responses", request_max_retries = ${value.requestRetries}, stream_max_retries = ${value.streamRetries}, stream_idle_timeout_ms = 300000, supports_websockets = false }`;
+}
+
+function syntheticRouteCatalog(selected: ProviderProfile): string {
+  const model = selected.defaultModel;
+  const reasoning = selected.defaultReasoning;
+  return `${JSON.stringify({
+    models: [
+      {
+        slug: model,
+        display_name: model,
+        default_reasoning_level: reasoning,
+        supported_reasoning_levels: [
+          { effort: reasoning, description: "Frozen synthetic route-probe effort" },
+        ],
+        shell_type: "shell_command",
+        visibility: "none",
+        supported_in_api: true,
+        priority: 0,
+        model_messages: {
+          instructions_template: "You are a coding agent. Follow the request using the provided tools.",
+        },
+        include_apps_usage_instructions: false,
+        supports_reasoning_summary_parameter: false,
+        default_reasoning_summary: "none",
+        support_verbosity: false,
+        truncation_policy: { mode: "bytes", limit: 10_000 },
+        context_window: selected.contextWindow,
+        max_context_window: selected.contextWindow,
+        experimental_supported_tools: [],
+        input_modalities: ["text"],
+      },
+    ],
+  })}\n`;
 }
 
 function invocation(
@@ -231,19 +265,25 @@ function loopbackBaseUrl(value: string): string {
   return url.toString().replace(/\/$/u, "");
 }
 
-/** Build a zero-retry Codex invocation that receives only a relay capability. */
+/** Build a frozen synthetic route invocation that receives only a relay capability. */
 export function buildCodexRelayInvocation(spec: CodexRelayRunSpec): CodexInvocation {
   const selected = profile(spec.provider);
-  return invocation(
-    spec,
-    {
-      ...selected,
-      baseUrl: loopbackBaseUrl(spec.baseUrl),
-      envKey: CODEX_RELAY_ENV_KEY,
-      requestRetries: 0,
-      streamRetries: 0,
-    },
-  );
+  const relayProfile = {
+    ...selected,
+    baseUrl: loopbackBaseUrl(spec.baseUrl),
+    envKey: CODEX_RELAY_ENV_KEY,
+    requestRetries: 0,
+    streamRetries: 0,
+  };
+  const built = invocation(spec, relayProfile);
+  if (
+    built.model !== selected.defaultModel ||
+    built.reasoning !== selected.defaultReasoning
+  ) {
+    throw new Error(`${selected.name} relay probes require the frozen provider profile.`);
+  }
+  SYNTHETIC_ROUTE_CATALOGS.set(built, syntheticRouteCatalog(relayProfile));
+  return built;
 }
 
 export interface CodexProbeRunSpec {
@@ -297,6 +337,19 @@ export function buildCodexProbeInvocation(spec: CodexProbeRunSpec): CodexInvocat
   }), spec.developerInstruction);
 }
 
+function runtimeArgs(invocation: CodexInvocation, modelCatalogPath: string): string[] {
+  const args = [...invocation.args];
+  if (args.some((value) => /^(?:--config=|-c=?|\s*)model_catalog_json\s*=/u.test(value))) {
+    throw new Error("Codex model catalog paths are managed internally.");
+  }
+  if (!SYNTHETIC_ROUTE_CATALOGS.has(invocation)) return args;
+  if (args.at(-1) !== "-") {
+    throw new Error("Codex invocation no longer reads its prompt from stdin.");
+  }
+  args.splice(-1, 0, "--config", `model_catalog_json=${JSON.stringify(modelCatalogPath)}`);
+  return args;
+}
+
 /** Execute Codex without ever copying the provider secret into argv or config. */
 export async function runCodexInvocation(
   invocation: CodexInvocation,
@@ -320,6 +373,12 @@ export async function runCodexInvocation(
 
   try {
     await writeFile(join(codexHome, "auth.json"), "{}\n", { mode: 0o600 });
+    const modelCatalogPath = join(codexHome, "model-catalog.json");
+    const modelCatalog = SYNTHETIC_ROUTE_CATALOGS.get(invocation);
+    const args = runtimeArgs(invocation, modelCatalogPath);
+    if (modelCatalog !== undefined) {
+      await writeFile(modelCatalogPath, modelCatalog, { flag: "wx", mode: 0o600 });
+    }
     if (
       limits !== undefined &&
       Object.entries(limits).some(([, value]) => !Number.isSafeInteger(value) || value <= 0)
@@ -328,7 +387,7 @@ export async function runCodexInvocation(
     }
     return await new Promise<number>((resolveExit, reject) => {
       const detached = limits !== undefined && process.platform !== "win32";
-      const child = spawn(invocation.command, invocation.args, {
+      const child = spawn(invocation.command, args, {
         cwd: invocation.cwd,
         env: childEnv,
         detached,
