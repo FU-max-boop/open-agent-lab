@@ -123,6 +123,15 @@ def _bounded_file(path: Path, label: str) -> bytes:
     return data
 
 
+def _credential_bytes(path: Path, label: str) -> bytes:
+    credentials = _bounded_file(path, label)
+    if not credentials.isascii():
+        raise IntegrityError(f"{label} must contain only ASCII bytes")
+    if not credentials.strip():
+        raise IntegrityError(f"{label} must contain a non-empty credential")
+    return credentials
+
+
 def _policy_layout(path: Path, provider: str, suffix: str) -> tuple[Path, Path]:
     raw = path.expanduser()
     if not raw.is_absolute():
@@ -312,7 +321,7 @@ def validate_probe_cap(
         cap_path, provider, model, binding["preflight_sha256"]
     )
     credential_sha256 = digest_bytes(
-        _bounded_file(credential_file, "provider credential")
+        _credential_bytes(credential_file, "provider credential")
     )
     if cap.get("providerCredentialSha256") != credential_sha256:
         raise IntegrityError("spend cap belongs to another provider credential")
@@ -787,9 +796,9 @@ def verify_probe(
     run_dir = Path(run_dir).expanduser().resolve(strict=True)
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise IntegrityError("prepared run directory is unavailable")
-    credentials = _bounded_file(Path(credential_file).expanduser(), "credential file")
-    if not credentials.strip():
-        raise IntegrityError("credential file must contain a non-empty credential")
+    credentials = _credential_bytes(
+        Path(credential_file).expanduser(), "credential file"
+    )
     run = LiveRouteRun.open(run_dir, provider)
     cap_path, cap_run_dir = _policy_layout(
         Path(cap_attestation_file), provider, ".cap.json"
