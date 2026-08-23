@@ -41,8 +41,9 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
   feature.
 - Before the first provider request, freeze a paired-result analyzer that rejects
   missing pairs and applies the declared reward, cost, and replication gates.
-- Run isolated Harbor conformance for exact GLM and DeepSeek routes; retain redacted
-  raw event fixtures and actual returned model identity.
+- Run an isolated, non-scoring Harbor route/model-identity probe for exact GLM
+  and DeepSeek routes; retain redacted raw event evidence without calling it
+  provider conformance.
 - Run the relay against live GLM and DeepSeek Responses routes with disposable,
   provider-budget-capped credentials.
 - Run the frozen five-task control/treatment pair once per provider as a

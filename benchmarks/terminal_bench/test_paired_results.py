@@ -28,6 +28,12 @@ def _write(path: Path, value: object) -> None:
     path.write_text(paired._canonical(value) + "\n")
 
 
+def _write_private(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(paired.canonical_json(value))
+    path.chmod(0o600)
+
+
 def _write_trial_result(path: Path, value: dict[str, object]) -> None:
     result = TrialResult.model_validate(value)
     _write(path, json.loads(result.model_dump_json()))
@@ -82,7 +88,8 @@ def _prepare_fixture_runtime(
     return _runtime_receipt()
 
 
-def _materialize_fixture_tasks(temp: Path) -> dict[str, dict[str, str]]:
+def _materialize_fixture_tasks(source: Path, temp: Path) -> dict[str, dict[str, str]]:
+    del source
     for snapshot in paired._declared_task_snapshots().values():
         path = temp / snapshot["relativePath"]
         path.mkdir(parents=True)
@@ -306,6 +313,12 @@ def _agent(
             "enable_verify_instruction_v1": spec["enabled"],
             "run_binding": binding,
         },
+        "env": {
+            "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
+            paired.PILOT_RECEIPT_ENV: str(
+                Path("/unused") / "authorizations" / f"{provider}.json"
+            ),
+        },
     }
 
 
@@ -346,7 +359,12 @@ def _trial_lock(
                 "enable_verify_instruction_v1": spec["enabled"],
                 "run_binding": binding,
             },
-            "env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            "env": {
+                "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
+                paired.PILOT_RECEIPT_ENV: str(
+                    task_path.parent.parent / "authorizations" / f"{provider}.json"
+                ),
+            },
             "mcp_servers": [],
         },
         "bridge_inputs": {},
@@ -678,6 +696,146 @@ def _failure_info(
     }
 
 
+def _live_probe_records(
+    root: Path,
+    binding: dict[str, object],
+    images: dict[str, str],
+    replication: str,
+) -> list[dict[str, object]]:
+    probes: list[dict[str, object]] = []
+    for provider, profile in paired._PROVIDERS.items():
+        compose_path = (
+            root / "overlays" / f"relay.{provider}.live-route-probe.compose.yaml"
+        )
+        compose_path.parent.mkdir(exist_ok=True)
+        compose_text = yaml.safe_dump(
+            paired._pinned_overlay(
+                paired._repo_root(),
+                provider,
+                images["production"],
+                live_route_probe=True,
+            ),
+            sort_keys=False,
+        )
+        compose_path.write_text(compose_text)
+        compose_sha256 = paired._digest_bytes(compose_text.encode())
+        config_path = root / "live-route-probes" / f"{provider}.yaml"
+        config_path.parent.mkdir(exist_ok=True)
+        config_text = yaml.safe_dump(
+            paired.live_route_probe_config(
+                root,
+                binding,
+                provider,
+                profile["model"],
+                profile["reasoning"],
+                compose_path,
+                compose_sha256,
+            ),
+            sort_keys=False,
+        )
+        config_path.write_text(config_text)
+        job_name = f"open-agent-lab-{replication}-{provider}-live-route-probe"
+        probes.append(
+            {
+                "provider": provider,
+                "model": profile["model"],
+                "reasoning": profile["reasoning"],
+                "task": paired.LIVE_ROUTE_PROBE_TASK,
+                "config": f"live-route-probes/{provider}.yaml",
+                "configSha256": paired._digest_bytes(config_text.encode()),
+                "jobDir": f"live-route-jobs/{provider}/{job_name}",
+                "compose": f"overlays/relay.{provider}.live-route-probe.compose.yaml",
+                "composeSha256": compose_sha256,
+                "relayImageSha256": images["production"],
+                "limits": dict(paired.LIVE_ROUTE_PROBE_LIMITS),
+            }
+        )
+    return probes
+
+
+def _pilot_authorization(
+    provider: str,
+    model: str,
+    binding: dict[str, object],
+    probe: dict[str, object],
+    pilot: dict[str, object],
+    base_start: datetime,
+    credential_sha256: str,
+) -> dict[str, object]:
+    def stamp(offset_ms: int) -> str:
+        return (
+            (base_start + timedelta(milliseconds=offset_ms))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
+    expires = base_start + timedelta(hours=5)
+    return {
+        "schemaVersion": 1,
+        "proofClass": "live-route-probe-v1",
+        "provider": provider,
+        "model": model,
+        "sourceRevision": binding["source_revision"],
+        "preflightSha256": binding["preflight_sha256"],
+        "runBindingSha256": paired._digest(binding),
+        "configSha256": probe["configSha256"],
+        "composeSha256": probe["composeSha256"],
+        "fullComposeSha256": "sha256:" + "5" * 64,
+        "providerCredentialSha256": credential_sha256,
+        "probeClaimSha256": "sha256:" + "6" * 64,
+        "relayMarkerSha256": "sha256:" + "7" * 64,
+        "relayChainHead": "sha256:" + "8" * 64,
+        "providerRequestIdsSha256": "sha256:" + "9" * 64,
+        "responseIdsSha256": "sha256:" + "a" * 64,
+        "requestCount": 2,
+        "usage": {
+            "input_tokens": 6,
+            "cached_input_tokens": 0,
+            "output_tokens": 4,
+            "reasoning_output_tokens": 2,
+            "total_tokens": 10,
+        },
+        "credentialLeakScan": {
+            "ok": True,
+            "files": 1,
+            "bytes": 100,
+            "directories": 1,
+        },
+        "spendCap": {
+            "limitUsd": 2,
+            "observedAt": stamp(0),
+            "expiresAt": expires.isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            ),
+            "evidenceSha256": "sha256:" + "b" * 64,
+            "assertedBy": "fixture operator",
+        },
+        "pilotJob": {
+            key: pilot[key]
+            for key in (
+                "armOrder",
+                "config",
+                "configSha256",
+                "jobDir",
+                "compose",
+                "composeSha256",
+            )
+        },
+        "probeStartedAt": stamp(100),
+        "probeFinishedAt": stamp(200),
+        "authorizationExpiresAt": expires.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "liveProviderRouteObserved": True,
+        "liveProviderConformance": False,
+        "benchmarkTaskInstructionUsed": False,
+        "benchmarkRewardUsed": False,
+        "spendCapVerification": "operator_attested",
+        "benchmarkStartAuthorized": True,
+        "verifiedAt": stamp(300),
+    }
+
+
 class RunFixture:
     def __init__(
         self,
@@ -700,7 +858,7 @@ class RunFixture:
         }
         self.image_tags = paired._relay_image_tags(self.root, source)
         self.task_snapshots = paired._declared_task_snapshots()
-        for task in self.tasks:
+        for task in self.task_snapshots:
             task_path = self.root / self.task_snapshots[task]["relativePath"]
             task_path.mkdir(parents=True)
             (task_path / "task.toml").write_text("[task]\n")
@@ -733,7 +891,14 @@ class RunFixture:
         )
         replication_offset = 0 if replication == "screen-v1" else 100_000
         base_start = trial_start or datetime(2026, 8, 22, tzinfo=timezone.utc)
+        live_route_probes = _live_probe_records(
+            self.root, self.binding, self.images, replication
+        )
+        probes_by_provider = {
+            str(probe["provider"]): probe for probe in live_route_probes
+        }
         providers = []
+        (self.root / "authorizations").mkdir(mode=0o700)
         self.trials: dict[tuple[str, str, str], Path] = {}
         for provider, provider_spec in paired._PROVIDERS.items():
             model = provider_spec["model"]
@@ -755,6 +920,12 @@ class RunFixture:
             config["agents"] = [template_agents[variant] for variant in order]
             for agent in config["agents"]:
                 agent["kwargs"]["run_binding"] = self.binding
+                agent["env"] = {
+                    "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
+                    paired.PILOT_RECEIPT_ENV: str(
+                        self.root / "authorizations" / f"{provider}.json"
+                    ),
+                }
             config["job_name"] = job_name
             config["jobs_dir"] = str(job_dir.parent)
             config["datasets"] = []
@@ -787,25 +958,41 @@ class RunFixture:
                 "run_binding": self.binding,
             }
             job_id = UUID(int=2000 if provider == "deepseek" else 2001)
+            authorization_path = self.root / "authorizations" / f"{provider}.json"
             parsed_job_config = paired.JobConfig.model_validate(config)
             trial_results: list[TrialResult] = []
             config_path = self.root / "configs" / f"{provider}.yaml"
             config_path.parent.mkdir(exist_ok=True)
             rendered = yaml.safe_dump(config, sort_keys=False)
             config_path.write_text(rendered)
-            providers.append(
-                {
-                    "provider": provider,
-                    "model": model,
-                    "armOrder": order,
-                    "config": f"configs/{provider}.yaml",
-                    "configSha256": paired._digest_bytes(rendered.encode()),
-                    "jobDir": f"jobs/{provider}/{job_name}",
-                    "compose": f"overlays/relay.{provider}.compose.yaml",
-                    "composeSha256": compose_sha256,
-                    "relayImageSha256": self.images["production"],
-                }
+            pilot = {
+                "provider": provider,
+                "model": model,
+                "armOrder": order,
+                "config": f"configs/{provider}.yaml",
+                "configSha256": paired._digest_bytes(rendered.encode()),
+                "jobDir": f"jobs/{provider}/{job_name}",
+                "compose": f"overlays/relay.{provider}.compose.yaml",
+                "composeSha256": compose_sha256,
+                "relayImageSha256": self.images["production"],
+            }
+            providers.append(pilot)
+            credential_sha256 = paired._digest(
+                {"provider": provider, "fixture": "credential"}
             )
+            _write_private(
+                authorization_path,
+                _pilot_authorization(
+                    provider,
+                    model,
+                    self.binding,
+                    probes_by_provider[provider],
+                    pilot,
+                    base_start,
+                    credential_sha256,
+                ),
+            )
+            authorization_sha256 = paired._digest_bytes(authorization_path.read_bytes())
             locks = []
             ordinal = 0
             for task in self.tasks:
@@ -828,6 +1015,24 @@ class RunFixture:
                     attempt_started = base_start + timedelta(seconds=ordinal * 20)
                     attempt_finished = attempt_started + timedelta(seconds=10)
                     identity = f"{replication}-{provider}-{ordinal}"
+                    lock_sha256 = paired._digest(lock)
+                    _write_private(
+                        self.root
+                        / "authorizations"
+                        / paired.relay_claim_name(provider, "pilot", lock_sha256),
+                        {
+                            "schemaVersion": 1,
+                            "proofClass": "pilot-relay-slot-claim-v1",
+                            "provider": provider,
+                            "policySha256": authorization_sha256,
+                            "jobId": str(job_id),
+                            "jobDir": str(job_dir),
+                            "trialLockSha256": lock_sha256,
+                            "claimedAt": (attempt_started + timedelta(milliseconds=500))
+                            .isoformat(timespec="milliseconds")
+                            .replace("+00:00", "Z"),
+                        },
+                    )
                     verified = _relay(
                         trial_dir,
                         provider,
@@ -998,6 +1203,7 @@ class RunFixture:
                             "preflightSha256": preflight_sha,
                             "runBindingSha256": paired._digest(self.binding),
                             "relayImageSha256": self.images["production"],
+                            "providerCredentialSha256": credential_sha256,
                             "fullComposeSha256": paired._digest(
                                 {
                                     "provider": provider,
@@ -1070,6 +1276,7 @@ class RunFixture:
                 "taskSnapshots": self.task_snapshots,
                 "codexRuntime": _runtime_receipt(),
                 "providers": providers,
+                "liveRouteProbes": live_route_probes,
             },
         )
 
@@ -1153,7 +1360,7 @@ class PrepareTest(unittest.TestCase):
                 return SimpleNamespace(results=results)
 
         by_name = {
-            task.removeprefix("terminal-bench/"): binding
+            paired._task_relative(task): binding
             for task, binding in paired._TASK_RUNTIME_BINDINGS.items()
         }
         with (
@@ -1168,7 +1375,9 @@ class PrepareTest(unittest.TestCase):
                 ),
             ),
         ):
-            snapshots = paired._materialize_task_snapshots(Path(raw))
+            snapshots = paired._materialize_task_snapshots(
+                paired._repo_root(), Path(raw)
+            )
         self.assertEqual(snapshots, paired._declared_task_snapshots())
         self.assertEqual(options, [(True, True)])
         self.assertEqual(
@@ -1538,7 +1747,7 @@ class PairedResultsTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         by_name = {
-            task.removeprefix("terminal-bench/"): binding
+            paired._task_relative(task): binding
             for task, binding in paired._TASK_RUNTIME_BINDINGS.items()
         }
         self.task_identity = patch.object(
@@ -1639,6 +1848,87 @@ class PairedResultsTest(unittest.TestCase):
             first["promotion"]["blockingReasons"],
         )
         self.assertNotIn(str(self.root), paired._canonical(first))
+
+    def test_each_attempt_requires_its_pre_execution_pilot_claim(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = next(iter(screen.trials.values()))
+        lock = json.loads((trial / "lock.json").read_text())
+        provider = lock["agent"]["model_name"].split("/", 1)[0]
+        claim = (
+            screen.root
+            / "authorizations"
+            / paired.relay_claim_name(provider, "pilot", paired._digest(lock))
+        )
+        claim.unlink()
+        with self.assertRaisesRegex(
+            paired.IntegrityError, "pilot authorization claim is unavailable"
+        ):
+            paired.summarize([screen.root])
+
+    def test_pilot_claim_cannot_be_rebound_after_agent_start(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = next(iter(screen.trials.values()))
+        lock = json.loads((trial / "lock.json").read_text())
+        provider = lock["agent"]["model_name"].split("/", 1)[0]
+        claim_path = (
+            screen.root
+            / "authorizations"
+            / paired.relay_claim_name(provider, "pilot", paired._digest(lock))
+        )
+        claim = json.loads(claim_path.read_text())
+        result = json.loads((trial / "result.json").read_text())
+        agent_started = datetime.fromisoformat(result["agent_execution"]["started_at"])
+        claim["claimedAt"] = (
+            (agent_started + timedelta(milliseconds=1))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        _write_private(claim_path, claim)
+        with self.assertRaisesRegex(
+            paired.IntegrityError, "pilot authorization claim differs"
+        ):
+            paired.summarize([screen.root])
+
+    def test_pilot_claim_cannot_bless_invalid_probe_receipts(self) -> None:
+        for mutation in ("junk", "expired", "probe-config"):
+            with self.subTest(mutation=mutation):
+                case_root = self.root / mutation
+                case_root.mkdir()
+                screen = RunFixture(case_root, "screen-v1")
+                provider = "deepseek"
+                authorization = screen.root / "authorizations" / f"{provider}.json"
+                receipt = json.loads(authorization.read_text())
+                if mutation == "junk":
+                    receipt.pop("benchmarkStartAuthorized")
+                elif mutation == "expired":
+                    receipt["spendCap"]["expiresAt"] = "2026-08-22T00:00:05Z"
+                    receipt["authorizationExpiresAt"] = "2026-08-22T00:00:05Z"
+                else:
+                    receipt["configSha256"] = "sha256:" + "f" * 64
+                _write_private(authorization, receipt)
+                policy_sha256 = paired._digest_bytes(authorization.read_bytes())
+                for claim_path in (screen.root / "authorizations").glob(
+                    f"{provider}.pilot.*.claim.json"
+                ):
+                    claim = json.loads(claim_path.read_text())
+                    claim["policySha256"] = policy_sha256
+                    _write_private(claim_path, claim)
+                with self.assertRaisesRegex(
+                    paired.IntegrityError, "authorization receipt"
+                ):
+                    paired.summarize([screen.root])
+
+    def test_cleanup_receipt_binds_the_authorized_provider_credential(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = next(iter(screen.trials.values()))
+        cleanup_path = trial / "environment-cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup["providerCredentialSha256"] = "sha256:" + "f" * 64
+        _write(cleanup_path, cleanup)
+        with self.assertRaisesRegex(
+            paired.IntegrityError, "environment cleanup receipt"
+        ):
+            paired.summarize([screen.root])
 
     def test_predeclared_mirror_can_meet_only_directional_criteria(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
@@ -2837,7 +3127,7 @@ class PairedResultsTest(unittest.TestCase):
         with self.assertRaisesRegex(paired.IntegrityError, "different source"):
             paired.summarize([screen.root, mirror.root])
 
-    def test_all_replications_must_precede_the_first_trial(self) -> None:
+    def test_all_replications_must_precede_the_first_live_probe(self) -> None:
         screen = RunFixture(
             self.root,
             "screen-v1",
@@ -2847,6 +3137,23 @@ class PairedResultsTest(unittest.TestCase):
             self.root,
             "mirror-v1",
             created_at="2026-08-22T00:02:00Z",
+            trial_start=datetime(2026, 8, 22, 0, 3, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(
+            paired.IntegrityError, "before the first live probe"
+        ):
+            paired.summarize([screen.root, mirror.root])
+
+    def test_all_replications_must_precede_the_first_trial(self) -> None:
+        screen = RunFixture(
+            self.root,
+            "screen-v1",
+            trial_start=datetime(2026, 8, 22, 0, 1, tzinfo=timezone.utc),
+        )
+        mirror = RunFixture(
+            self.root,
+            "mirror-v1",
+            created_at="2026-08-22T00:01:00.050Z",
             trial_start=datetime(2026, 8, 22, 0, 3, tzinfo=timezone.utc),
         )
         with self.assertRaisesRegex(paired.IntegrityError, "before the first trial"):

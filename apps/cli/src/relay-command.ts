@@ -278,6 +278,10 @@ export async function runRelayCommand(
     listenHost: option(args, "--listen") ?? "127.0.0.1",
     port: integer(args, "--port", 8080),
     maxRequests: integer(args, "--max-requests", 256),
+    maxRequestBytes: integer(args, "--max-request-bytes", 64 * 1024 * 1024),
+    maxResponseBytes: integer(args, "--max-response-bytes", 64 * 1024 * 1024),
+    connectTimeoutMs: integer(args, "--connect-timeout-ms", 30_000),
+    idleTimeoutMs: integer(args, "--idle-timeout-ms", 300_000),
   });
   const seal = (): void => {
     void relay.seal().catch((error: unknown) => {

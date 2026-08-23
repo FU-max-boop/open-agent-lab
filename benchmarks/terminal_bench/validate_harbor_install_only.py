@@ -142,7 +142,7 @@ def _prepared_authority(
         manifest["runtime"]["hermeticCodexRuntimeReady"] is True,
         "The frozen runtime gate is not ready.",
     )
-    preflight, providers = policy._validate_record(
+    preflight, providers, _ = policy._validate_record(
         prepared,
         manifest_sha,
         manifest["relayBuildIds"]["production"],
@@ -172,6 +172,7 @@ def _assert_cleanup(
     result: dict[str, Any],
     task: str,
     binding: dict[str, Any],
+    provider_credential_sha256: str,
 ) -> None:
     receipt = policy._mapping(
         policy._artifact_json(trial_dir, "environment-cleanup.json", "cleanup receipt"),
@@ -187,6 +188,7 @@ def _assert_cleanup(
         "preflightSha256": binding["preflight_sha256"],
         "runBindingSha256": digest_bytes(canonical_json(binding)),
         "relayImageSha256": binding["relay_image_sha256"],
+        "providerCredentialSha256": provider_credential_sha256,
         "fullComposeSha256": receipt.get("fullComposeSha256"),
         "taskId": task,
         "taskDigest": policy._TASK_RUNTIME_BINDINGS[task]["taskDigest"],
@@ -215,6 +217,7 @@ def _assert_trial(
     job_id: Any,
     compose_path: Path,
     compose_sha: str,
+    provider_credential_sha256: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _assert_install_only_tree(trial_dir)
     raw_result = policy._mapping(
@@ -303,7 +306,7 @@ def _assert_trial(
         started <= environment[0] <= environment[1] <= agent[0] <= agent[1] <= finished,
         "Install-only lifecycle timing drifted.",
     )
-    _assert_cleanup(trial_dir, raw_result, task, binding)
+    _assert_cleanup(trial_dir, raw_result, task, binding, provider_credential_sha256)
     return raw_lock, {"task": task, "variant": variant, "id": str(parsed.id)}
 
 
@@ -336,6 +339,9 @@ def _assert_job_aggregates(job_result: Any, provider: str) -> None:
 def validate(
     prepared: Path, secret: bytes, provider: str = "deepseek"
 ) -> dict[str, Any]:
+    secret_needle = secret.strip()
+    _require(secret_needle, "The provider-free proof key is empty.")
+    provider_credential_sha256 = digest_bytes(secret)
     requested = prepared.expanduser()
     _require(not requested.is_symlink(), "Prepared proof root must not be a symlink.")
     prepared = requested.resolve(strict=True)
@@ -393,6 +399,7 @@ def validate(
             job_result.id,
             compose_path,
             compose_sha,
+            provider_credential_sha256,
         )
         for path in children
     ]
@@ -415,7 +422,7 @@ def validate(
         "Install-only trial UUIDs are not unique.",
     )
     _assert_job_aggregates(job_result, provider)
-    _assert_outputs_are_non_scorable(job_dir, secret)
+    _assert_outputs_are_non_scorable(job_dir, secret_needle)
     return {
         "schemaVersion": 1,
         "proofClass": _PROOF_CLASS,
@@ -443,7 +450,7 @@ if __name__ == "__main__":
         json.dumps(
             validate(
                 Path(sys.argv[1]),
-                sys.stdin.buffer.read().strip(),
+                sys.stdin.buffer.read(),
                 sys.argv[3] if len(sys.argv) == 4 else "deepseek",
             ),
             separators=(",", ":"),

@@ -139,11 +139,19 @@
       "immutableImage": "alexgshaw/multi-source-data-merger@sha256:8b32782078ff7383a1b4e5d3cecca8ce287e30f50bb4c0e5db009a18064e666e",
       "imageConfigDigest": "sha256:5096d3409e5c692afd62a136f90a2e52dd87653aa6637a3e1ca31ad30fab1096",
       "platform": "linux/amd64"
+    },
+    "open-agent-lab/live-route-probe": {
+      "taskDigest": "sha256:79484e87208b106689f18701db89b85e10c59fc8ea923f55c727e630196f4e8f",
+      "taskChecksum": "fb65a775a56b52655c0877b546a583010023f97ef237d66e61db7423469aaf45",
+      "declaredImage": "ubuntu:24.04",
+      "immutableImage": "ubuntu@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316",
+      "imageConfigDigest": "sha256:a6f81fb630d51837271b89f8193810a5fc493fa4f30a55d7ebcdb3a66f3cc63a",
+      "platform": "linux/amd64"
     }
   },
   "relayBuildIds": {
-    "production": "sha256:0984a7f7a03bdff3eeed0656ba156279813860cf19baed01551e66e70745dbab",
-    "providerFreeFixture": "sha256:839335172f349762211cda1f9fd462ef2c5a6411868b9a1116c674d8f556b86b"
+    "production": "sha256:e3bd64b25f1f8e636827116ca040bf4c02768b8df76c37910072a7133b8ef799",
+    "providerFreeFixture": "sha256:6ba38b007719ecc7f24368af26a96edc2c4764c885d86202c263c5e2040fe638"
   },
   "arms": [
     {
@@ -210,24 +218,30 @@
     "apps/cli/src/codex-probe.ts": "sha256:6afa31fd5dc8ef7da253c7d60ec103b9636132b9b828de55d40b142e912c4cd1",
     "apps/cli/src/codex-route-probe.ts": "sha256:4b9b7ddadbf5cac447c28549f0cddf82ae7775d99da95752b07ab0ce9ffd859a",
     "apps/cli/src/codex-runner.ts": "sha256:9a6ee25b5d34aee2892d2a03fe7b9b6186ca96ddbd634568c17f913fb39da258",
+    "apps/cli/src/relay-command.ts": "sha256:2e40424edf2711385d5697edafcdf78f93bb127b7b7b762f65298c933d73a140",
     "apps/cli/src/relay-fixture-entry.ts": "sha256:d3ba67816ebcaf0a9c42f9f5dca9bd445e5383a355e37b4fbc96bfa432802d53",
     "apps/cli/src/responses-fixture.ts": "sha256:ec5bcea7905db7b4ac15adf0ed3ba919f50c87978b625d7b1d5de94b6e68c478",
     "benchmarks/terminal_bench/harbor-e2e.yaml": "sha256:3aa2b2f07067ac9221a447ec94857592b3e391286e302ed52ebab4ba7c0cd7cd",
     "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:1cbf361ed3452c68fe07b9d3e016bdb0416b32d4f8490d58c88933cfa53564b9",
     "benchmarks/terminal_bench/codex_runtime.py": "sha256:b21d780f345fb4e7b42ca476a87f717f3ffa3d2b8a2213e4e06f49abb678eafc",
-    "benchmarks/terminal_bench/experiment_contract.py": "sha256:3c208dfd2ac060fac90de53876c59e2db114310507e2e8ec2d90ecfc4b00e8e9",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:50126a47eb7585ce90875a56454d12dfe8c7f56afa7d363e6d96031b93c159a2",
-    "benchmarks/terminal_bench/harbor_environment.py": "sha256:069b32c7e3c8af4a137eb847137321d5c1a6ab04d22368872344f7be7789ddc4",
-    "benchmarks/terminal_bench/paired_results.py": "sha256:9b9a94bc36783d5a3d5e1849609fd78b62d4e0e20f10d584259c861279d99552",
+    "benchmarks/terminal_bench/experiment_contract.py": "sha256:7819f0700a8d505b3e4e500f3a09caecd4db5c38e1fe1be23b2d25625d367bb9",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:259357bbec0e1851cb67bb4281684bf9efbac3a54f1c9ee964b978b25aa9a808",
+    "benchmarks/terminal_bench/harbor_environment.py": "sha256:96d39f52a4a3b992e1c029e82a005fc847bef7fc2a94d4803cbf20ef1a982798",
+    "benchmarks/terminal_bench/live-route-probe-task/environment/.gitkeep": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",
+    "benchmarks/terminal_bench/live-route-probe-task/task.toml": "sha256:d5b5d5fc2289b5c1a185014234de82d6b8927e515ba069a8c197e001b2bbb19e",
+    "benchmarks/terminal_bench/live-route-probe-task/tests/test.sh": "sha256:ca91b28c4d53dd5f916e0fc9fad20fcbbf04e8f1fa0dcef97b0884d0bd68caf2",
+    "benchmarks/terminal_bench/live_route_probe.py": "sha256:f9121a576c07740c0941758282cdbe8e41b1056256ae83bc3bcbc858f4a8e128",
+    "benchmarks/terminal_bench/paired_results.py": "sha256:bdf988c75789d621038fbb932fa25b5f9de3c5b65ac3a73c1b1d164a2fce0a76",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:5d967306bb732e8bb5433d2fff74fb327d8a3591875935f86dc0574fed79392e",
     "benchmarks/terminal_bench/relay_evidence.py": "sha256:2aa9745d248f092d2b97b4136ab76d6b90ca171c322bd3aaea5663545720bbdc",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:7f2dfeaad7dc397fccb55e7e439cd46d0d09e1670bc50ad8bd358263278dfa79",
-    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:370b9ec23d8acc6de5949c2d6b9339327e35958c116051498e5e1cc22f7a43a4",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:3e45b22bffbc2111accad9de6d80716cfe9f13d1ec9a19692c73c339337f803c",
-    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:94ac6cacdd8985cd067b0fdfbb821c5ed6e77fca03a26abf8350511e51152e78",
-    "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:a6e665c525d3df9aaf0b28a2129ceb8dba4a79e776eaa68e9260316d9765f538",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:97f52ab76325f28ebe3c988501d667bf2f84306ac2b0222c8fb3c26829a45c9f",
+    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:377632cbe2e9686cf8c31de51ef1f8234443fd5fbc11af7445d08c89f290c680",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:29a7b19c9a6af431f82248aa0839aa50d79fc21a8befb83827f3bc815a1338ec",
+    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:b9157243c842dd3cd44d9b2291549d9066573240ee4f69aa7878cd6c06f381a6",
+    "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:6cb5fc5bd6922504e1d50b7c81ffd8018b479c6eb095af798fbf296ad6b079d0",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },
   "metrics": [
@@ -250,5 +264,5 @@
     "maximumMedianTokenOrWallTimeIncrease": 0.5,
     "minimumRewardGainIfOverheadLimitExceeded": 0.2
   },
-  "liveStartGate": "a tested paired-result analyzer must be merged and frozen before the first provider request; exact provider conformance, matching requested/returned model, disposable low-limit credentials, and all provider-free control/treatment gates must also pass"
+  "liveStartGate": "a tested paired-result analyzer must be merged and frozen before the first provider request; a bounded live route and model-identity probe, matching requested/returned model, disposable low-limit credentials, and all provider-free control/treatment gates must pass before the first scored pilot request"
 }

@@ -42,6 +42,7 @@ class InstallOnlyValidatorTest(unittest.TestCase):
     def test_trial_validator_rejects_execution_and_lock_drift(self) -> None:
         provider = "deepseek"
         model = policy._PROVIDERS[provider]["model"]
+        provider_credential_sha256 = digest_bytes(b"dummy-secret\n")
         variant = "control-v1"
         task = policy._TASKS[0]
         binding = {
@@ -168,6 +169,7 @@ class InstallOnlyValidatorTest(unittest.TestCase):
                 "preflightSha256": binding["preflight_sha256"],
                 "runBindingSha256": digest_bytes(canonical_json(binding)),
                 "relayImageSha256": binding["relay_image_sha256"],
+                "providerCredentialSha256": provider_credential_sha256,
                 "fullComposeSha256": "sha256:" + "7" * 64,
                 "taskId": task,
                 "taskDigest": policy._TASK_RUNTIME_BINDINGS[task]["taskDigest"],
@@ -179,13 +181,29 @@ class InstallOnlyValidatorTest(unittest.TestCase):
             (trial / "environment-cleanup.json").write_text(policy._canonical(receipt))
 
             _assert_trial(
-                trial, provider, model, binding, job, job_id, compose, compose_sha
+                trial,
+                provider,
+                model,
+                binding,
+                job,
+                job_id,
+                compose,
+                compose_sha,
+                provider_credential_sha256,
             )
             lock["install_only"] = False
             (trial / "lock.json").write_text(policy._canonical(lock))
             with self.assertRaisesRegex(RuntimeError, "TrialLock drifted"):
                 _assert_trial(
-                    trial, provider, model, binding, job, job_id, compose, compose_sha
+                    trial,
+                    provider,
+                    model,
+                    binding,
+                    job,
+                    job_id,
+                    compose,
+                    compose_sha,
+                    provider_credential_sha256,
                 )
             lock["install_only"] = True
             (trial / "lock.json").write_text(policy._canonical(lock))
@@ -199,7 +217,15 @@ class InstallOnlyValidatorTest(unittest.TestCase):
             (trial / "result.json").write_text(policy._canonical(raw_result))
             with self.assertRaisesRegex(RuntimeError, "execution or scoring"):
                 _assert_trial(
-                    trial, provider, model, binding, job, job_id, compose, compose_sha
+                    trial,
+                    provider,
+                    model,
+                    binding,
+                    job,
+                    job_id,
+                    compose,
+                    compose_sha,
+                    provider_credential_sha256,
                 )
 
     def test_projection_changes_only_the_proof_controls(self) -> None:
@@ -263,7 +289,7 @@ class InstallOnlyValidatorTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "agent output tree drifted"):
                 _assert_install_only_tree(trial)
 
-    def test_cleanup_receipt_binds_task_and_lifecycle(self) -> None:
+    def test_cleanup_binds_lifecycle_and_raw_credential_bytes(self) -> None:
         task = policy._TASKS[0]
         binding = {
             "schema_version": 1,
@@ -283,6 +309,8 @@ class InstallOnlyValidatorTest(unittest.TestCase):
             },
             "finished_at": "2026-08-23T00:00:04Z",
         }
+        raw_credential = b"dummy-secret\n"
+        provider_credential_sha256 = digest_bytes(raw_credential)
         with tempfile.TemporaryDirectory() as raw:
             trial = Path(raw) / "trial"
             trial.mkdir()
@@ -296,6 +324,7 @@ class InstallOnlyValidatorTest(unittest.TestCase):
                 "preflightSha256": binding["preflight_sha256"],
                 "runBindingSha256": digest_bytes(canonical_json(binding)),
                 "relayImageSha256": binding["relay_image_sha256"],
+                "providerCredentialSha256": provider_credential_sha256,
                 "fullComposeSha256": "sha256:" + "6" * 64,
                 "taskId": task,
                 "taskDigest": policy._TASK_RUNTIME_BINDINGS[task]["taskDigest"],
@@ -305,11 +334,20 @@ class InstallOnlyValidatorTest(unittest.TestCase):
                 "stoppedAt": "2026-08-23T00:00:03Z",
             }
             (trial / "environment-cleanup.json").write_text(json.dumps(receipt))
-            _assert_cleanup(trial, result, task, binding)
+            _assert_cleanup(trial, result, task, binding, provider_credential_sha256)
+            receipt["providerCredentialSha256"] = digest_bytes(raw_credential.strip())
+            (trial / "environment-cleanup.json").write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(RuntimeError, "identity drifted"):
+                _assert_cleanup(
+                    trial, result, task, binding, provider_credential_sha256
+                )
+            receipt["providerCredentialSha256"] = provider_credential_sha256
             receipt["taskDigest"] = "sha256:" + "0" * 64
             (trial / "environment-cleanup.json").write_text(json.dumps(receipt))
             with self.assertRaisesRegex(RuntimeError, "identity drifted"):
-                _assert_cleanup(trial, result, task, binding)
+                _assert_cleanup(
+                    trial, result, task, binding, provider_credential_sha256
+                )
 
     def test_aggregates_must_be_usage_and_reward_free(self) -> None:
         evals = {

@@ -35,6 +35,10 @@ from .codex_runtime import (
 )
 from .experiment_contract import (
     EXPERIMENT_ID,
+    LIVE_ROUTE_PROBE_EGRESS_NETWORK,
+    LIVE_ROUTE_PROBE_INTERNAL_NETWORK,
+    LIVE_ROUTE_PROBE_LIMITS,
+    LIVE_ROUTE_PROBE_TASK,
     PREFLIGHT_KEYS,
     RELAY_ARTIFACT_LIMITS,
     RELAY_BUILD_ID_PATH,
@@ -45,11 +49,16 @@ from .experiment_contract import (
     is_digest,
     is_revision,
     is_strict_int,
+    live_route_probe_config,
+    live_route_probe_networks,
+    live_route_probe_relay_command,
 )
 
 _SECRET = "provider-api-key"
 _EXTERNAL_KEYS = {"include", "env_file", "extends", "label_file"}
 _MAX_COMPOSE_BYTES = 4 * 1024 * 1024
+_MAX_CREDENTIAL_BYTES = 64 * 1024
+_RELAY_RUNTIME_GID = 1000
 _CLEANUP_ATTEMPTS = 3
 _CLEANUP_TIMEOUT_SECONDS = 120
 _LOG_EXPORT_TIMEOUT_SECONDS = 60
@@ -351,10 +360,14 @@ def _task_authorities(
         raise ValueError("task snapshot authority drifted")
     for task, authority in runtime.items():
         snapshot = snapshots.get(task)
-        short = task.removeprefix("terminal-bench/")
+        short = (
+            task.removeprefix("terminal-bench/")
+            if task.startswith("terminal-bench/")
+            else task.removeprefix("open-agent-lab/")
+        )
         if (
             not isinstance(task, str)
-            or not task.startswith("terminal-bench/")
+            or not (task.startswith("terminal-bench/") or task == LIVE_ROUTE_PROBE_TASK)
             or not short
             or not isinstance(authority, dict)
             or set(authority) != _TASK_RUNTIME_KEYS
@@ -490,14 +503,26 @@ def _live_task_authority(
     relay_images: dict[str, Any],
     runtime: dict[str, dict[str, str]],
     snapshots: dict[str, dict[str, str]],
+    relay_role: str,
 ) -> tuple[str, Path, dict[str, str], dict[str, str]] | None:
-    if relay_image == relay_images.get("providerFreeFixture"):
+    if relay_role == "fixture":
+        if relay_image != relay_images.get("providerFreeFixture"):
+            raise ValueError("fixture relay image drifted")
         return None
+    if relay_role not in {"pilot", "live-route-probe"}:
+        raise ValueError("relay role is invalid")
     if relay_image != relay_images.get("production"):
         raise ValueError("relay image has no prepared-run role")
     actual = Path(os.path.abspath(task_dir))
     matches: list[tuple[str, Path, dict[str, str], dict[str, str]]] = []
     for task, snapshot in snapshots.items():
+        authorized = (
+            task == LIVE_ROUTE_PROBE_TASK
+            if relay_role == "live-route-probe"
+            else task.startswith("terminal-bench/")
+        )
+        if not authorized:
+            continue
         expected = Path(os.path.abspath(output / snapshot["relativePath"]))
         if actual == expected:
             if (
@@ -521,6 +546,116 @@ def _task_hashes(task_dir: Path) -> tuple[str, str]:
         raise ValueError("prepared task snapshot contains an unsafe path")
     content_hash, _ = Packager.compute_content_hash(task_dir)
     return "sha256:" + content_hash, dirhash(task_dir, "sha256")
+
+
+def _validate_live_route_probe_authorities(
+    run_dir: Path,
+    binding: dict[str, Any],
+    manifest: dict[str, Any],
+    probes: list[Any],
+    relay_images: dict[str, Any],
+) -> None:
+    probe_profiles = {
+        item.get("provider"): (item.get("model"), item.get("reasoningEffort"))
+        for item in manifest.get("pairedConfigs", [])
+        if isinstance(item, dict)
+    }
+    if set(probe_profiles) != {"deepseek", "zai"} or len(probes) != 2:
+        raise ValueError("live-route probe authority is incomplete")
+    seen: set[str] = set()
+    for entry in probes:
+        if not isinstance(entry, dict):
+            raise TypeError("live-route probe authority is invalid")
+        provider = entry.get("provider")
+        config_path = _safe_output_path(run_dir, entry.get("config"))
+        compose_path = _safe_output_path(run_dir, entry.get("compose"))
+        job_name = (
+            f"open-agent-lab-{binding['replication_id']}-{provider}-live-route-probe"
+        )
+        if (
+            set(entry)
+            != {
+                "provider",
+                "model",
+                "reasoning",
+                "task",
+                "config",
+                "configSha256",
+                "jobDir",
+                "compose",
+                "composeSha256",
+                "relayImageSha256",
+                "limits",
+            }
+            or provider not in probe_profiles
+            or provider in seen
+            or entry.get("config") != f"live-route-probes/{provider}.yaml"
+            or entry.get("jobDir") != f"live-route-jobs/{provider}/{job_name}"
+            or entry.get("compose")
+            != f"overlays/relay.{provider}.live-route-probe.compose.yaml"
+            or (entry.get("model"), entry.get("reasoning")) != probe_profiles[provider]
+            or entry.get("task") != LIVE_ROUTE_PROBE_TASK
+            or entry.get("relayImageSha256") != relay_images.get("production")
+            or entry.get("limits") != dict(LIVE_ROUTE_PROBE_LIMITS)
+            or config_path is None
+            or compose_path is None
+            or digest_bytes(_regular_bytes(config_path)) != entry.get("configSha256")
+            or digest_bytes(_regular_bytes(compose_path)) != entry.get("composeSha256")
+            or _yaml(_regular_bytes(config_path), "live-route probe config")
+            != live_route_probe_config(
+                run_dir,
+                binding,
+                provider,
+                entry["model"],
+                entry["reasoning"],
+                compose_path,
+                entry["composeSha256"],
+            )
+            or _safe_output_path(run_dir, entry.get("jobDir")) is None
+        ):
+            raise ValueError("live-route probe authority drifted")
+        seen.add(provider)
+
+
+def _validate_bound_preflight(
+    run_dir: Path, binding: dict[str, Any], record: dict[str, Any]
+) -> None:
+    matches: list[dict[str, Any]] = []
+    production = record.get("preflight")
+    if isinstance(production, dict) and record.get("preflightSha256") == digest_bytes(
+        canonical_json(production)
+    ):
+        matches.append(production)
+    fixture_path = run_dir / "fixtures" / "preflight.json"
+    if fixture_path.is_file() and not fixture_path.is_symlink():
+        matches.append(_unique_json(_regular_bytes(fixture_path), "preflight"))
+    matches = [
+        candidate
+        for candidate in matches
+        if digest_bytes(canonical_json(candidate)) == binding["preflight_sha256"]
+    ]
+    if len(matches) != 1:
+        raise ValueError("bound preflight is unavailable")
+    preflight = matches[0]
+    if (
+        set(preflight) != PREFLIGHT_KEYS
+        or preflight
+        != {
+            "schemaVersion": 1,
+            "experimentId": binding["experiment_id"],
+            "replicationId": binding["replication_id"],
+            "sourceRevision": binding["source_revision"],
+            "experimentManifestSha256": binding["experiment_manifest_sha256"],
+            "relayBuildSha256": binding["relay_build_sha256"],
+            "relayImageSha256": binding["relay_image_sha256"],
+            "taskSnapshotsSha256": binding["task_snapshots_sha256"],
+            "cleanTree": True,
+            "createdAt": preflight.get("createdAt"),
+        }
+        or not isinstance(preflight["createdAt"], str)
+        or not is_strict_int(preflight["schemaVersion"])
+    ):
+        raise ValueError("bound preflight drifted")
 
 
 def _validate_prepared_source(
@@ -575,7 +710,6 @@ def _validate_prepared_source(
             root.parent / CODEX_RUNTIME_PREPARED_RELATIVE,
             runtime_spec,
         )
-        matches: list[dict[str, Any]] = []
         record = _unique_json(
             _regular_bytes(root.parent / "run-record.json"), "run record"
         )
@@ -593,6 +727,7 @@ def _validate_prepared_source(
                 "taskSnapshots",
                 "codexRuntime",
                 "providers",
+                "liveRouteProbes",
             }
             or not is_strict_int(record.get("schemaVersion"))
             or record.get("schemaVersion") != 1
@@ -604,44 +739,18 @@ def _validate_prepared_source(
             != _relay_image_tags(root.parent, binding["source_revision"])
             or record.get("codexRuntime") != runtime_receipt
             or not isinstance(providers, list)
+            or not isinstance(record.get("liveRouteProbes"), list)
         ):
             raise ValueError("run record drifted")
+        _validate_live_route_probe_authorities(
+            root.parent,
+            binding,
+            manifest,
+            record["liveRouteProbes"],
+            relay_images,
+        )
         _assert_runtime_gate(manifest, record, binding)
-        production = record.get("preflight")
-        if isinstance(production, dict) and record.get(
-            "preflightSha256"
-        ) == digest_bytes(canonical_json(production)):
-            matches.append(production)
-        fixture_path = root.parent / "fixtures" / "preflight.json"
-        if fixture_path.is_file() and not fixture_path.is_symlink():
-            matches.append(_unique_json(_regular_bytes(fixture_path), "preflight"))
-        matches = [
-            candidate
-            for candidate in matches
-            if digest_bytes(canonical_json(candidate)) == binding["preflight_sha256"]
-        ]
-        if len(matches) != 1:
-            raise ValueError("bound preflight is unavailable")
-        preflight = matches[0]
-        if (
-            set(preflight) != PREFLIGHT_KEYS
-            or preflight
-            != {
-                "schemaVersion": 1,
-                "experimentId": binding["experiment_id"],
-                "replicationId": binding["replication_id"],
-                "sourceRevision": binding["source_revision"],
-                "experimentManifestSha256": binding["experiment_manifest_sha256"],
-                "relayBuildSha256": binding["relay_build_sha256"],
-                "relayImageSha256": binding["relay_image_sha256"],
-                "taskSnapshotsSha256": binding["task_snapshots_sha256"],
-                "cleanTree": True,
-                "createdAt": preflight.get("createdAt"),
-            }
-            or not isinstance(preflight["createdAt"], str)
-            or not is_strict_int(preflight["schemaVersion"])
-        ):
-            raise ValueError("bound preflight drifted")
+        _validate_bound_preflight(root.parent, binding, record)
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise RuntimeError("Prepared source identity could not be verified.") from error
     if (
@@ -671,7 +780,10 @@ def _expected_overlay(
     file_hashes: dict[str, str],
     *,
     fixture: bool = False,
+    live_route_probe: bool = False,
 ) -> dict[str, Any]:
+    if fixture and live_route_probe:
+        raise RuntimeError("fixture and live-route policies are mutually exclusive")
     relative = f"benchmarks/terminal_bench/relay.{provider}.compose.yaml"
     data = _regular_bytes(root / relative)
     if digest_bytes(data) != file_hashes.get(relative):
@@ -696,6 +808,9 @@ def _expected_overlay(
     relay.pop("build", None)
     relay["image"] = image
     relay["pull_policy"] = "never"
+    if live_route_probe:
+        relay["command"] = live_route_probe_relay_command(relay.get("command"))
+        document = live_route_probe_networks(document)
     return document
 
 
@@ -716,11 +831,11 @@ def _validate_compose_authority(
     record: dict[str, Any],
     root: Path,
     file_hashes: dict[str, str],
-) -> None:
+) -> str:
     output = root.parent
     absolute = Path(os.path.abspath(path))
     image = binding["relay_image_sha256"]
-    candidates: list[dict[str, Any]] = []
+    candidates: list[tuple[str, dict[str, Any]]] = []
     for entry in record["providers"]:
         if not isinstance(entry, dict) or entry.get("provider") not in {
             "deepseek",
@@ -733,7 +848,52 @@ def _validate_compose_authority(
             and entry.get("relayImageSha256") == image
         ):
             candidates.append(
-                _expected_overlay(root, entry["provider"], image, file_hashes)
+                (
+                    "pilot",
+                    _expected_overlay(root, entry["provider"], image, file_hashes),
+                )
+            )
+    for entry in record["liveRouteProbes"]:
+        if not isinstance(entry, dict) or entry.get("provider") not in {
+            "deepseek",
+            "zai",
+        }:
+            continue
+        if (
+            set(entry)
+            != {
+                "provider",
+                "model",
+                "reasoning",
+                "task",
+                "config",
+                "configSha256",
+                "jobDir",
+                "compose",
+                "composeSha256",
+                "relayImageSha256",
+                "limits",
+            }
+            or entry.get("task") != LIVE_ROUTE_PROBE_TASK
+            or entry.get("limits") != dict(LIVE_ROUTE_PROBE_LIMITS)
+        ):
+            raise RuntimeError("live-route probe authority drifted")
+        if (
+            _safe_output_path(output, entry.get("compose")) == absolute
+            and entry.get("composeSha256") == digest
+            and entry.get("relayImageSha256") == image
+        ):
+            candidates.append(
+                (
+                    "live-route-probe",
+                    _expected_overlay(
+                        root,
+                        entry["provider"],
+                        image,
+                        file_hashes,
+                        live_route_probe=True,
+                    ),
+                )
             )
     fixture = output / "overlays" / "relay.fixture.compose.yaml"
     if (
@@ -742,12 +902,16 @@ def _validate_compose_authority(
         and digest_bytes(_regular_bytes(fixture)) == digest
     ):
         candidates.append(
-            _expected_overlay(root, "deepseek", image, file_hashes, fixture=True)
+            (
+                "fixture",
+                _expected_overlay(root, "deepseek", image, file_hashes, fixture=True),
+            )
         )
-    if len(candidates) != 1 or _yaml(data, "pinned relay Compose") != candidates[0]:
+    if len(candidates) != 1 or _yaml(data, "pinned relay Compose") != candidates[0][1]:
         raise RuntimeError(
             "Pinned relay Compose is not authorized by the prepared run."
         )
+    return candidates[0][0]
 
 
 def _validated_compose_bytes(
@@ -762,12 +926,41 @@ def _validated_compose_bytes(
     _reject_external_references(document)
     services = document.get("services")
     secrets = document.get("secrets")
+    networks = document.get("networks")
+    main = services.get("main") if isinstance(services, dict) else None
     relay = services.get(RELAY_SERVICE) if isinstance(services, dict) else None
+    probe_networks = {
+        LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {"internal": True},
+        LIVE_ROUTE_PROBE_EGRESS_NETWORK: {"internal": False},
+    }
+    probe_topology = (
+        networks == probe_networks
+        and isinstance(main, dict)
+        and main.get("networks") == {LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {}}
+        and isinstance(relay, dict)
+        and relay.get("networks")
+        == {
+            LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {"aliases": [RELAY_SERVICE]},
+            LIVE_ROUTE_PROBE_EGRESS_NETWORK: {},
+        }
+    )
+    plain_topology = (
+        networks is None
+        and isinstance(main, dict)
+        and "networks" not in main
+        and isinstance(relay, dict)
+        and "networks" not in relay
+    )
     if (
-        set(document) != {"services", "secrets"}
+        set(document)
+        not in ({"services", "secrets"}, {"services", "secrets", "networks"})
         or not isinstance(services, dict)
         or set(services) != {"main", RELAY_SERVICE}
+        or not isinstance(main, dict)
         or not isinstance(relay, dict)
+        or "network_mode" in main
+        or "network_mode" in relay
+        or not (plain_topology or probe_topology)
         or "build" in relay
         or relay.get("image") != run_binding["relay_image_sha256"]
         or relay.get("pull_policy") != "never"
@@ -780,19 +973,88 @@ def _validated_compose_bytes(
 
 def _relay_only(data: bytes) -> bytes:
     document = _yaml(data, "pinned relay Compose")
-    return canonical_json(
-        {
-            "services": {RELAY_SERVICE: document["services"][RELAY_SERVICE]},
-            "secrets": {_SECRET: document["secrets"][_SECRET]},
-        }
-    )
+    result = {
+        "services": {RELAY_SERVICE: document["services"][RELAY_SERVICE]},
+        "secrets": {_SECRET: document["secrets"][_SECRET]},
+    }
+    if "networks" in document:
+        result["networks"] = document["networks"]
+    return canonical_json(result)
 
 
-def _secret_source(secret: dict[str, Any]) -> Path:
+def _secret_source(secret: dict[str, Any], *, durable: bool = False) -> Path:
     source = secret.get("file")
     if not isinstance(source, str) or not source:
         raise ValueError("Resolved provider secret must be file-backed.")
-    return Path(source).expanduser().resolve(strict=False)
+    raw = Path(source).expanduser()
+    if not durable:
+        return raw.resolve(strict=False)
+    absolute = Path(os.path.abspath(raw))
+    try:
+        resolved = absolute.resolve(strict=True)
+        metadata = absolute.lstat()
+        parent_metadata = absolute.parent.lstat()
+        ancestor_metadata = [parent.lstat() for parent in absolute.parent.parents]
+    except OSError as error:
+        raise ValueError("Live provider secret is unavailable.") from error
+    harbor_gid = os.getegid()
+    if (
+        sys.platform != "linux"
+        or not raw.is_absolute()
+        or resolved != absolute
+        or harbor_gid == _RELAY_RUNTIME_GID
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != harbor_gid
+        or stat.S_IMODE(metadata.st_mode) != 0o440
+        or metadata.st_nlink != 1
+        or not 0 < metadata.st_size <= _MAX_CREDENTIAL_BYTES
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != 0
+        or parent_metadata.st_gid != harbor_gid
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o750
+        or any(
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+            for info in ancestor_metadata
+        )
+    ):
+        raise ValueError(
+            "Live provider secret must be root:<Harbor gid> 0440 beneath a "
+            "root:<Harbor gid> 0750 directory; Harbor gid 1000 is forbidden."
+        )
+    return resolved
+
+
+def _credential_identity(path: Path) -> tuple[int, int, int, int, str]:
+    path = _secret_source({"file": str(path)}, durable=True)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        info = os.fstat(descriptor)
+        data = os.read(descriptor, _MAX_CREDENTIAL_BYTES + 1)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != os.getegid()
+            or stat.S_IMODE(info.st_mode) != 0o440
+            or info.st_nlink != 1
+            or not 0 < len(data) <= _MAX_CREDENTIAL_BYTES
+            or len(data) != info.st_size
+        ):
+            raise ValueError("Live provider secret changed or exceeds its bound.")
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            digest_bytes(data),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _path_exposes(secret: Path, source: Any) -> bool:
@@ -833,7 +1095,11 @@ def _daemon_sockets(environment: dict[str, str]) -> tuple[Path, ...]:
 
 
 def _resolved_relay(
-    actual: dict[str, Any], expected: dict[str, Any], binding: dict[str, Any]
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    durable_secret: bool = False,
 ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
     services = actual.get("services")
     expected_services = expected.get("services")
@@ -849,6 +1115,8 @@ def _resolved_relay(
     expected_secret = (
         expected_secrets.get(_SECRET) if isinstance(expected_secrets, dict) else None
     )
+    networks = actual.get("networks", {})
+    expected_networks = expected.get("networks", {})
     if (
         not isinstance(services, dict)
         or not isinstance(expected_services, dict)
@@ -861,6 +1129,9 @@ def _resolved_relay(
         or not isinstance(expected_secret, dict)
         or secret != expected_secret
         or set(secrets) != {_SECRET}
+        or not isinstance(networks, dict)
+        or not isinstance(expected_networks, dict)
+        or networks != expected_networks
         or relay.get("image") != binding["relay_image_sha256"]
         or _has_docker_socket(actual)
     ):
@@ -869,7 +1140,7 @@ def _resolved_relay(
     configs = actual.get("configs", {})
     if not isinstance(volumes, dict) or not isinstance(configs, dict) or configs:
         raise TypeError("Resolved top-level mounts are invalid.")
-    secret_path = _secret_source(secret)
+    secret_path = _secret_source(secret, durable=durable_secret)
     return services, secret_path, volumes
 
 
@@ -1159,9 +1430,30 @@ def _assert_resolved_graph(
     protected_paths: tuple[Path, ...] = (),
     allowed_binds: frozenset[tuple[Path, str, bool]] = frozenset(),
     build_root: Path | None = None,
-) -> None:
+    durable_secret: bool = False,
+) -> Path:
     protected_paths = protected_paths or _daemon_sockets({})
-    services, secret_path, volumes = _resolved_relay(actual, expected, binding)
+    services, secret_path, volumes = _resolved_relay(
+        actual, expected, binding, durable_secret=durable_secret
+    )
+    network_names = set(actual.get("networks", {}))
+    probe_networks = {
+        LIVE_ROUTE_PROBE_INTERNAL_NETWORK,
+        LIVE_ROUTE_PROBE_EGRESS_NETWORK,
+    }
+    if network_names & probe_networks:
+        main = services.get("main")
+        relay = services.get(RELAY_SERVICE)
+        main_networks = main.get("networks") if isinstance(main, dict) else None
+        relay_networks = relay.get("networks") if isinstance(relay, dict) else None
+        if (
+            network_names != probe_networks
+            or not isinstance(main_networks, dict)
+            or set(main_networks) != {LIVE_ROUTE_PROBE_INTERNAL_NETWORK}
+            or not isinstance(relay_networks, dict)
+            or set(relay_networks) != probe_networks
+        ):
+            raise ValueError("Live-route probe network isolation drifted.")
     for name, service in services.items():
         if name == RELAY_SERVICE or not isinstance(service, dict):
             continue
@@ -1175,6 +1467,7 @@ def _assert_resolved_graph(
             allowed_binds,
             build_root,
         )
+    return secret_path
 
 
 def _sanitized_compose_env(environment: dict[str, str]) -> dict[str, str]:
@@ -1249,7 +1542,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         if len(paths) != 1:
             raise ValueError("Pinned relay environment binding is invalid.")
         data = _validated_compose_bytes(Path(paths[0]), relay_compose_sha256, binding)
-        _validate_compose_authority(
+        relay_role = _validate_compose_authority(
             data,
             Path(paths[0]),
             relay_compose_sha256,
@@ -1260,11 +1553,14 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         )
         seed = _sealed_memfd(data)  # Linux gate, before Harbor can invoke Docker.
         self._run_binding = binding
+        self._relay_role = relay_role
         self._relay_compose_bytes = data
         self._seed_fd = seed
         self._source_fds: list[int] = []
         self._full_fd = -1
         self._full_compose_sha256: str | None = None
+        self._provider_secret_path: Path | None = None
+        self._provider_credential_identity: tuple[int, int, int, int, str] | None = None
         self._freeze_lock = asyncio.Lock()
         self._compose_environment: dict[str, str] | None = None
         self._task_runtime: tuple[str, Path, dict[str, str], dict[str, str]] | None = (
@@ -1286,6 +1582,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
                 record["relayImages"],
                 task_runtime,
                 task_snapshots,
+                relay_role,
             )
         except BaseException:
             os.close(seed)
@@ -1560,7 +1857,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
                     expected = await self._render([expected_fd])
                 finally:
                     os.close(expected_fd)
-                _assert_resolved_graph(
+                secret_path = _assert_resolved_graph(
                     actual,
                     expected,
                     self._run_binding,
@@ -1568,7 +1865,13 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
                     _daemon_sockets(ambient),
                     allowed_binds,
                     self.environment_dir.resolve(strict=True),
+                    durable_secret=self._relay_role != "fixture",
                 )
+                if self._relay_role != "fixture":
+                    self._provider_secret_path = secret_path
+                    self._provider_credential_identity = _credential_identity(
+                        secret_path
+                    )
                 await self._validate_local_relay_image()
                 await self._pin_task_runtime(actual)
                 full_compose = canonical_json(actual)
@@ -1604,6 +1907,18 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         await self._freeze_compose()
         assert self._compose_environment is not None
         command = _strip_local_rmi(command)
+        if (
+            self._relay_role != "fixture"
+            and command
+            and command[0] in {"create", "run", "start", "up"}
+            and (
+                self._provider_secret_path is None
+                or self._provider_credential_identity is None
+                or _credential_identity(self._provider_secret_path)
+                != self._provider_credential_identity
+            )
+        ):
+            raise RuntimeError("Live provider secret changed before container start.")
         full_command = [
             *self._base_command([_memfd_path(self._full_fd)]),
             *command,
@@ -1683,6 +1998,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
         if not is_digest(full_compose):
             raise RuntimeError("The sealed Compose identity is unavailable.")
         binding = self._run_binding
+        credential = self._provider_credential_identity
         task, task_digest, task_checksum = task_identity
         return {
             "schemaVersion": 1,
@@ -1693,6 +2009,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             "preflightSha256": binding["preflight_sha256"],
             "runBindingSha256": digest_bytes(canonical_json(binding)),
             "relayImageSha256": binding["relay_image_sha256"],
+            "providerCredentialSha256": credential[4] if credential else None,
             "fullComposeSha256": full_compose,
             "taskId": task,
             "taskDigest": task_digest,

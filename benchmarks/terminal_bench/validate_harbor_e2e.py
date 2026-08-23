@@ -208,6 +208,7 @@ def _assert_cleanup_receipt(
         "runBindingSha256": "sha256:"
         + hashlib.sha256(canonical_json(run_binding)).hexdigest(),
         "relayImageSha256": run_binding["relay_image_sha256"],
+        "providerCredentialSha256": None,
         "fullComposeSha256": receipt.get("fullComposeSha256"),
         "taskId": None,
         "taskDigest": None,

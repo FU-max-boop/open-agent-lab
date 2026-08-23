@@ -23,20 +23,28 @@ from benchmarks.terminal_bench.codex_runtime import (
 )
 from benchmarks.terminal_bench.experiment_contract import (
     EXPERIMENT_ID,
+    LIVE_ROUTE_PROBE_EGRESS_NETWORK,
+    LIVE_ROUTE_PROBE_INTERNAL_NETWORK,
+    LIVE_ROUTE_PROBE_LIMITS,
+    LIVE_ROUTE_PROBE_TASK,
     canonical_json,
     digest_bytes,
+    live_route_probe_config,
+    live_route_probe_networks,
 )
 from benchmarks.terminal_bench.harbor_environment import (
     PinnedRelayDockerEnvironment,
     _allowed_main_binds,
     _assert_resolved_graph,
     _assert_runtime_gate,
+    _credential_identity,
     _live_task_authority,
     _memfd_path,
     _minimal_compose_env,
     _relay_image_tags,
     _sanitized_compose_env,
     _sealed_memfd,
+    _secret_source,
     _strip_local_rmi,
     _task_hashes,
     _validate_compose_authority,
@@ -96,6 +104,8 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
         environment._keep_containers = False
         environment._full_fd = descriptor
         environment._full_compose_sha256 = "sha256:" + "f" * 64
+        environment._provider_secret_path = None
+        environment._provider_credential_identity = None
         environment._source_fds = []
         environment._seed_fd = -1
         environment._run_binding = _binding()
@@ -143,6 +153,39 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             path.symlink_to(target)
             with self.assertRaisesRegex(ValueError, "symlinks"):
                 _validated_compose_bytes(path, digest, binding)
+
+    def test_probe_compose_requires_the_exact_dual_network(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            path, _ = self._compose(root)
+            document = live_route_probe_networks(yaml.safe_load(path.read_text()))
+            text = yaml.safe_dump(document, sort_keys=False)
+            path.write_text(text)
+            digest = digest_bytes(text.encode())
+            self.assertEqual(
+                _validated_compose_bytes(path, digest, _binding()), text.encode()
+            )
+
+            for mutate in ("main-egress", "relay-no-egress", "external-network"):
+                changed = yaml.safe_load(text)
+                if mutate == "main-egress":
+                    changed["services"]["main"]["networks"][
+                        LIVE_ROUTE_PROBE_EGRESS_NETWORK
+                    ] = {}
+                elif mutate == "relay-no-egress":
+                    del changed["services"]["open-agent-lab-relay"]["networks"][
+                        LIVE_ROUTE_PROBE_EGRESS_NETWORK
+                    ]
+                else:
+                    changed["networks"][LIVE_ROUTE_PROBE_INTERNAL_NETWORK][
+                        "external"
+                    ] = True
+                changed_text = yaml.safe_dump(changed, sort_keys=False)
+                path.write_text(changed_text)
+                with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                    _validated_compose_bytes(
+                        path, digest_bytes(changed_text.encode()), _binding()
+                    )
 
     def test_only_run_local_logs_and_frozen_runtime_mounts_are_authorized(
         self,
@@ -246,6 +289,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 relay_images,
                 {"terminal-bench/example": authority},
                 {"terminal-bench/example": snapshot},
+                "pilot",
             )
             self.assertIsNotNone(selected)
             pinned = object.__new__(PinnedRelayDockerEnvironment)
@@ -288,6 +332,67 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "declared image"):
                 asyncio.run(pinned._pin_task_runtime(graph))
             pinned._capture.assert_not_awaited()
+
+    def test_relay_role_cannot_cross_between_probe_and_benchmark_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw).resolve()
+            benchmark = output / "tasks" / "benchmark"
+            probe = output / "tasks" / "live-route-probe"
+            benchmark.mkdir(parents=True)
+            probe.mkdir()
+            relay_images = {
+                "production": "sha256:" + "5" * 64,
+                "providerFreeFixture": "sha256:" + "6" * 64,
+            }
+            runtime = {
+                "terminal-bench/example": {},
+                LIVE_ROUTE_PROBE_TASK: {},
+            }
+            snapshots = {
+                "terminal-bench/example": {"relativePath": "tasks/benchmark"},
+                LIVE_ROUTE_PROBE_TASK: {"relativePath": "tasks/live-route-probe"},
+            }
+            self.assertEqual(
+                _live_task_authority(
+                    output,
+                    probe,
+                    relay_images["production"],
+                    relay_images,
+                    runtime,
+                    snapshots,
+                    "live-route-probe",
+                )[0],
+                LIVE_ROUTE_PROBE_TASK,
+            )
+            self.assertEqual(
+                _live_task_authority(
+                    output,
+                    benchmark,
+                    relay_images["production"],
+                    relay_images,
+                    runtime,
+                    snapshots,
+                    "pilot",
+                )[0],
+                "terminal-bench/example",
+            )
+            for path, role in (
+                (benchmark, "live-route-probe"),
+                (probe, "pilot"),
+            ):
+                with (
+                    self.subTest(path=path.name, role=role),
+                    self.assertRaisesRegex(ValueError, "one prepared task"),
+                ):
+                    _live_task_authority(
+                        output,
+                        path,
+                        relay_images["production"],
+                        relay_images,
+                        runtime,
+                        snapshots,
+                        role,
+                    )
 
     def test_task_snapshot_is_rechecked_around_task_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -441,6 +546,249 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
         drifted["services"]["open-agent-lab-relay"] = {**relay, "privileged": True}
         with self.assertRaisesRegex(ValueError, "drifted"):
             _assert_resolved_graph(drifted, expected, binding)
+
+    def test_resolved_probe_graph_keeps_main_off_the_egress_network(self) -> None:
+        binding = _binding()
+        networks = {
+            LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {
+                "name": "probe_internal",
+                "internal": True,
+            },
+            LIVE_ROUTE_PROBE_EGRESS_NETWORK: {"name": "probe_egress"},
+        }
+        relay = {
+            "image": binding["relay_image_sha256"],
+            "pull_policy": "never",
+            "secrets": [{"source": "provider-api-key", "target": "provider-api-key"}],
+            "networks": {
+                LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {
+                    "aliases": ["open-agent-lab-relay"]
+                },
+                LIVE_ROUTE_PROBE_EGRESS_NETWORK: {},
+            },
+        }
+        secret = {"file": "/private/key", "name": "probe_provider-api-key"}
+        expected = {
+            "services": {"open-agent-lab-relay": relay},
+            "secrets": {"provider-api-key": secret},
+            "networks": networks,
+        }
+        actual = {
+            "services": {
+                "main": {
+                    "image": "task",
+                    "networks": {LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {}},
+                },
+                "open-agent-lab-relay": relay,
+            },
+            "secrets": {"provider-api-key": secret},
+            "networks": networks,
+        }
+
+        _assert_resolved_graph(actual, expected, binding)
+
+        leaked = json.loads(json.dumps(actual))
+        leaked["services"]["main"]["networks"][LIVE_ROUTE_PROBE_EGRESS_NETWORK] = {}
+        with self.assertRaisesRegex(ValueError, "network isolation"):
+            _assert_resolved_graph(leaked, expected, binding)
+
+    def test_live_provider_secret_requires_protected_harbor_group_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw).resolve() / "provider-key"
+            path.write_text("disposable-key")
+            harbor_gid = 121
+            valid = SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o440,
+                st_uid=0,
+                st_gid=harbor_gid,
+                st_nlink=1,
+                st_size=14,
+            )
+            credential_parent = SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o750,
+                st_uid=0,
+                st_gid=harbor_gid,
+            )
+            protected_ancestor = SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_uid=0,
+                st_gid=0,
+            )
+
+            with (
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.sys.platform", "linux"
+                ),
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                    return_value=harbor_gid,
+                ),
+                patch.object(
+                    Path,
+                    "lstat",
+                    side_effect=[
+                        valid,
+                        credential_parent,
+                        *(protected_ancestor for _ in path.parent.parents),
+                    ],
+                ),
+            ):
+                self.assertEqual(
+                    _secret_source({"file": str(path)}, durable=True), path
+                )
+
+            for changed in (
+                {"st_uid": 501},
+                {"st_gid": 0},
+                {"st_mode": stat.S_IFREG | 0o400},
+                {"st_mode": stat.S_IFREG | 0o444},
+                {"st_mode": stat.S_IFDIR | 0o440},
+                {"st_nlink": 2},
+                {"st_size": 0},
+            ):
+                metadata = SimpleNamespace(**{**vars(valid), **changed})
+
+                with (
+                    self.subTest(changed=changed),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_environment.sys.platform",
+                        "linux",
+                    ),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                        return_value=harbor_gid,
+                    ),
+                    patch.object(
+                        Path,
+                        "lstat",
+                        side_effect=[
+                            metadata,
+                            credential_parent,
+                            *(protected_ancestor for _ in path.parent.parents),
+                        ],
+                    ),
+                    self.assertRaisesRegex(ValueError, "0440"),
+                ):
+                    _secret_source({"file": str(path)}, durable=True)
+
+            for changed in (
+                {"st_uid": 501},
+                {"st_gid": 0},
+                {"st_mode": stat.S_IFDIR | 0o755},
+                {"st_mode": stat.S_IFDIR | 0o770},
+            ):
+                unsafe_parent = SimpleNamespace(
+                    **{**vars(credential_parent), **changed}
+                )
+                with (
+                    self.subTest(parent=changed),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_environment.sys.platform",
+                        "linux",
+                    ),
+                    patch(
+                        "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                        return_value=harbor_gid,
+                    ),
+                    patch.object(
+                        Path,
+                        "lstat",
+                        side_effect=[
+                            valid,
+                            unsafe_parent,
+                            *(protected_ancestor for _ in path.parent.parents),
+                        ],
+                    ),
+                    self.assertRaisesRegex(ValueError, "0750"),
+                ):
+                    _secret_source({"file": str(path)}, durable=True)
+
+            writable_ancestor = SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o777,
+                st_uid=0,
+                st_gid=0,
+            )
+            with (
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.sys.platform", "linux"
+                ),
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                    return_value=harbor_gid,
+                ),
+                patch.object(
+                    Path,
+                    "lstat",
+                    side_effect=[
+                        valid,
+                        credential_parent,
+                        *(writable_ancestor for _ in path.parent.parents),
+                    ],
+                ),
+                self.assertRaisesRegex(ValueError, "0750 directory"),
+            ):
+                _secret_source({"file": str(path)}, durable=True)
+
+            with (
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.sys.platform", "linux"
+                ),
+                patch(
+                    "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                    return_value=1000,
+                ),
+                patch.object(
+                    Path,
+                    "lstat",
+                    side_effect=[
+                        valid,
+                        credential_parent,
+                        *(protected_ancestor for _ in path.parent.parents),
+                    ],
+                ),
+                self.assertRaisesRegex(ValueError, "gid 1000 is forbidden"),
+            ):
+                _secret_source({"file": str(path)}, durable=True)
+
+    def test_live_provider_identity_hashes_complete_validated_bytes(self) -> None:
+        secret = b"provider-key-with-final-newline\n"
+        info = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o440,
+            st_uid=0,
+            st_gid=121,
+            st_nlink=1,
+            st_size=len(secret),
+            st_dev=17,
+            st_ino=23,
+            st_mtime_ns=31,
+        )
+        path = Path("/run/open-agent-lab/provider-key")
+        with (
+            patch(
+                "benchmarks.terminal_bench.harbor_environment._secret_source",
+                return_value=path,
+            ),
+            patch(
+                "benchmarks.terminal_bench.harbor_environment.os.getegid",
+                return_value=121,
+            ),
+            patch(
+                "benchmarks.terminal_bench.harbor_environment.os.open", return_value=9
+            ),
+            patch(
+                "benchmarks.terminal_bench.harbor_environment.os.fstat",
+                return_value=info,
+            ),
+            patch(
+                "benchmarks.terminal_bench.harbor_environment.os.read",
+                return_value=secret,
+            ),
+            patch("benchmarks.terminal_bench.harbor_environment.os.close") as close,
+        ):
+            identity = _credential_identity(path)
+
+        self.assertEqual(identity, (17, 23, len(secret), 31, digest_bytes(secret)))
+        close.assert_called_once_with(9)
 
     def test_compose_control_environment_and_cleanup_are_fixed(self) -> None:
         observed = _sanitized_compose_env(
@@ -652,6 +1000,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                     "preflightSha256": "sha256:" + "e" * 64,
                     "runBindingSha256": digest_bytes(canonical_json(_binding())),
                     "relayImageSha256": "sha256:" + "d" * 64,
+                    "providerCredentialSha256": None,
                     "fullComposeSha256": "sha256:" + "f" * 64,
                     "taskId": None,
                     "taskDigest": None,
@@ -835,14 +1184,18 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                         "relayImageSha256": binding["relay_image_sha256"],
                     }
                 ],
+                "liveRouteProbes": [],
             }
             hashes = {
                 "benchmarks/terminal_bench/relay.deepseek.compose.yaml": digest_bytes(
                     source_path.read_bytes()
                 )
             }
-            _validate_compose_authority(
-                data, overlay_path, digest, binding, record, root, hashes
+            self.assertEqual(
+                _validate_compose_authority(
+                    data, overlay_path, digest, binding, record, root, hashes
+                ),
+                "pilot",
             )
             overlay["services"]["open-agent-lab-relay"]["command"] = ["exfiltrate"]
             with self.assertRaisesRegex(RuntimeError, "not authorized"):
@@ -908,6 +1261,18 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                     "codexRuntime": codex_runtime_spec(),
                 },
                 "taskRuntimeBindings": runtime,
+                "pairedConfigs": [
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-v4-pro",
+                        "reasoningEffort": "high",
+                    },
+                    {
+                        "provider": "zai",
+                        "model": "glm-5.3",
+                        "reasoningEffort": "max",
+                    },
+                ],
             }
             manifest_path = module.with_name("verify-instruction-v1.experiment.json")
             manifest_path.write_bytes(canonical_json(manifest))
@@ -965,6 +1330,54 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 "createdAt": "2026-08-22T00:00:00Z",
             }
             binding["preflight_sha256"] = digest_bytes(canonical_json(preflight))
+            probes = []
+            for provider, model, reasoning in (
+                ("deepseek", "deepseek-v4-pro", "high"),
+                ("zai", "glm-5.3", "max"),
+            ):
+                config = output / "live-route-probes" / f"{provider}.yaml"
+                compose = (
+                    output
+                    / "overlays"
+                    / f"relay.{provider}.live-route-probe.compose.yaml"
+                )
+                config.parent.mkdir(parents=True, exist_ok=True)
+                compose.parent.mkdir(parents=True, exist_ok=True)
+                compose.write_text("services: {}\n")
+                config.write_text(
+                    yaml.safe_dump(
+                        live_route_probe_config(
+                            output,
+                            binding,
+                            provider,
+                            model,
+                            reasoning,
+                            compose,
+                            digest_bytes(compose.read_bytes()),
+                        ),
+                        sort_keys=False,
+                    )
+                )
+                probes.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "reasoning": reasoning,
+                        "task": LIVE_ROUTE_PROBE_TASK,
+                        "config": f"live-route-probes/{provider}.yaml",
+                        "configSha256": digest_bytes(config.read_bytes()),
+                        "jobDir": (
+                            f"live-route-jobs/{provider}/open-agent-lab-"
+                            f"{binding['replication_id']}-{provider}-live-route-probe"
+                        ),
+                        "compose": (
+                            f"overlays/relay.{provider}.live-route-probe.compose.yaml"
+                        ),
+                        "composeSha256": digest_bytes(compose.read_bytes()),
+                        "relayImageSha256": binding["relay_image_sha256"],
+                        "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
+                    }
+                )
             record = {
                 "schemaVersion": 1,
                 "preflight": preflight,
@@ -977,6 +1390,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 "taskSnapshots": snapshots,
                 "codexRuntime": {"verified": True},
                 "providers": [],
+                "liveRouteProbes": probes,
             }
             (output / "run-record.json").write_bytes(canonical_json(record) + b"\n")
             with (

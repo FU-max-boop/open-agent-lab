@@ -65,6 +65,72 @@ test("relay build identity is verified before secret-dependent startup", async (
   }
 });
 
+test("relay limit flags reach the native relay and retain established defaults", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-relay-"));
+  try {
+    const buildFile = join(directory, "build-id");
+    const sidecar = join(directory, "provider-metadata.ndjson");
+    const buildId = `sha256:${"f".repeat(64)}`;
+    const baseArgs = [
+      "--provider",
+      "test",
+      "--model",
+      "test-model",
+      "--build-id-file",
+      buildFile,
+      "--output",
+      sidecar,
+      "--ttl-seconds",
+      "0",
+    ];
+    const profiles = {
+      test: {
+        envKey: "TEST_API_KEY",
+        endpoint: "http://127.0.0.1:9/responses",
+        models: ["test-model"],
+      },
+    } as const;
+    const authorization = {
+      buildId,
+      readyPath: `${sidecar}.bootstrap-ready`,
+      provider: "test",
+      model: "test-model",
+      capabilityId: "e".repeat(64),
+    } as const;
+    await writeFile(buildFile, `${buildId}\n`);
+
+    for (const [flag, nativeName] of [
+      ["--max-request-bytes", "maxRequestBytes"],
+      ["--max-response-bytes", "maxResponseBytes"],
+      ["--connect-timeout-ms", "connectTimeoutMs"],
+      ["--idle-timeout-ms", "idleTimeoutMs"],
+    ] as const) {
+      await assert.rejects(
+        runRelayCommand(
+          [...baseArgs, flag, "0"],
+          { TEST_API_KEY: "provider-secret", OAL_EXPECTED_RELAY_BUILD_ID: buildId },
+          () => assert.fail("an invalid relay limit must fail before startup"),
+          profiles,
+          authorization,
+        ),
+        new RegExp(`${nativeName} must be positive`, "u"),
+      );
+    }
+
+    const source = await readFile(new URL("../src/relay-command.ts", import.meta.url), "utf8");
+    for (const declaration of [
+      'maxRequestBytes: integer(args, "--max-request-bytes", 64 * 1024 * 1024),',
+      'maxResponseBytes: integer(args, "--max-response-bytes", 64 * 1024 * 1024),',
+      'connectTimeoutMs: integer(args, "--connect-timeout-ms", 30_000),',
+      'idleTimeoutMs: integer(args, "--idle-timeout-ms", 300_000),',
+    ]) {
+      assert.ok(source.includes(declaration), `missing relay default contract: ${declaration}`);
+    }
+  } finally {
+    await rm(directory, { recursive: true });
+  }
+});
+
 test("relay authorization gates all secret-dependent startup", async () => {
   const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-relay-"));
   try {
