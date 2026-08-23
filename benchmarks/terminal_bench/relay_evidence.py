@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -598,8 +599,7 @@ def _validate_lifecycles(
         "transport.responses.closed",
     )
     request_ids: set[str] = set()
-    provider_request_ids: set[str] = set()
-    response_ids: set[str] = set()
+    provider_response_identities: list[tuple[str, str | None, str | None]] = []
     for offset in range(0, len(records), 3):
         ordinal = offset // 3 + 1
         group = records[offset : offset + 3]
@@ -630,15 +630,37 @@ def _validate_lifecycles(
             raise ValueError(f"Invalid lifecycle at ordinal {ordinal}.")
         if not _valid_transport_measurements(group):
             raise ValueError(f"Impossible transport measurements at ordinal {ordinal}.")
-        for value, seen, label in (
-            (group[1]["providerRequestId"], provider_request_ids, "provider request"),
-            (group[2]["responseId"], response_ids, "response"),
-        ):
-            if value is None:
-                continue
-            if value in seen:
-                raise ValueError(f"Duplicate {label} identity at ordinal {ordinal}.")
-            seen.add(value)
+        provider_response_identities.append(
+            (identity[2], group[2]["providerRequestId"], group[2]["responseId"])
+        )
+    conflict = _provider_response_identity_error(provider_response_identities)
+    if conflict is not None:
+        raise ValueError(conflict)
+
+
+def _provider_response_identity_error(
+    identities: list[tuple[str, str | None, str | None]],
+) -> str | None:
+    response_ids = [
+        (provider, response)
+        for provider, _request, response in identities
+        if response is not None
+    ]
+    if len(set(response_ids)) != len(response_ids):
+        return "response IDs must be unique within each provider"
+    request_counts = Counter(
+        (provider, request)
+        for provider, request, _response in identities
+        if request is not None
+    )
+    if any(
+        response is None
+        and request is not None
+        and request_counts[(provider, request)] > 1
+        for provider, request, response in identities
+    ):
+        return "fallback provider request IDs must be unique within each provider"
+    return None
 
 
 def _validate_marker(

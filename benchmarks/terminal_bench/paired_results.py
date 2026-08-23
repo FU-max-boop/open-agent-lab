@@ -76,11 +76,15 @@ from .experiment_contract import (
 )
 from .failure_classification import classify_failure
 from .relay_evidence import _EVENT_FIELDS as _RELAY_FIELDS
-from .relay_evidence import _SEAL_FIELDS, relay_metadata
+from .relay_evidence import (
+    _SEAL_FIELDS,
+    _provider_response_identity_error,
+    relay_metadata,
+)
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:2d1722844a13d45053462a2c32eba47379b9e400f3fc6fae4a2128a22f3e8f8d"
+    "sha256:62d10b28f16d104bdb3fa7d9e76a58fa3c33338970c602c4c9753408e138c585"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -3781,30 +3785,9 @@ def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
         for item in attempts
         for identity in item["providerResponseIdentities"]
     ]
-    response_ids = [
-        (provider, response)
-        for provider, _request, response in lifecycles
-        if response is not None
-    ]
-    if len(set(response_ids)) != len(response_ids):
-        raise IntegrityError(
-            "response IDs must be unique within each provider across supplied trials"
-        )
-    request_counts = Counter(
-        (provider, request)
-        for provider, request, _response in lifecycles
-        if request is not None
-    )
-    if any(
-        response is None
-        and request is not None
-        and request_counts[(provider, request)] > 1
-        for provider, request, response in lifecycles
-    ):
-        raise IntegrityError(
-            "fallback provider request IDs must be unique within each provider "
-            "across supplied trials"
-        )
+    conflict = _provider_response_identity_error(lifecycles)
+    if conflict is not None:
+        raise IntegrityError(conflict)
 
 
 def _build_pairs(
