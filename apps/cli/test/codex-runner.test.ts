@@ -120,9 +120,10 @@ test("runner sends prompt on stdin and keeps the key out of argv", async (t) => 
     model: "deepseek-model_catalog_json-alias",
     codexPath: fakeCodex,
   });
+  const clonedInvocation = Object.freeze({ ...invocation });
   let output = "";
   const code = await runCodexInvocation(
-    invocation,
+    clonedInvocation,
     {
       ...process.env,
       DEEPSEEK_API_KEY: "test-secret",
