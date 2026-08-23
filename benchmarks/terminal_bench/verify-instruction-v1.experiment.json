@@ -227,7 +227,7 @@
     "benchmarks/terminal_bench/codex_runtime.py": "sha256:0f9b42ca28dc8f825e8f80c2a83ae7b6b88c9cf7bba264d6172350b46f51bd5e",
     "benchmarks/terminal_bench/experiment_contract.py": "sha256:7819f0700a8d505b3e4e500f3a09caecd4db5c38e1fe1be23b2d25625d367bb9",
     "benchmarks/terminal_bench/failure_classification.py": "sha256:474a914ebe796369350b12d6ff9a6c675581b2f72c1f9ff2eaa3fac707bf79c5",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:227f5a06a97132f841fb4386af6301fcf97eee02b5e88c0702d476d02f7b63a1",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:6a33521cb7dd2a6cf10de398b21e58cbfe4edce631e17ec4ed0aa2c3b5e49811",
     "benchmarks/terminal_bench/harbor_environment.py": "sha256:dd94ff7fa6b3d4b5778ee9883d204136d047e80784df042638d9f985677533b8",
     "benchmarks/terminal_bench/live-route-probe-task/environment/.gitkeep": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",
