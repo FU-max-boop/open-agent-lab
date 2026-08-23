@@ -329,6 +329,30 @@ class RelayMetadataTest(unittest.TestCase):
                     directory / "provider-metadata.ndjson.sealed",
                 )
 
+    def test_secret_echo_rejection_is_structurally_valid_but_unwaivable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(directory, rejected_requests={"upstream_secret_echo": 1})
+            metadata = relay_metadata(
+                directory / "provider-metadata.ndjson",
+                directory / "provider-metadata.ndjson.sealed",
+            )
+            self.assertEqual(
+                metadata["publication_gate"],
+                {
+                    "ok": False,
+                    "reasons": ["relay_rejected_requests", "upstream_secret_echo"],
+                },
+            )
+            with self.assertRaisesRegex(
+                paired.IntegrityError, "relay publication gate failed"
+            ):
+                paired._relay_gate_is_complete(
+                    metadata["publication_gate"], allow_incomplete=True
+                )
+
     def test_real_rejection_still_blocks_with_a_post_terminal_disconnect(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)

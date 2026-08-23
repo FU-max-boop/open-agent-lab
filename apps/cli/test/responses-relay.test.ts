@@ -381,6 +381,36 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
       headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
     },
   ];
+  const safeResponse = {
+    id: "safe-response",
+    model: MODEL,
+    system_fingerprint: "safe-fingerprint",
+  };
+  const metadataCases = [
+    {
+      type: "response.completed",
+      response: { ...safeResponse, id: PROVIDER_BEARER },
+    },
+    {
+      type: "response.completed",
+      response: { ...safeResponse, model: `prefix-${PROVIDER_BEARER}` },
+    },
+    {
+      type: "response.completed",
+      response: { ...safeResponse, system_fingerprint: PROVIDER_BEARER },
+    },
+    {
+      type: "response.completed",
+      response: {
+        ...safeResponse,
+        headers: { "openai-model": `prefix-${PROVIDER_BEARER}` },
+      },
+    },
+    {
+      type: `probe-${PROVIDER_BEARER}`,
+      response: safeResponse,
+    },
+  ];
   let requestCount = 0;
   const upstream = await listen((_request, response) => {
     const index = requestCount;
@@ -394,14 +424,14 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
         "x-request-id": "provider-request-safe",
       }),
     });
-    const eventType = metadataCase === 1 ? `probe-${PROVIDER_BEARER}` : "response.completed";
-    const echoValues = metadataCase === 0;
-    response.end(
-      `data: {"type":"${eventType}","response":{"id":"${echoValues ? PROVIDER_BEARER : "safe-response"}","model":"${echoValues ? `prefix-${PROVIDER_BEARER}` : MODEL}","system_fingerprint":"${echoValues ? PROVIDER_BEARER : "safe"}"}}\n\n`,
-    );
+    const event = metadataCases[metadataCase] ?? {
+      type: "response.completed",
+      response: safeResponse,
+    };
+    response.end(`data: ${JSON.stringify(event)}\n\n`);
   });
   const { relay, sidecarPath } = await fixture(t, upstream, {
-    maxRequests: headerCases.length + 2,
+    maxRequests: headerCases.length + metadataCases.length,
   });
 
   for (const headerCase of headerCases) {
@@ -412,7 +442,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     assert.deepEqual(JSON.parse(errorBody), { error: { code: headerCase.error } });
     assert.ok([...response.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
   }
-  for (let index = 0; index < 2; index += 1) {
+  for (const _case of metadataCases) {
     const parsedEcho = await relayRequest(relay);
     await parsedEcho.arrayBuffer().catch(() => new ArrayBuffer(0));
     assert.ok([...parsedEcho.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
@@ -424,7 +454,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
   assert.ok(!journal.includes(PROVIDER_BEARER));
   assert.ok(!seal.includes(PROVIDER_BEARER));
   assert.deepEqual(summary.rejectedRequests, {
-    upstream_secret_echo: headerCases.length + 2,
+    upstream_secret_echo: headerCases.length + metadataCases.length,
   });
   assert.deepEqual(verifyRelaySeal(journal, seal), summary);
   const entries = records(journal);
@@ -440,10 +470,9 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
   }
   const expectedErrors = [
     ...headerCases.map(({ error }) => error),
-    "upstream_failure",
-    "upstream_failure",
+    ...metadataCases.map(() => "upstream_failure"),
   ];
-  for (let index = 0; index < headerCases.length + 2; index += 1) {
+  for (let index = 0; index < headerCases.length + metadataCases.length; index += 1) {
     const closed = entries[index * 3 + 2];
     assert.equal(closed?.transportState, "failed");
     assert.equal(closed?.errorCategory, expectedErrors[index]);
