@@ -15,6 +15,7 @@ import {
   runCodexInvocation,
 } from "../src/codex-runner.js";
 import { runCodexProbe } from "../src/codex-probe.js";
+import { startResponsesFixture } from "../src/responses-fixture.js";
 
 test("DeepSeek invocation is native Responses, isolated, and secret-free", () => {
   const invocation = buildCodexInvocation({
@@ -443,6 +444,62 @@ test(
       sawTurnComplete: true,
       sawDeveloperInstruction: false,
     });
+  },
+);
+
+test(
+  "installed Codex completes a native custom apply_patch round",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async () => {
+    const codexPath = process.env.OPEN_AGENT_LAB_CODEX_BIN;
+    assert.ok(codexPath);
+    const workspace = await mkdtemp(join(tmpdir(), "open-agent-lab-apply-patch-"));
+    const target = join(workspace, "patch-target.txt");
+    const bearer = "open-agent-lab-patch-probe";
+    const callId = "call_open_agent_lab_apply_patch";
+    await writeFile(target, "before\n", "utf8");
+    const fixture = await startResponsesFixture({
+      bearer,
+      model: "open-agent-lab-probe",
+      callId,
+      patch:
+        "*** Begin Patch\n*** Update File: patch-target.txt\n@@\n-before\n+after\n*** End Patch\n",
+      finalMessage: "Patch complete.",
+    });
+    let stderr = "";
+    try {
+      const invocation = buildCodexProbeInvocation({
+        workspace,
+        prompt: "Apply the provided patch exactly once, then report completion.",
+        baseUrl: fixture.baseUrl,
+        codexPath,
+      });
+      const code = await runCodexInvocation(
+        invocation,
+        { ...process.env, OPEN_AGENT_LAB_PROBE_KEY: bearer },
+        { stdout: () => undefined, stderr: (chunk) => (stderr += chunk) },
+      );
+      const snapshot = fixture.snapshot();
+      assert.equal(code, 0, stderr.slice(-2_000));
+      assert.equal(snapshot.requests.length, 2);
+      assert.equal(snapshot.toolName, "apply_patch");
+      assert.match(snapshot.toolOutput, /^Exit code: 0(?:\n|$)/u);
+      const secondInput = snapshot.requests[1]?.body.input;
+      assert.ok(Array.isArray(secondInput));
+      const output = secondInput.find(
+        (item): item is Record<string, unknown> =>
+          typeof item === "object" &&
+          item !== null &&
+          !Array.isArray(item) &&
+          item.type === "custom_tool_call_output",
+      );
+      assert.equal(output?.call_id, callId);
+      assert.equal(output?.output, snapshot.toolOutput);
+      assert.equal(await readFile(target, "utf8"), "after\n");
+    } finally {
+      await fixture.close();
+      await rm(workspace, { force: true, recursive: true });
+    }
   },
 );
 
