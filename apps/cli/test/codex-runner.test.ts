@@ -7,6 +7,9 @@ import test from "node:test";
 import {
   buildCodexInvocation,
   buildCodexProbeInvocation,
+  buildCodexRelayInvocation,
+  CODEX_RELAY_ENV_KEY,
+  nativeProviderProfile,
   publicInvocation,
   runCodexInvocation,
 } from "../src/codex-runner.js";
@@ -152,6 +155,39 @@ test("runner fails before spawning when the provider key is absent", async () =>
   );
 });
 
+test("runner kills a bounded execution that exceeds its output budget", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-codex-limit-test-"));
+  t.after(async () => rm(directory, { force: true, recursive: true }));
+  const fakeCodex = join(directory, "noisy-codex.mjs");
+  await writeFile(
+    fakeCodex,
+    "#!/usr/bin/env node\nprocess.stdin.resume();\nprocess.stdout.write('x'.repeat(1024));\nsetInterval(() => {}, 1000);\n",
+    "utf8",
+  );
+  await chmod(fakeCodex, 0o755);
+  const invocation = buildCodexInvocation({
+    provider: "deepseek",
+    workspace: directory,
+    prompt: "run",
+    codexPath: fakeCodex,
+  });
+  const signalListeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+
+  await assert.rejects(
+    runCodexInvocation(
+      invocation,
+      { ...process.env, DEEPSEEK_API_KEY: "test-key" },
+      { stdout: () => undefined, stderr: () => undefined },
+      { timeoutMs: 5_000, maxStdoutBytes: 64, maxStderrBytes: 64 },
+    ),
+    /stdout limit/u,
+  );
+  assert.deepEqual(
+    [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")],
+    signalListeners,
+  );
+});
+
 test("probe configuration is deterministic and restricted to loopback", () => {
   const invocation = buildCodexProbeInvocation({
     workspace: ".",
@@ -173,6 +209,51 @@ test("probe configuration is deterministic and restricted to loopback", () => {
         baseUrl: "https://example.com",
       }),
     /loopback HTTP URL/,
+  );
+});
+
+test("route-probe invocation keeps exact provider identity behind a zero-retry relay", () => {
+  const deepseek = nativeProviderProfile("deepseek");
+  const zai = nativeProviderProfile("zai");
+  const invocation = buildCodexRelayInvocation({
+    provider: "deepseek",
+    workspace: ".",
+    prompt: "perform one tool round",
+    baseUrl: "http://127.0.0.1:43123/v1",
+  });
+  const args = invocation.args.join(" ");
+
+  assert.equal(deepseek.responsesUrl, "https://api.deepseek.com/responses");
+  assert.equal(zai.responsesUrl, "https://api.z.ai/api/v1/responses");
+  assert.equal(invocation.provider, "deepseek");
+  assert.equal(invocation.model, "deepseek-v4-pro");
+  assert.equal(invocation.reasoning, "high");
+  assert.equal(invocation.requiredEnv, CODEX_RELAY_ENV_KEY);
+  assert.equal(invocation.apiScope, "standard-api");
+  assert.match(args, /base_url = "http:\/\/127\.0\.0\.1:43123\/v1"/u);
+  assert.match(args, /request_max_retries = 0/u);
+  assert.match(args, /stream_max_retries = 0/u);
+  assert.doesNotMatch(args, /sandbox_workspace_write\.network_access=true/u);
+  assert.match(args, /shell_environment_policy\.set\.OPEN_AGENT_LAB_RELAY_TOKEN=""/u);
+  assert.throws(
+    () =>
+      buildCodexRelayInvocation({
+        provider: "deepseek",
+        workspace: ".",
+        prompt: "probe",
+        baseUrl: "https://example.com/v1",
+      }),
+    /loopback HTTP URL/u,
+  );
+  assert.throws(
+    () =>
+      buildCodexRelayInvocation({
+        provider: "zai",
+        workspace: ".",
+        prompt: "probe",
+        baseUrl: "http://user:secret@127.0.0.1:43123/v1",
+      }),
+    /loopback HTTP URL/u,
   );
 });
 

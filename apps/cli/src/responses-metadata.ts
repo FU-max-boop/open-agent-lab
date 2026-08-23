@@ -38,17 +38,24 @@ function numericUsage(value: unknown): Record<string, number> | null {
     "reasoning_output_tokens",
   ]) {
     const candidate = value[key];
-    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0) {
-      fields[key] = candidate;
+    if (candidate === undefined) continue;
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+      throw new Error(`invalid ${key}`);
     }
+    fields[key] = candidate;
   }
   const inputDetails = value.input_tokens_details;
-  if (
-    isObject(inputDetails) &&
-    typeof inputDetails.cached_tokens === "number" &&
-    Number.isSafeInteger(inputDetails.cached_tokens) &&
-    inputDetails.cached_tokens >= 0
-  ) {
+  if (inputDetails !== undefined && !isObject(inputDetails)) {
+    throw new Error("invalid input token details");
+  }
+  if (isObject(inputDetails) && inputDetails.cached_tokens !== undefined) {
+    if (
+      typeof inputDetails.cached_tokens !== "number" ||
+      !Number.isSafeInteger(inputDetails.cached_tokens) ||
+      inputDetails.cached_tokens < 0
+    ) {
+      throw new Error("invalid cached tokens");
+    }
     if (
       fields.cached_input_tokens !== undefined &&
       fields.cached_input_tokens !== inputDetails.cached_tokens
@@ -58,12 +65,17 @@ function numericUsage(value: unknown): Record<string, number> | null {
     fields.cached_input_tokens = inputDetails.cached_tokens;
   }
   const outputDetails = value.output_tokens_details;
-  if (
-    isObject(outputDetails) &&
-    typeof outputDetails.reasoning_tokens === "number" &&
-    Number.isSafeInteger(outputDetails.reasoning_tokens) &&
-    outputDetails.reasoning_tokens >= 0
-  ) {
+  if (outputDetails !== undefined && !isObject(outputDetails)) {
+    throw new Error("invalid output token details");
+  }
+  if (isObject(outputDetails) && outputDetails.reasoning_tokens !== undefined) {
+    if (
+      typeof outputDetails.reasoning_tokens !== "number" ||
+      !Number.isSafeInteger(outputDetails.reasoning_tokens) ||
+      outputDetails.reasoning_tokens < 0
+    ) {
+      throw new Error("invalid reasoning tokens");
+    }
     if (
       fields.reasoning_output_tokens !== undefined &&
       fields.reasoning_output_tokens !== outputDetails.reasoning_tokens
@@ -71,6 +83,20 @@ function numericUsage(value: unknown): Record<string, number> | null {
       throw new Error("conflicting reasoning token aliases");
     }
     fields.reasoning_output_tokens = outputDetails.reasoning_tokens;
+  }
+  if (
+    (fields.input_tokens !== undefined &&
+      fields.cached_input_tokens !== undefined &&
+      fields.cached_input_tokens > fields.input_tokens) ||
+    (fields.output_tokens !== undefined &&
+      fields.reasoning_output_tokens !== undefined &&
+      fields.reasoning_output_tokens > fields.output_tokens) ||
+    (fields.input_tokens !== undefined &&
+      fields.output_tokens !== undefined &&
+      fields.total_tokens !== undefined &&
+      fields.total_tokens !== fields.input_tokens + fields.output_tokens)
+  ) {
+    throw new Error("impossible token usage");
   }
   return Object.keys(fields).length > 0 ? fields : null;
 }

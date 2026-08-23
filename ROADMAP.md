@@ -28,6 +28,10 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
 - Linux CI completes Harbor's official `hello-world` task through the real
   Harbor 0.22, Codex 0.149.0, isolated relay, tool, verifier, ATIF, result, and
   lock path. Synthetic evidence remains publication-ineligible by design.
+- A provider-free route harness composes the pinned Codex runner, relay,
+  strict provider metadata checks, and EvidenceBundle writer. CI executes both
+  frozen DeepSeek and GLM profiles with one exact command, zero retries, shell
+  networking disabled, hard process bounds, and synthetic-only receipts.
 
 ## Current slice — attributable open-model strategy
 
@@ -37,7 +41,7 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
   feature.
 - Before the first provider request, freeze a paired-result analyzer that rejects
   missing pairs and applies the declared reward, cost, and replication gates.
-- Run opt-in live conformance for exact GLM and DeepSeek routes; retain redacted
+- Run isolated Harbor conformance for exact GLM and DeepSeek routes; retain redacted
   raw event fixtures and actual returned model identity.
 - Run the relay against live GLM and DeepSeek Responses routes with disposable,
   provider-budget-capped credentials.

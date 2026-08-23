@@ -82,6 +82,21 @@ test("conflicting flat and nested token aliases fail closed", () => {
   assert.equal(metadata.usage, null);
 });
 
+test("invalid or impossible optional token usage fails closed", () => {
+  for (const usage of [
+    '"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_input_tokens":-1',
+    '"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":11}',
+    '"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":6}',
+    '"input_tokens":10,"output_tokens":5,"total_tokens":16',
+  ]) {
+    const metadata = observe(
+      `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{${usage}}}}\n\n`,
+    );
+    assert.equal(metadata.parseErrors, 1);
+    assert.equal(metadata.usage, null);
+  }
+});
+
 test("model source saturation always reserves a terminal source", () => {
   const observer = new SseMetadataObserver(MODEL);
   for (let index = 0; index < 8; index += 1) {

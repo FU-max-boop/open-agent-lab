@@ -60,6 +60,13 @@ live probes must produce consistent returned-model and provider request IDs
 without exposing the durable key. Use a disposable key file and a provider-side
 spend cap until those gates pass.
 
+The provider-free route harness tests both exact Codex profiles in hosted CI,
+but it cannot establish live provider identity. Live conformance must execute
+inside Harbor's isolated task container while the durable credential remains in
+the separate relay service. Terminal-Bench preparation does not consume such a
+receipt yet, so the absence of that machine-bound isolated gate remains an
+explicit blocker.
+
 Five tasks were selected only from the pinned directory names by sorting
 `sha256(seed + NUL + task_id)` and taking the first five. No tests, solutions,
 or outcomes were used to select them. Both providers use the same tasks, one
