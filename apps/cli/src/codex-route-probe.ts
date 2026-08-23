@@ -283,7 +283,9 @@ function validateCodexEvents(content: string): CodexEventSummary {
       !allowedItems.has(text(item.type, "Codex item type")) ||
       !["item.started", "item.completed"].includes(text(item.event, "Codex item event"))
     ) {
-      throw new Error("Codex event projection contains an invalid item.");
+      throw new Error(
+        `Codex event projection contains an invalid item (${sha256(String(item.event))}/${sha256(String(item.type))}).`,
+      );
     }
     text(item.id, "Codex item id");
   }
