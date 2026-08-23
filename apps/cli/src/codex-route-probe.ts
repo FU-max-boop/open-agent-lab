@@ -183,6 +183,29 @@ async function fileSha256(path: string): Promise<string> {
   return `sha256:${digest.digest("hex")}`;
 }
 
+export async function cleanRepositoryRevision(root = REPOSITORY_ROOT): Promise<string> {
+  const topLevel = (
+    await executeFile("git", ["-C", root, "rev-parse", "--show-toplevel"], { encoding: "utf8" })
+  ).stdout.trim();
+  if ((await realpath(topLevel)) !== (await realpath(root))) {
+    throw new Error("Route probes require the current clean repository revision.");
+  }
+  const status = await executeFile(
+    "git",
+    ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+    { encoding: "utf8" },
+  );
+  const resolved = (
+    await executeFile("git", ["-C", root, "rev-parse", "--verify", "HEAD^{commit}"], {
+      encoding: "utf8",
+    })
+  ).stdout.trim();
+  if (!/^[a-f0-9]{40}$/u.test(resolved) || status.stdout !== "") {
+    throw new Error("Route probes require the current clean repository revision.");
+  }
+  return resolved;
+}
+
 async function verifyCodex(path: string, contract: RouteProbeContract): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64" || !isAbsolute(path)) {
     throw new Error("Route probes require the pinned linux/x64 Codex executable by absolute path.");
@@ -509,6 +532,9 @@ async function runCodexRouteProbe(
         throw new Error("Route-probe evidence contains a credential.");
       }
     }
+    if (spec.sourceRevision !== (await cleanRepositoryRevision())) {
+      throw new Error("Route probe source revision changed before publication.");
+    }
     const manifest = await writeEvidenceBundle(spec.outputDirectory, {
       runId,
       createdAt,
@@ -561,8 +587,8 @@ export async function runSyntheticCodexRouteProbe(
   spec: SyntheticRouteProbeSpec,
 ): Promise<RouteProbeResult> {
   assertSyntheticFixtureUrl(spec.upstreamResponsesUrl);
-  if (!/^[a-f0-9]{40}$/u.test(spec.sourceRevision)) {
-    throw new Error("Synthetic route probes require an exact source revision.");
+  if (spec.sourceRevision !== (await cleanRepositoryRevision())) {
+    throw new Error("Synthetic route probes require the current clean repository revision.");
   }
   const contract = await loadRouteProbeContract(spec.provider);
   await verifyCodex(spec.codexPath, contract);
@@ -570,6 +596,7 @@ export async function runSyntheticCodexRouteProbe(
 }
 
 export async function verifyCodexRouteProbeBundle(directory: string): Promise<RouteProbeResult> {
+  const sourceRevision = await cleanRepositoryRevision();
   const verified = await verifyEvidenceBundle(directory);
   const metadata = object(verified.manifest.metadata, "route-probe metadata");
   const provider = text(metadata.provider, "provider") as OpenModelProvider;
@@ -618,9 +645,12 @@ export async function verifyCodexRouteProbeBundle(directory: string): Promise<Ro
     recordedEvents.turnStarted !== events.turnStarted ||
     recordedEvents.turnCompleted !== events.turnCompleted ||
     recordedEvents.commandExecutions !== events.commandExecutions ||
-    !/^[a-f0-9]{40}$/u.test(text(metadata.sourceRevision, "sourceRevision"))
+    text(metadata.sourceRevision, "sourceRevision") !== sourceRevision
   ) {
     throw new Error("Route-probe receipt does not match its retained evidence.");
+  }
+  if (sourceRevision !== (await cleanRepositoryRevision())) {
+    throw new Error("Route-probe source revision changed during verification.");
   }
   return {
     ok: true,

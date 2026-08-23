@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +13,7 @@ import {
 } from "@open-agent-lab/evidence";
 
 import {
+  cleanRepositoryRevision,
   loadRouteProbeContract,
   runSyntheticCodexRouteProbe,
   safeCodexEventProjection,
@@ -130,10 +132,51 @@ test("synthetic route probes reject live provider URLs before inspecting Codex",
   );
 });
 
+test("synthetic route probes reject an unbound source revision before inspecting Codex", async () => {
+  await assert.rejects(
+    runSyntheticCodexRouteProbe({
+      provider: "deepseek",
+      providerKey: "must-not-be-used",
+      outputDirectory: "/must-not-be-created",
+      codexPath: "/must-not-be-inspected",
+      sourceRevision: "0".repeat(40),
+      upstreamResponsesUrl: "http://127.0.0.1:1/responses",
+    }),
+    /current clean repository revision/u,
+  );
+});
+
+test("repository revision rejects Git metadata inherited from a parent", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-parent-repository-"));
+  t.after(async () => rm(parent, { force: true, recursive: true }));
+  await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
+  execFileSync("git", ["init", "--quiet"], { cwd: parent });
+  execFileSync("git", ["add", ".gitignore"], { cwd: parent });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Open Agent Lab",
+      "-c",
+      "user.email=open-agent-lab@example.invalid",
+      "commit",
+      "--quiet",
+      "--message=fixture",
+    ],
+    { cwd: parent },
+  );
+  const inherited = join(parent, "ignored", "source");
+  await mkdir(inherited, { recursive: true });
+
+  await assert.rejects(cleanRepositoryRevision(inherited), /current clean repository/u);
+  assert.match(await cleanRepositoryRevision(parent), /^[a-f0-9]{40}$/u);
+});
+
 test(
   "installed Codex executes both frozen provider profiles through the synthetic route",
   { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
   async (t) => {
+    const sourceRevision = await cleanRepositoryRevision();
     const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-route-probe-test-"));
     t.after(async () => rm(parent, { force: true, recursive: true }));
     for (const provider of ["deepseek", "zai"] as const) {
@@ -152,7 +195,7 @@ test(
           providerKey: upstreamKey,
           outputDirectory: output,
           codexPath: process.env.OPEN_AGENT_LAB_CODEX_BIN as string,
-          sourceRevision: "a".repeat(40),
+          sourceRevision,
           createdAt: "2026-08-23T00:00:00.000Z",
           upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
         });
@@ -179,6 +222,14 @@ test(
 
         const manifestPath = join(output, "manifest.json");
         const originalManifest = await readFile(manifestPath, "utf8");
+        const wrongSource = JSON.parse(originalManifest) as EvidenceManifestV1;
+        assert.ok(wrongSource.metadata);
+        wrongSource.metadata.sourceRevision = "0".repeat(40);
+        wrongSource.manifestId = manifestIdFor(manifestBodyOf(wrongSource));
+        await writeFile(manifestPath, canonicalJson(wrongSource), "utf8");
+        await assert.rejects(verifyCodexRouteProbeBundle(output), /retained evidence/u);
+        await writeFile(manifestPath, originalManifest, "utf8");
+
         const mixed = JSON.parse(originalManifest) as EvidenceManifestV1;
         mixed.runId = "route-probe-mixed-run";
         mixed.manifestId = manifestIdFor(manifestBodyOf(mixed));
