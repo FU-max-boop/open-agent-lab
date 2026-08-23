@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,12 @@ import {
   verifyCodexRouteProbeBundle,
 } from "../src/codex-route-probe.js";
 import { startResponsesFixture } from "../src/responses-fixture.js";
+
+const SOURCE_REVISION = execFileSync(
+  "git",
+  ["rev-parse", "--verify", "HEAD^{commit}"],
+  { encoding: "utf8" },
+).trim();
 
 test("frozen route-probe contracts match the benchmark provider variants", async () => {
   const [deepseek, zai] = await Promise.all([
@@ -130,6 +137,20 @@ test("synthetic route probes reject live provider URLs before inspecting Codex",
   );
 });
 
+test("synthetic route probes reject an unbound source revision before inspecting Codex", async () => {
+  await assert.rejects(
+    runSyntheticCodexRouteProbe({
+      provider: "deepseek",
+      providerKey: "must-not-be-used",
+      outputDirectory: "/must-not-be-created",
+      codexPath: "/must-not-be-inspected",
+      sourceRevision: "0".repeat(40),
+      upstreamResponsesUrl: "http://127.0.0.1:1/responses",
+    }),
+    /current clean repository revision/u,
+  );
+});
+
 test(
   "installed Codex executes both frozen provider profiles through the synthetic route",
   { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
@@ -152,7 +173,7 @@ test(
           providerKey: upstreamKey,
           outputDirectory: output,
           codexPath: process.env.OPEN_AGENT_LAB_CODEX_BIN as string,
-          sourceRevision: "a".repeat(40),
+          sourceRevision: SOURCE_REVISION,
           createdAt: "2026-08-23T00:00:00.000Z",
           upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
         });
@@ -179,6 +200,14 @@ test(
 
         const manifestPath = join(output, "manifest.json");
         const originalManifest = await readFile(manifestPath, "utf8");
+        const wrongSource = JSON.parse(originalManifest) as EvidenceManifestV1;
+        assert.ok(wrongSource.metadata);
+        wrongSource.metadata.sourceRevision = "0".repeat(40);
+        wrongSource.manifestId = manifestIdFor(manifestBodyOf(wrongSource));
+        await writeFile(manifestPath, canonicalJson(wrongSource), "utf8");
+        await assert.rejects(verifyCodexRouteProbeBundle(output), /retained evidence/u);
+        await writeFile(manifestPath, originalManifest, "utf8");
+
         const mixed = JSON.parse(originalManifest) as EvidenceManifestV1;
         mixed.runId = "route-probe-mixed-run";
         mixed.manifestId = manifestIdFor(manifestBodyOf(mixed));

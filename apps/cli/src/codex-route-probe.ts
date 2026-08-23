@@ -183,6 +183,23 @@ async function fileSha256(path: string): Promise<string> {
   return `sha256:${digest.digest("hex")}`;
 }
 
+async function cleanRepositoryRevision(): Promise<string> {
+  const resolved = (
+    await executeFile("git", ["-C", REPOSITORY_ROOT, "rev-parse", "--verify", "HEAD^{commit}"], {
+      encoding: "utf8",
+    })
+  ).stdout.trim();
+  const status = await executeFile(
+    "git",
+    ["-C", REPOSITORY_ROOT, "status", "--porcelain=v1", "--untracked-files=all"],
+    { encoding: "utf8" },
+  );
+  if (!/^[a-f0-9]{40}$/u.test(resolved) || status.stdout !== "") {
+    throw new Error("Route probes require the current clean repository revision.");
+  }
+  return resolved;
+}
+
 async function verifyCodex(path: string, contract: RouteProbeContract): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64" || !isAbsolute(path)) {
     throw new Error("Route probes require the pinned linux/x64 Codex executable by absolute path.");
@@ -561,8 +578,8 @@ export async function runSyntheticCodexRouteProbe(
   spec: SyntheticRouteProbeSpec,
 ): Promise<RouteProbeResult> {
   assertSyntheticFixtureUrl(spec.upstreamResponsesUrl);
-  if (!/^[a-f0-9]{40}$/u.test(spec.sourceRevision)) {
-    throw new Error("Synthetic route probes require an exact source revision.");
+  if (spec.sourceRevision !== (await cleanRepositoryRevision())) {
+    throw new Error("Synthetic route probes require the current clean repository revision.");
   }
   const contract = await loadRouteProbeContract(spec.provider);
   await verifyCodex(spec.codexPath, contract);
@@ -594,6 +611,7 @@ export async function verifyCodexRouteProbeBundle(directory: string): Promise<Ro
   const events = validateCodexEvents(eventProjection);
   const recordedEvents = object(metadata.codexEvents, "codexEvents");
   const files = verified.manifest.files.map((file) => file.path);
+  const sourceRevision = await cleanRepositoryRevision();
   if (
     files.join(",") !== [JOURNAL, SEAL, EVENTS, EFFECT_NAME].sort().join(",") ||
     metadata.routeProbeSchemaVersion !== 1 ||
@@ -618,7 +636,7 @@ export async function verifyCodexRouteProbeBundle(directory: string): Promise<Ro
     recordedEvents.turnStarted !== events.turnStarted ||
     recordedEvents.turnCompleted !== events.turnCompleted ||
     recordedEvents.commandExecutions !== events.commandExecutions ||
-    !/^[a-f0-9]{40}$/u.test(text(metadata.sourceRevision, "sourceRevision"))
+    text(metadata.sourceRevision, "sourceRevision") !== sourceRevision
   ) {
     throw new Error("Route-probe receipt does not match its retained evidence.");
   }
