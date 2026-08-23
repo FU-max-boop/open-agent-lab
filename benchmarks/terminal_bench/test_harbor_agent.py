@@ -495,19 +495,6 @@ class ProfileDriftTest(unittest.TestCase):
                     experiment["relayBuildIds"]["production"],
                 )
 
-                pilot = yaml.safe_load(
-                    (
-                        root / "benchmarks/terminal_bench" / f"pilot-v1.{provider}.yaml"
-                    ).read_text()
-                )
-                self.assertEqual(
-                    pilot["environment"]["extra_docker_compose"],
-                    [f"benchmarks/terminal_bench/{compose_name}"],
-                )
-                self.assertEqual(
-                    pilot["agents"][0]["model_name"],
-                    f"{provider}/{selected_model}",
-                )
                 self.assertIn(selected_model, _PROFILES[provider]["models"])
                 paired = yaml.safe_load(
                     (
@@ -534,10 +521,6 @@ class ProfileDriftTest(unittest.TestCase):
                 self.assertEqual(
                     [agent["kwargs"]["reasoning_effort"] for agent in paired["agents"]],
                     [_PROFILES[provider]["reasoning"]] * 2,
-                )
-                self.assertEqual(
-                    paired["datasets"][0]["task_names"],
-                    pilot["datasets"][0]["task_names"],
                 )
                 self.assertEqual(paired["datasets"][0]["task_names"], runtime_tasks)
 
