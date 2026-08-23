@@ -73,6 +73,7 @@ from .experiment_contract import (
     relay_claim_name,
     same_json,
 )
+from .failure_classification import classify_failure
 from .relay_evidence import _EVENT_FIELDS as _RELAY_FIELDS
 from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
@@ -378,24 +379,6 @@ _SCORABLE_INCOMPLETE_RELAY_REASONS = {
     "returned_model_missing",
     "terminal_event_missing",
     "usage_missing_or_invalid",
-}
-_SCORABLE_EXCEPTIONS = {
-    "AgentAuthenticationError",
-    "AgentSafetyRefusalError",
-    "AgentTimeoutError",
-    "ApiConnectionClosedError",
-    "ApiInternalServerError",
-    "ApiOverloadedError",
-    "ApiProviderResourceNotFoundError",
-    "ApiRateLimitError",
-    "ApiResponseStalledError",
-    "ApiUsageLimitError",
-    "ContextWindowExceededError",
-    "ModelNotFoundError",
-    "NetworkConnectionError",
-    "NonZeroAgentExitCodeError",
-    "OutputTokenExceededError",
-    "UnknownApiError",
 }
 
 
@@ -2255,21 +2238,29 @@ def _exception_info(value: Any, label: str) -> tuple[str, datetime] | None:
     return exception_type, _iso(info.get("occurred_at"), f"{label}.occurred_at")
 
 
-def _trial_outcome(result: dict[str, Any]) -> tuple[float, tuple[str, datetime] | None]:
+def _trial_outcome(
+    result: dict[str, Any],
+) -> tuple[float, tuple[str, datetime] | None, str | None]:
     raw_steps = result.get("step_results")
     steps = [] if raw_steps is None else _sequence(raw_steps, "step_results")
     if steps:
         raise IntegrityError("the frozen SingleStepTrial policy forbids step_results")
     top_level = _exception_info(result.get("exception_info"), "exception_info")
-    if top_level is not None and top_level[0] not in _SCORABLE_EXCEPTIONS:
-        raise IntegrityError("officially scored exception type is not Harbor-native")
+    try:
+        failure_class = (
+            None if top_level is None else classify_failure(top_level[0]).value
+        )
+    except ValueError as error:
+        raise IntegrityError(
+            "officially scored exception type is not Harbor-native"
+        ) from error
     verifier = _mapping(result.get("verifier_result"), "verifier_result")
     reward = _number(
         _mapping(verifier.get("rewards"), "rewards").get("reward"), "official reward"
     )
     if not 0 <= reward <= 1:
         raise IntegrityError("official reward must be between zero and one")
-    return reward, top_level
+    return reward, top_level, failure_class
 
 
 def _phase_timing(result: dict[str, Any], name: str) -> tuple[datetime, datetime]:
@@ -2750,7 +2741,7 @@ def _attempt(
         compose_sha256,
     )
     expected = _VARIANTS[variant]
-    reward, exception_info = _trial_outcome(result)
+    reward, exception_info, failure_class = _trial_outcome(result)
     top_level_exception = exception_info[0] if exception_info is not None else None
     scored_failure = exception_info is not None
     (
@@ -2852,6 +2843,7 @@ def _attempt(
         "variant": variant,
         "reward": reward,
         "topLevelException": top_level_exception,
+        "failureClass": failure_class,
         "stepExceptions": [],
         "telemetryComplete": not telemetry_missing,
         "telemetryMissing": telemetry_missing,
@@ -3743,6 +3735,19 @@ def _clean_attempt(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key not in hidden}
 
 
+def _exception_counts(attempts: list[dict[str, Any]]) -> dict[str, int]:
+    if any(
+        (item["topLevelException"] is None) != (item["failureClass"] is None)
+        for item in attempts
+    ):
+        raise IntegrityError("scored exception and failure class disagree")
+    errored = [item for item in attempts if item["topLevelException"] is not None]
+    counts = Counter(item["failureClass"] for item in errored)
+    if sum(counts.values()) != len(errored):
+        raise IntegrityError("failure classes disagree with the errored denominator")
+    return dict(sorted(counts.items()))
+
+
 def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
     for key in ("trialId", "relayRunId", "relayInstanceId"):
         values = [item[key] for item in attempts]
@@ -3852,6 +3857,8 @@ def _summary(
     replications_complete = actual_replications == required_replications
     telemetry_complete = all(item["telemetryComplete"] for item in attempts)
     analysis_complete = replications_complete and telemetry_complete
+    exception_counts = _exception_counts(attempts)
+    errored_attempts = sum(exception_counts.values())
     if not replications_complete:
         blockers.append("mirrored_within_provider_replication_missing")
     if not telemetry_complete:
@@ -3906,7 +3913,7 @@ def _summary(
     directional_criteria_met = not blockers
     blockers.append("development_experiment_never_promotable")
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "experimentId": EXPERIMENT_ID,
         "claimClass": "directional_five_task_development_result",
         "integrityOk": True,
@@ -3914,9 +3921,11 @@ def _summary(
         "analysisStatus": "valid" if analysis_complete else "valid_incomplete",
         "denominator": {
             "attempts": len(attempts),
+            "erroredAttempts": errored_attempts,
             "pairs": len(pairs),
             "tasksPerProvider": len(tasks),
         },
+        "exceptionCounts": exception_counts,
         "telemetryCoverage": {
             "completeAttempts": sum(item["telemetryComplete"] for item in attempts),
             "totalAttempts": len(attempts),
