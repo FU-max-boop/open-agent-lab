@@ -182,7 +182,7 @@ class ProbeFixture:
         self.pilot_entries = [self.pilot_entry, {"provider": "zai"}]
         _write(self.root / "run-record.json", {"liveRouteProbes": [self.entry]})
         self.credential = parent / "credential"
-        self.credential.write_bytes(b"fixture-provider-secret\n")
+        self.credential.write_bytes(b"fixture-provider-secret-00000000\n")
         self._job(config, task, overlay, compose_sha)
         self.cap = self.authorizations / "deepseek.cap.json"
         self.authorization = self.authorizations / "deepseek.json"
@@ -473,6 +473,14 @@ class ProbeFixture:
             )
         )
 
+    def bind_credential(self, value: bytes) -> None:
+        self.credential.write_bytes(value)
+        self.write_cap()
+        cleanup_path = self.trial / "environment-cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup["providerCredentialSha256"] = paired._digest_bytes(value)
+        _write(cleanup_path, cleanup)
+
     def write_probe_claim(self) -> Path:
         lock_sha256 = paired._digest(self.probe_lock)
         path = self.authorizations / relay_claim_name(
@@ -674,7 +682,7 @@ class LiveRouteProbeTest(unittest.TestCase):
             self.fixture.validate_cap()
 
         fixture = self._new_fixture()
-        fixture.credential.write_text("another-provider-account\n")
+        fixture.credential.write_text("another-provider-account-secret-0001\n")
         with self.assertRaisesRegex(paired.IntegrityError, "another provider"):
             fixture.validate_cap()
 
@@ -693,6 +701,36 @@ class LiveRouteProbeTest(unittest.TestCase):
         fixture.cap.write_bytes(canonical_json(cap))
         with self.assertRaisesRegex(paired.IntegrityError, "relay lifetime"):
             fixture.validate_cap()
+
+    def test_credential_boundary_matches_relay_ascii_trim(self) -> None:
+        fixture = self._new_fixture()
+        fixture.bind_credential(b"\t fixture-provider-secret-00000000 \r\n")
+        self.assertTrue(fixture.verify()["liveProviderRouteObserved"])
+
+        for label, credentials in (
+            ("short", b"x" * 31 + b"\n"),
+            ("internal-newline", b"x" * 16 + b"\n" + b"x" * 16),
+            ("nul", b"x" * 32 + b"\0"),
+            ("delete", b"x" * 32 + b"\x7f"),
+            ("bom", b"\xef\xbb\xbf" + b"x" * 32),
+            ("nbsp", "\u00a0".encode() + b"x" * 32),
+        ):
+            fixture = self._new_fixture()
+            fixture.bind_credential(credentials)
+            with (
+                self.subTest(label=label, phase="probe authorization"),
+                self.assertRaisesRegex(paired.IntegrityError, "ASCII bytes"),
+            ):
+                fixture.validate_cap()
+            self.assertFalse(list(fixture.authorizations.glob("*.claim.json")))
+
+            output = fixture.authorization
+            with (
+                self.subTest(label=label, phase="receipt"),
+                self.assertRaisesRegex(paired.IntegrityError, "ASCII bytes"),
+            ):
+                fixture.verify(output)
+            self.assertFalse(output.exists())
 
     def test_probe_gate_rejects_an_invalid_other_provider_before_claiming(self) -> None:
         probes = json.loads((self.fixture.root / "run-record.json").read_text())[
@@ -815,7 +853,7 @@ class LiveRouteProbeTest(unittest.TestCase):
 
         self.fixture = self._new_fixture()
         self.fixture.verify(self.fixture.authorization)
-        self.fixture.credential.write_text("replacement-provider-secret\n")
+        self.fixture.credential.write_text("replacement-provider-secret-00000000\n")
         with self.assertRaises(paired.IntegrityError):
             self.fixture.validate_authorization()
 

@@ -12,7 +12,7 @@ import type {
 import { canonicalJson } from "@open-agent-lab/contracts";
 import { sha256 } from "@open-agent-lab/evidence";
 
-import { SseMetadataObserver } from "./responses-metadata.js";
+import { SseMetadataObserver, type ResponseMetadata } from "./responses-metadata.js";
 import {
   RELAY_VERSION,
   RelayJournal,
@@ -98,8 +98,56 @@ function safeString(value: unknown): string | null {
     : null;
 }
 
-function validateSecret(value: string, name: string, minimumBytes = 1): void {
-  if (Buffer.byteLength(value) < minimumBytes || /[\r\n]/u.test(value)) {
+function containsSecret(values: Iterable<string | null>, secret: string): boolean {
+  for (const value of values) {
+    if (value?.includes(secret) === true) return true;
+  }
+  return false;
+}
+
+function modelSourceEventType(source: string): string | null {
+  const ordinalAt = source.lastIndexOf(".");
+  if (ordinalAt < 0 || !/^\d+$/u.test(source.slice(ordinalAt + 1))) return null;
+  const stem = source.slice(0, ordinalAt);
+  for (const suffix of [".response.model", ".response.headers.openai-model"]) {
+    if (stem.startsWith("event.") && stem.endsWith(suffix)) {
+      return stem.slice("event.".length, -suffix.length);
+    }
+  }
+  return null;
+}
+
+function responseMetadataContainsSecret(metadata: ResponseMetadata, secret: string): boolean {
+  return containsSecret(
+    [
+      metadata.responseId,
+      metadata.returnedModel,
+      metadata.systemFingerprint,
+      ...Object.entries(metadata.modelSources).flatMap(([source, model]) => [
+        modelSourceEventType(source),
+        model,
+      ]),
+    ],
+    secret,
+  );
+}
+
+function redactedResponseMetadata(parseErrors: number): ResponseMetadata {
+  return {
+    responseId: null,
+    returnedModel: null,
+    modelConsistency: "missing",
+    modelSources: {},
+    systemFingerprint: null,
+    terminalEvent: null,
+    usage: null,
+    metadataConflicts: [],
+    parseErrors,
+  };
+}
+
+function validateSecret(value: string, name: string): void {
+  if (Buffer.byteLength(value) < 32 || !/^[\x21-\x7e]+$/u.test(value)) {
     throw new Error(`${name} is invalid.`);
   }
 }
@@ -239,7 +287,7 @@ function normalizedOptions(options: NativeResponsesRelayOptions): {
   upstream: URL;
 } {
   validateSecret(options.upstreamBearer, "upstreamBearer");
-  validateSecret(options.clientBearer, "clientBearer", 32);
+  validateSecret(options.clientBearer, "clientBearer");
   if (options.upstreamBearer === options.clientBearer) {
     throw new Error("Provider and relay credentials must differ.");
   }
@@ -450,7 +498,11 @@ export async function startNativeResponsesRelay(
           }
           accepted += 1;
           ordinal = accepted;
-          const clientRequestId = safeString(request.headers["x-client-request-id"]);
+          const rawClientRequestId = request.headers["x-client-request-id"];
+          const clientRequestId = safeString(rawClientRequestId);
+          const clientRequestIdEcho =
+            typeof rawClientRequestId === "string" &&
+            rawClientRequestId.includes(options.upstreamBearer);
           await journal.append({
             ...identity,
             event: "transport.responses.request",
@@ -460,9 +512,13 @@ export async function startNativeResponsesRelay(
             requestedModel: options.expectedModel,
             requestBytes: body.length,
             requestSha256: sha256(body),
-            clientRequestId,
+            clientRequestId: clientRequestIdEcho ? null : clientRequestId,
             stream: true,
           });
+          if (clientRequestIdEcho) {
+            countRejection("upstream_secret_echo");
+            throw new RelayHttpError(502, "upstream_failure");
+          }
 
           let connectTimer: NodeJS.Timeout | undefined;
           let connectTimedOut = false;
@@ -503,11 +559,33 @@ export async function startNativeResponsesRelay(
 
           const headersAt = clock();
           upstreamStatus = upstreamResponse.status;
-          providerRequestId = safeString(
+          const upstreamProviderRequestId =
             upstreamResponse.headers.get("x-request-id") ??
-              upstreamResponse.headers.get("request-id"),
-          );
-          const modelHeader = safeString(upstreamResponse.headers.get("openai-model"));
+            upstreamResponse.headers.get("request-id");
+          const upstreamModelHeader = upstreamResponse.headers.get("openai-model");
+          const forwarded: Record<string, string> = {};
+          for (const name of FORWARDED_HEADERS) {
+            const value = upstreamResponse.headers.get(name);
+            if (value !== null) forwarded[name] = value;
+          }
+          if (
+            containsSecret(
+              [upstreamProviderRequestId, ...Object.values(forwarded)],
+              options.upstreamBearer,
+            )
+          ) {
+            countRejection("upstream_secret_echo");
+            await upstreamResponse.body?.cancel().catch(() => undefined);
+            const errorCategory =
+              upstreamStatus >= 300 && upstreamStatus < 400
+                ? "upstream_redirect"
+                : upstreamStatus === 204 || upstreamStatus === 205 || upstreamResponse.body === null
+                  ? "upstream_body_missing"
+                  : "upstream_failure";
+            throw new RelayHttpError(502, errorCategory);
+          }
+          providerRequestId = safeString(upstreamProviderRequestId);
+          const modelHeader = safeString(upstreamModelHeader);
           observer = new SseMetadataObserver(modelHeader);
           await journal.append({
             ...identity,
@@ -530,11 +608,6 @@ export async function startNativeResponsesRelay(
           if (contentEncoding !== null && contentEncoding !== "identity") {
             await upstreamResponse.body?.cancel();
             throw new RelayHttpError(502, "upstream_compressed");
-          }
-          const forwarded: Record<string, string> = {};
-          for (const name of FORWARDED_HEADERS) {
-            const value = upstreamResponse.headers.get(name);
-            if (value !== null) forwarded[name] = value;
           }
           response.writeHead(upstreamStatus, forwarded);
 
@@ -574,16 +647,17 @@ export async function startNativeResponsesRelay(
           errorCategory = relayError.code;
           transportState = relayError.code === "client_disconnected" ? "aborted" : "failed";
           if (!headersRecorded && ordinal > 0) {
+            const failedHeadersAt = clock();
             await journal.append({
               ...identity,
               event: "transport.responses.headers",
               ordinal,
               relayRequestId,
-              at: isoTime(clock()),
-              status: null,
+              at: isoTime(failedHeadersAt),
+              status: upstreamStatus,
               providerRequestId: null,
               modelHeader: null,
-              headersMs: null,
+              headersMs: upstreamStatus === null ? null : failedHeadersAt - startedAt,
             });
             headersRecorded = true;
           }
@@ -595,7 +669,14 @@ export async function startNativeResponsesRelay(
           try {
             if (ordinal > 0) {
               const endedAt = clock();
-              const metadata = observer.finish();
+              let metadata = observer.finish();
+              if (responseMetadataContainsSecret(metadata, options.upstreamBearer)) {
+                countRejection("upstream_secret_echo");
+                terminalError = new RelayHttpError(502, "upstream_failure");
+                transportState = "failed";
+                errorCategory = "upstream_failure";
+                metadata = redactedResponseMetadata(metadata.parseErrors);
+              }
               await journal.append({
                 ...identity,
                 event: "transport.responses.closed",

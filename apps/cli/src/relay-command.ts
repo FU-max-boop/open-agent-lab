@@ -149,6 +149,14 @@ export async function awaitRelayAuthorization(
   return { buildId, readyPath, provider, model, capabilityId };
 }
 
+function normalizeProviderSecret(raw: string, name: string): string {
+  const value = raw.replace(/^[\t-\r ]+|[\t-\r ]+$/gu, "");
+  if (value.length < 32 || !/^[\x21-\x7e]+$/u.test(value)) {
+    throw new Error(`${name} is invalid.`);
+  }
+  return value;
+}
+
 async function providerSecret(
   env: NodeJS.ProcessEnv,
   name: string,
@@ -160,10 +168,10 @@ async function providerSecret(
   }
   if (inline !== undefined) {
     delete env[name];
-    return { value: inline };
+    return { value: normalizeProviderSecret(inline, name) };
   }
   const file = path as string;
-  return { value: (await readFile(file, "utf8")).trim(), path: file };
+  return { value: normalizeProviderSecret(await readFile(file, "utf8"), name), path: file };
 }
 
 async function assertSecretFileUnreadable(path: string | undefined): Promise<void> {

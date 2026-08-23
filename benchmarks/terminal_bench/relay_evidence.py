@@ -119,6 +119,7 @@ _REJECTION_CODES = {
     "unsupported_content_type",
     "unsupported_response_mode",
     "upstream_failure",
+    "upstream_secret_echo",
 }
 
 
@@ -657,8 +658,13 @@ def _validate_marker(
         and all(
             _is_integer(value) and value > 0 for value in rejected_requests.values()
         )
-        and rejected_requests.get("client_disconnected_after_close", 0)
-        <= event_count // 3
+        and all(
+            rejected_requests.get(code, 0) <= event_count // 3
+            for code in (
+                "client_disconnected_after_close",
+                "upstream_secret_echo",
+            )
+        )
     )
     valid = all(
         (
@@ -825,6 +831,8 @@ def _publication_reasons(
         reasons.add("unverifiable_relay_build")
     if rejected_requests.get("model_mismatch", 0) > 0:
         reasons.add("requested_model_mismatch")
+    if rejected_requests.get("upstream_secret_echo", 0) > 0:
+        reasons.add("upstream_secret_echo")
     # Clients may close after terminal SSE instead of waiting for EOF.
     if any(
         count

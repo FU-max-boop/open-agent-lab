@@ -14,7 +14,7 @@ import {
 import { startResponsesFixture } from "./responses-fixture.js";
 
 const PROBE_KEY = "open-agent-lab-local-probe-00000000";
-const UPSTREAM_PROBE_KEY = "open-agent-lab-upstream-probe";
+const UPSTREAM_PROBE_KEY = "open-agent-lab-upstream-probe-0000";
 const PROBE_MODEL = "open-agent-lab-probe";
 const CALL_ID = "call_open_agent_lab_probe";
 const OUTPUT_FILE = "codex-probe.txt";

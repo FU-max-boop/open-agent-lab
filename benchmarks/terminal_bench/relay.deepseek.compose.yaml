@@ -31,7 +31,7 @@ services:
       - /app/relay-build-id
     environment:
       DEEPSEEK_API_KEY_FILE: /run/secrets/provider-api-key
-      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:7a28015382b0858d2e865292eda4fb9e21114f0ed85ce6d6f4a6aca55adef941"
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:7ae693b124e31ba57bb68f4f249a1950fceb650a43d34f352e3d5bdd9ae40431"
       OAL_RELAY_GID: "1000"
       OAL_RELAY_UID: "1000"
     secrets:
