@@ -45,7 +45,11 @@ function numericUsage(value: unknown): Record<string, number> | null {
     fields[key] = candidate;
   }
   const inputDetails = value.input_tokens_details;
-  if (inputDetails !== undefined && !isObject(inputDetails)) {
+  if (
+    inputDetails !== undefined &&
+    inputDetails !== null &&
+    !isObject(inputDetails)
+  ) {
     throw new Error("invalid input token details");
   }
   if (isObject(inputDetails) && inputDetails.cached_tokens !== undefined) {
@@ -65,7 +69,11 @@ function numericUsage(value: unknown): Record<string, number> | null {
     fields.cached_input_tokens = inputDetails.cached_tokens;
   }
   const outputDetails = value.output_tokens_details;
-  if (outputDetails !== undefined && !isObject(outputDetails)) {
+  if (
+    outputDetails !== undefined &&
+    outputDetails !== null &&
+    !isObject(outputDetails)
+  ) {
     throw new Error("invalid output token details");
   }
   if (isObject(outputDetails) && outputDetails.reasoning_tokens !== undefined) {
