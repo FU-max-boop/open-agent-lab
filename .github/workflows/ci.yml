@@ -247,7 +247,7 @@ jobs:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
           OAL_DEEPSEEK_API_KEY_FILE: /tmp/deepseek-provider-key
         run: |
-          printf 'provider-free-ci-key\n' > "$OAL_DEEPSEEK_API_KEY_FILE"
+          printf 'provider-free-ci-key-0000000000000000\n' > "$OAL_DEEPSEEK_API_KEY_FILE"
           sudo chown 0:0 "$OAL_DEEPSEEK_API_KEY_FILE"
           sudo chmod 0400 "$OAL_DEEPSEEK_API_KEY_FILE"
           compose=(docker compose -f /tmp/base-compose.yaml -f benchmarks/terminal_bench/relay.deepseek.compose.yaml)
