@@ -767,11 +767,36 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 "os.environ", {"OPEN_AGENT_LAB_REPO_ROOT": str(_REPOSITORY_ROOT)}
             ),
             patch("subprocess.run", side_effect=clean),
-            self.assertRaisesRegex(RuntimeError, "runtime bytes are frozen"),
         ):
             _validate_live_source(
                 {**binding, "relay_build_sha256": build_ids["production"]}
             )
+
+        blocked_manifest = json.loads(_EXPERIMENT_MANIFEST.read_text())
+        blocked_manifest["runtime"]["hermeticCodexRuntimeReady"] = False
+        with tempfile.TemporaryDirectory() as raw:
+            blocked_path = Path(raw) / "manifest.json"
+            blocked_path.write_text(json.dumps(blocked_manifest))
+            blocked_binding = {
+                **binding,
+                "experiment_manifest_sha256": (
+                    "sha256:" + hashlib.sha256(blocked_path.read_bytes()).hexdigest()
+                ),
+                "relay_build_sha256": build_ids["production"],
+            }
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"OPEN_AGENT_LAB_REPO_ROOT": str(_REPOSITORY_ROOT)},
+                ),
+                patch("subprocess.run", side_effect=clean),
+                patch(
+                    "benchmarks.terminal_bench.harbor_agent._EXPERIMENT_MANIFEST",
+                    blocked_path,
+                ),
+                self.assertRaisesRegex(RuntimeError, "runtime bytes are frozen"),
+            ):
+                _validate_live_source(blocked_binding)
 
         dirty = [
             *clean[:2],

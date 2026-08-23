@@ -89,7 +89,9 @@ jobs:
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
-            benchmarks/terminal_bench/validate_harbor_e2e.py
+            benchmarks/terminal_bench/test_validate_harbor_install_only.py \
+            benchmarks/terminal_bench/validate_harbor_e2e.py \
+            benchmarks/terminal_bench/validate_harbor_install_only.py
           python3 -m ruff check \
             benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
@@ -102,7 +104,9 @@ jobs:
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_paired_results.py \
-            benchmarks/terminal_bench/validate_harbor_e2e.py
+            benchmarks/terminal_bench/test_validate_harbor_install_only.py \
+            benchmarks/terminal_bench/validate_harbor_e2e.py \
+            benchmarks/terminal_bench/validate_harbor_install_only.py
           python3 -m ruff check --select C901 \
             benchmarks/terminal_bench/codex_runtime.py \
             benchmarks/terminal_bench/experiment_contract.py \
@@ -110,13 +114,15 @@ jobs:
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
-            benchmarks/terminal_bench/validate_harbor_e2e.py
+            benchmarks/terminal_bench/validate_harbor_e2e.py \
+            benchmarks/terminal_bench/validate_harbor_install_only.py
           python3 -m unittest \
             benchmarks.terminal_bench.test_codex_runtime \
             benchmarks.terminal_bench.test_experiment_contract \
             benchmarks.terminal_bench.test_harbor_agent \
             benchmarks.terminal_bench.test_harbor_environment \
-            benchmarks.terminal_bench.test_paired_results
+            benchmarks.terminal_bench.test_paired_results \
+            benchmarks.terminal_bench.test_validate_harbor_install_only
 
   task-image-smoke:
     needs: check
@@ -263,7 +269,7 @@ jobs:
 
   harbor-e2e:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -274,7 +280,7 @@ jobs:
       - name: Install Harbor
         run: python3 -m pip install --disable-pip-version-check harbor==0.22.0
 
-      - name: Run provider-free Harbor control and treatment trials
+      - name: Run production install-only and provider-free Harbor proofs
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
           OPEN_AGENT_LAB_CODEX_ARCHIVE: /tmp/codex-0.149.0-linux-x64.tgz
@@ -310,6 +316,21 @@ jobs:
           assert Path(harbor_environment.__file__).resolve() == root / "benchmarks/terminal_bench/harbor_environment.py"
           PY
           cd "$OPEN_AGENT_LAB_REPO_ROOT"
+          replication="$(jq --exit-status --raw-output '.preflight.replicationId' "$prepared_run/run-record.json")"
+          proof_jobs="$prepared_run/install-only-jobs/deepseek"
+          proof_name="open-agent-lab-$replication-deepseek-install-only"
+          harbor jobs start \
+            --config "$prepared_run/configs/deepseek.yaml" \
+            --install-only \
+            --jobs-dir "$proof_jobs" \
+            --job-name "$proof_name" \
+            --yes
+          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+            python3 -m benchmarks.terminal_bench.validate_harbor_install_only \
+            "$prepared_run" --provider deepseek; then
+            find "$proof_jobs/$proof_name" -maxdepth 2 -name result.json -print -exec cat {} \;
+            exit 1
+          fi
           harbor jobs start --config "$prepared_run/fixtures/harbor-e2e.yaml" --yes
           control_job="$prepared_run/fixture-jobs/harbor-e2e/open-agent-lab-harbor-provider-free-e2e"
           if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \

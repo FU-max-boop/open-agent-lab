@@ -65,7 +65,7 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:860260d5c21d45497b7baf6a335d0a8b1cb958e9140b2de05d02cc90a0f72eda"
+    "sha256:34f958b3d9e991ce72635e1fcf489356ffac5f78504ac8dc801a3756b10e40ce"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = "0.149.0"
@@ -926,7 +926,7 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
         or runtime.get("datasetDigest") != _DATASET_DIGEST
         or runtime.get("concurrency") != 1
         or runtime.get("harborRetries") != 0
-        or runtime.get("hermeticCodexRuntimeReady") is not False
+        or runtime.get("hermeticCodexRuntimeReady") is not True
         or runtime.get("relayRequestCapPerTrial") != _RELAY_REQUEST_CAP
         or runtime.get("taskOrder") != list(_TASKS)
         or runtime.get("taskDigests") != _TASK_DIGESTS
@@ -1746,6 +1746,8 @@ def _expected_trial_lock(
     task_path: Path,
     compose_path: Path,
     compose_sha256: str,
+    *,
+    install_only: bool = False,
 ) -> dict[str, Any]:
     compose = str(compose_path)
     spec = _VARIANTS[variant]
@@ -1759,7 +1761,7 @@ def _expected_trial_lock(
             "source": _DATASET,
             "path": str(task_path),
         },
-        "install_only": False,
+        "install_only": install_only,
         "timeout_multiplier": 1.0,
         "agent": {
             "name": spec["name"],
@@ -1800,7 +1802,7 @@ def _expected_trial_lock(
                 "digest": compose_sha256,
             }
         ],
-        "verifier": {"disable": False, "environment_mode": "shared"},
+        "verifier": {"disable": install_only, "environment_mode": "shared"},
     }
 
 
@@ -1923,11 +1925,7 @@ def _trial_identity(
     ):
         raise IntegrityError("result and lock variants disagree")
     task_name = result.get("task_name")
-    matching_tasks = [
-        task
-        for task in selected_tasks
-        if task.removeprefix("terminal-bench/") == task_name
-    ]
+    matching_tasks = [task for task in selected_tasks if task == task_name]
     task = matching_tasks[0] if len(matching_tasks) == 1 else None
     task_lock = _mapping(lock.get("task"), "trial task lock")
     if (
