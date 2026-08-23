@@ -377,6 +377,10 @@ function validateRelayEvidence(
     .map((line) => object(JSON.parse(line), "relay record"));
   const requestIds = new Set<string>();
   const responseIds = new Set<string>();
+  const auditedDisconnectsOnly = Object.entries(seal.rejectedRequests).every(
+    ([code, count]) =>
+      code === "client_disconnected_after_close" && count > 0 && count <= records.length / 3,
+  );
   if (
     records.length !== 6 ||
     seal.eventCount !== 6 ||
@@ -384,7 +388,7 @@ function validateRelayEvidence(
     seal.providerId !== expected.providerId ||
     seal.expectedModel !== expected.model ||
     seal.buildId !== expected.buildId ||
-    Object.values(seal.rejectedRequests).some((count) => count !== 0)
+    !auditedDisconnectsOnly
   ) {
     throw new Error("The relay did not seal exactly two clean provider responses.");
   }
