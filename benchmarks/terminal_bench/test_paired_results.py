@@ -1320,7 +1320,7 @@ class StrictInputTest(unittest.TestCase):
         self.assertEqual(
             invalid,
             {
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
@@ -1381,6 +1381,54 @@ class StrictInputTest(unittest.TestCase):
         for value in ('{"key":1,"key":2}', '{"key":NaN}', '{"key":Infinity}'):
             with self.subTest(value=value), self.assertRaises(paired.IntegrityError):
                 paired._loads(value, "test")
+
+
+class PairedBootstrapTest(unittest.TestCase):
+    @staticmethod
+    def pair(task: str, control: float, treatment: float) -> dict[str, object]:
+        return {
+            "task": task,
+            "reward": {"control": control, "treatment": treatment},
+        }
+
+    def test_replications_are_aggregated_before_tasks_are_resampled(self) -> None:
+        pairs = [self.pair("task-a", 0.0, 1.0) for _ in range(9)]
+        pairs.append(self.pair("task-b", 1.0, 0.0))
+        task_deltas = paired._task_reward_deltas(pairs, ["task-a", "task-b"])
+        self.assertEqual(task_deltas, [1.0, -1.0])
+
+        result = paired._paired_reward_bootstrap(task_deltas)
+        self.assertEqual(result, paired._paired_reward_bootstrap([1.0, -1.0]))
+        self.assertEqual(
+            result,
+            {
+                "resamplingUnit": "task",
+                "taskCount": 2,
+                "method": "percentile_nearest_rank",
+                "confidenceLevel": 0.95,
+                "sidedness": "two-sided",
+                "resamples": 10_000,
+                "seed": 20260822,
+                "meanDeltaPercentagePoints": 0.0,
+                "confidenceIntervalPercentagePoints": [-100.0, 100.0],
+            },
+        )
+        fixed = paired._paired_reward_bootstrap([-0.5, 0.0, 0.25, 0.75])
+        self.assertEqual(fixed["meanDeltaPercentagePoints"], 12.5)
+        self.assertEqual(fixed["confidenceIntervalPercentagePoints"], [-31.25, 56.25])
+
+    def test_empty_single_task_and_zero_delta_boundaries(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one task"):
+            paired._paired_reward_bootstrap([])
+
+        single = paired._paired_reward_bootstrap([0.25])
+        self.assertEqual(single["taskCount"], 1)
+        self.assertEqual(single["meanDeltaPercentagePoints"], 25.0)
+        self.assertEqual(single["confidenceIntervalPercentagePoints"], [25.0, 25.0])
+
+        zero = paired._paired_reward_bootstrap([0.0, 0.0, 0.0])
+        self.assertEqual(zero["meanDeltaPercentagePoints"], 0.0)
+        self.assertEqual(zero["confidenceIntervalPercentagePoints"], [0.0, 0.0])
 
 
 class PrepareTest(unittest.TestCase):
@@ -1913,7 +1961,7 @@ class PairedResultsTest(unittest.TestCase):
         second = paired.summarize([screen.root])
         self.assertEqual(first, second)
         self.assertTrue(first["integrityOk"])
-        self.assertEqual(first["schemaVersion"], 2)
+        self.assertEqual(first["schemaVersion"], 3)
         self.assertFalse(first["analysisComplete"])
         self.assertEqual(first["analysisStatus"], "valid_incomplete")
         self.assertEqual(
@@ -1930,6 +1978,11 @@ class PairedResultsTest(unittest.TestCase):
             "mirrored_within_provider_replication_missing",
             first["promotion"]["blockingReasons"],
         )
+        for provider in first["providerSummary"]:
+            bootstrap = provider["pairedRewardBootstrap"]
+            self.assertEqual(bootstrap["taskCount"], 5)
+            self.assertGreaterEqual(bootstrap["resamples"], 10_000)
+            self.assertEqual(bootstrap["seed"], 20260822)
         self.assertNotIn(str(self.root), paired._canonical(first))
 
     def test_each_attempt_requires_its_pre_execution_pilot_claim(self) -> None:
@@ -2029,6 +2082,13 @@ class PairedResultsTest(unittest.TestCase):
         self.assertEqual(
             result["claimClass"], "directional_five_task_development_result"
         )
+        for provider in result["providerSummary"]:
+            self.assertGreater(
+                provider["pairedRewardBootstrap"]["confidenceIntervalPercentagePoints"][
+                    0
+                ],
+                0,
+            )
 
     def test_missing_duplicate_and_symlink_trials_fail_closed(self) -> None:
         for mutation in ("missing", "duplicate", "symlink"):
@@ -3283,6 +3343,18 @@ class PairedResultsTest(unittest.TestCase):
         self.assertIn(
             "zai_mean_reward_delta_not_positive",
             summary["promotion"]["blockingReasons"],
+        )
+        providers = {item["provider"]: item for item in summary["providerSummary"]}
+        self.assertAlmostEqual(providers["deepseek"]["meanPairedRewardDelta"], 0.2)
+        self.assertAlmostEqual(providers["zai"]["meanPairedRewardDelta"], -0.3)
+        self.assertEqual(providers["deepseek"]["pairedRewardBootstrap"]["taskCount"], 5)
+        self.assertAlmostEqual(
+            providers["deepseek"]["pairedRewardBootstrap"]["meanDeltaPercentagePoints"],
+            20.0,
+        )
+        self.assertAlmostEqual(
+            providers["zai"]["pairedRewardBootstrap"]["meanDeltaPercentagePoints"],
+            -30.0,
         )
 
     def test_mirrored_replication_must_share_the_source_revision(self) -> None:
