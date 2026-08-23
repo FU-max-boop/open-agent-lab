@@ -100,6 +100,7 @@ const REJECTION_CODES = new Set([
   "unsupported_content_type",
   "unsupported_response_mode",
   "upstream_failure",
+  "upstream_secret_echo",
 ]);
 const MODEL_SOURCE = /^event\.(.+)\.response\.(?:model|headers\.openai-model)\.([1-9][0-9]*)$/su;
 const BUILD_ID = /^(?:sha256:[a-f0-9]{64}|development)$/u;
@@ -373,7 +374,9 @@ function validRejections(value: unknown, lifecycles: number): boolean {
       ([code, count]) =>
         REJECTION_CODES.has(code) && Number.isSafeInteger(count) && (count as number) > 0,
     ) &&
-    Number(value.client_disconnected_after_close ?? 0) <= lifecycles
+    ["client_disconnected_after_close", "upstream_secret_echo"].every(
+      (code) => Number(value[code] ?? 0) <= lifecycles,
+    )
   );
 }
 
