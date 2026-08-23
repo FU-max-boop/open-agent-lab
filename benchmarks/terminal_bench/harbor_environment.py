@@ -742,15 +742,25 @@ def _validate_prepared_source(
             or not isinstance(record.get("liveRouteProbes"), list)
         ):
             raise ValueError("run record drifted")
+        production_binding = _validated_run_binding(
+            {
+                **binding,
+                "relay_build_sha256": build_ids["production"],
+                "relay_image_sha256": relay_images["production"],
+                "preflight_sha256": record["preflightSha256"],
+            }
+        )
+        _validate_bound_preflight(root.parent, production_binding, record)
         _validate_live_route_probe_authorities(
             root.parent,
-            binding,
+            production_binding,
             manifest,
             record["liveRouteProbes"],
             relay_images,
         )
         _assert_runtime_gate(manifest, record, binding)
-        _validate_bound_preflight(root.parent, binding, record)
+        if binding != production_binding:
+            _validate_bound_preflight(root.parent, binding, record)
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise RuntimeError("Prepared source identity could not be verified.") from error
     if (

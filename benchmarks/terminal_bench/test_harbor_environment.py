@@ -1378,13 +1378,29 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                         "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
                     }
                 )
+            fixture_image = "sha256:" + "9" * 64
+            fixture_preflight = {
+                **preflight,
+                "relayBuildSha256": manifest["relayBuildIds"]["providerFreeFixture"],
+                "relayImageSha256": fixture_image,
+            }
+            fixture_binding = {
+                **binding,
+                "relay_build_sha256": fixture_preflight["relayBuildSha256"],
+                "relay_image_sha256": fixture_image,
+                "preflight_sha256": digest_bytes(canonical_json(fixture_preflight)),
+            }
+            (output / "fixtures").mkdir()
+            (output / "fixtures" / "preflight.json").write_bytes(
+                canonical_json(fixture_preflight) + b"\n"
+            )
             record = {
                 "schemaVersion": 1,
                 "preflight": preflight,
                 "preflightSha256": binding["preflight_sha256"],
                 "relayImages": {
                     "production": binding["relay_image_sha256"],
-                    "providerFreeFixture": "sha256:" + "9" * 64,
+                    "providerFreeFixture": fixture_image,
                 },
                 "relayImageTags": _relay_image_tags(output, revision),
                 "taskSnapshots": snapshots,
@@ -1401,6 +1417,16 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 ),
             ):
                 _validate_prepared_source(binding, root)
+                _validate_prepared_source(fixture_binding, root)
+                record["preflight"] = {
+                    **preflight,
+                    "relayImageSha256": fixture_image,
+                }
+                (output / "run-record.json").write_bytes(canonical_json(record) + b"\n")
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    _validate_prepared_source(fixture_binding, root)
+                record["preflight"] = preflight
+                (output / "run-record.json").write_bytes(canonical_json(record) + b"\n")
                 module.write_text("# drift\n")
                 with self.assertRaisesRegex(RuntimeError, "identity|drifted"):
                     _validate_prepared_source(binding, root)
