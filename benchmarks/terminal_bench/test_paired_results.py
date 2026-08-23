@@ -117,6 +117,7 @@ def _relay(
     empty: bool = False,
     returned_model: str | None = None,
     provider_request_id: str | None = None,
+    emit_provider_request_id: bool = True,
     include_optional_usage: bool = True,
     transport_state: str = "completed",
     model_consistency: str = "consistent",
@@ -143,6 +144,11 @@ def _relay(
         for ordinal in range(1, request_count + 1):
             requested_at = first_request_at + timedelta(milliseconds=(ordinal - 1) * 3)
             response_id = f"response-{identity}-{ordinal}"
+            upstream_request_id = (
+                provider_request_id or f"provider-{identity}-{ordinal}"
+                if emit_provider_request_id
+                else None
+            )
             terminal_response = {
                 "id": response_id,
                 "model": returned_model or model,
@@ -193,8 +199,7 @@ def _relay(
                         "at": _relay_time(requested_at + timedelta(milliseconds=1)),
                         "event": "transport.responses.headers",
                         "status": 200,
-                        "providerRequestId": provider_request_id
-                        or f"provider-{identity}-{ordinal}",
+                        "providerRequestId": upstream_request_id,
                         "modelHeader": model,
                         "headersMs": 1,
                     },
@@ -203,8 +208,7 @@ def _relay(
                         "at": _relay_time(requested_at + timedelta(milliseconds=2)),
                         "event": "transport.responses.closed",
                         "status": 200,
-                        "providerRequestId": provider_request_id
-                        or f"provider-{identity}-{ordinal}",
+                        "providerRequestId": upstream_request_id,
                         "transportState": transport_state,
                         "errorCategory": (
                             None
@@ -3349,6 +3353,31 @@ class PairedResultsTest(unittest.TestCase):
         _rewrite_scored_relay(target, "reused-provider-request-id", source_trial=source)
         self.assertTrue(paired.summarize([screen.root])["integrityOk"])
 
+    def test_provider_request_id_may_recur_within_one_relay_journal(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = screen.trials[("deepseek", screen.tasks[0], "control-v1")]
+        result = json.loads((trial / "result.json").read_text())
+
+        verified = _relay(
+            trial,
+            "deepseek",
+            paired._PROVIDERS["deepseek"]["model"],
+            screen.binding["relay_build_sha256"],
+            "screen-v1-deepseek-shared-provider-request",
+            datetime.fromisoformat(result["started_at"]),
+            datetime.fromisoformat(result["finished_at"]),
+            provider_request_id="provider-request-shared-by-two-responses",
+            request_count=2,
+        )
+
+        closed = [
+            record
+            for record in verified["records"]
+            if record["event"] == "transport.responses.closed"
+        ]
+        self.assertEqual(len({record["responseId"] for record in closed}), 2)
+        self.assertTrue(verified["publication_gate"]["ok"])
+
     def test_response_replay_and_equivocation_are_rejected(self) -> None:
         for mutation in ("reused-response-id", "reused-response-id-only"):
             with self.subTest(mutation=mutation):
@@ -3397,6 +3426,45 @@ class PairedResultsTest(unittest.TestCase):
 
         with self.assertRaisesRegex(paired.IntegrityError, "fallback provider request"):
             paired.summarize([screen.root])
+
+    def test_missing_response_and_provider_request_stays_nonpromotable(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        trial = screen.trials[("deepseek", screen.tasks[0], "control-v1")]
+        result_path = trial / "result.json"
+        result = json.loads(result_path.read_text())
+        verified = _relay(
+            trial,
+            "deepseek",
+            paired._PROVIDERS["deepseek"]["model"],
+            screen.binding["relay_build_sha256"],
+            "screen-v1-deepseek-missing-provider-identities",
+            datetime.fromisoformat(result["started_at"]),
+            datetime.fromisoformat(result["finished_at"]),
+            emit_provider_request_id=False,
+            transport_state="aborted",
+            terminal_metadata=False,
+        )
+        closed = verified["records"][2]
+        self.assertIsNone(closed["providerRequestId"])
+        self.assertIsNone(closed["responseId"])
+        _replace_relay(result, verified)
+        result["exception_info"] = _failure_info(result)
+        _write_trial_result(result_path, result)
+        _refresh_job_result(trial.parent)
+
+        summary = paired.summarize([screen.root])
+
+        attempt = next(
+            item for item in summary["attempts"] if item["trialId"] == result["id"]
+        )
+        self.assertEqual(summary["denominator"]["attempts"], 20)
+        self.assertEqual(summary["analysisStatus"], "valid_incomplete")
+        self.assertEqual(summary["promotion"]["status"], "not_promotable")
+        self.assertIn(
+            "attempt_telemetry_missing", summary["promotion"]["blockingReasons"]
+        )
+        self.assertIsNone(attempt["tokens"])
+        self.assertIn("provider_usage", attempt["telemetryMissing"])
 
     def test_upstream_identity_text_is_namespaced_by_provider(self) -> None:
         attempts = [
