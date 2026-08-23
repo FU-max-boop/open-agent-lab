@@ -46,6 +46,9 @@ const EXPERIMENT_MANIFEST = join(
 const EFFECT_NAME = "route-probe-effect.txt";
 const EFFECT = "open-agent-lab-route-probe-v1\n";
 const COMMAND = `printf 'open-agent-lab-route-probe-v1\\n' > ${EFFECT_NAME}`;
+const DISPLAY_COMMANDS = new Set(
+  ["/bin/bash", "/usr/bin/bash"].map((shell) => `${shell} -lc ${JSON.stringify(COMMAND)}`),
+);
 const PROMPT = [
   "Use the shell tool exactly once with this exact command, without changing or wrapping it:",
   COMMAND,
@@ -323,10 +326,10 @@ function validateCodexEvents(content: string): CodexEventSummary {
     typeof started[0]?.id !== "string" ||
     started[0].id.length === 0 ||
     started[0]?.id !== completed[0]?.id ||
-    started[0]?.command !== COMMAND ||
+    started[0]?.command !== completed[0]?.command ||
+    !DISPLAY_COMMANDS.has(String(started[0]?.command)) ||
     started[0]?.status !== "in_progress" ||
     started[0]?.exitCode !== null ||
-    completed[0]?.command !== COMMAND ||
     completed[0]?.status !== "completed" ||
     completed[0]?.exitCode !== 0 ||
     itemPositions.length !== items.length ||

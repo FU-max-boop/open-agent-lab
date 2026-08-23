@@ -38,19 +38,25 @@ test("frozen route-probe contracts match the benchmark provider variants", async
 
 test("Codex event projection retains only the exact safe command lifecycle", () => {
   const command = "printf 'open-agent-lab-route-probe-v1\\n' > route-probe-effect.txt";
+  const displayedCommand = `/bin/bash -lc ${JSON.stringify(command)}`;
   const stdout = [
     { type: "thread.started", thread_id: "thread-secret" },
     { type: "turn.started" },
     {
       type: "item.started",
-      item: { id: "item-1", type: "command_execution", command, status: "in_progress" },
+      item: {
+        id: "item-1",
+        type: "command_execution",
+        command: displayedCommand,
+        status: "in_progress",
+      },
     },
     {
       type: "item.completed",
       item: {
         id: "item-1",
         type: "command_execution",
-        command,
+        command: displayedCommand,
         status: "completed",
         exit_code: 0,
         aggregated_output: "must-not-be-retained",
@@ -94,7 +100,7 @@ test("Codex event projection retains only the exact safe command lifecycle", () 
             item: {
               id: "item-1",
               type: "command_execution",
-              command,
+              command: displayedCommand,
               status: "completed",
               exit_code: 0,
             },
