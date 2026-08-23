@@ -127,8 +127,9 @@ def _credential_bytes(path: Path, label: str) -> bytes:
     credentials = _bounded_file(path, label)
     if not credentials.isascii():
         raise IntegrityError(f"{label} must contain only ASCII bytes")
-    if not credentials.strip():
-        raise IntegrityError(f"{label} must contain a non-empty credential")
+    normalized = credentials.strip()
+    if len(normalized) < 32 or any(byte < 0x21 or byte > 0x7E for byte in normalized):
+        raise IntegrityError(f"{label} must contain at least 32 visible ASCII bytes")
     return credentials
 
 

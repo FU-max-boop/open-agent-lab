@@ -22,7 +22,7 @@ import {
 
 const MODEL = "glm-5.3";
 const CLIENT_BEARER = "relay-client-token-0000000000000001";
-const PROVIDER_BEARER = "cache-control";
+const PROVIDER_BEARER = "provider-secret-1234567890abcdef";
 
 interface TestServer {
   url: string;
@@ -459,26 +459,73 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
   }
 });
 
-test("relay ignores fixed metadata labels when checking short credentials", async (t) => {
-  for (const upstreamBearer of ["http", "event", "model"]) {
-    await t.test(upstreamBearer, async (t) => {
-      const upstream = await listen((_request, response) => {
-        response.writeHead(200, {
-          "content-type": "application/octet-stream",
-          "openai-model": MODEL,
-          "x-request-id": "safe-request",
-        });
-        response.end(
-          `data: {"type":"response.completed","response":{"id":"safe-response","model":"${MODEL}"}}\n\n`,
-        );
-      });
-      const { relay } = await fixture(t, upstream, { upstreamBearer });
+test("relay redacts a provider credential from client request identity", async (t) => {
+  let upstreamRequests = 0;
+  const upstream = await listen((_request, response) => {
+    upstreamRequests += 1;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end();
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream);
 
-      const response = await relayRequest(relay);
-      assert.equal(response.status, 200);
-      await response.arrayBuffer();
-      assert.deepEqual((await relay.close()).rejectedRequests, {});
-    });
+  const response = await relayRequest(relay, {
+    headers: { "x-client-request-id": `turn-${PROVIDER_BEARER}-suffix` },
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: { code: "upstream_failure" } });
+  assert.equal(upstreamRequests, 0);
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const seal = await readFile(relay.sealPath, "utf8");
+  assert.ok(!journal.includes(PROVIDER_BEARER));
+  assert.ok(!seal.includes(PROVIDER_BEARER));
+  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+  assert.deepEqual(verifyRelaySeal(journal, seal), summary);
+  const entries = records(journal);
+  assert.equal(entries.length, 3);
+  const [request, headers, closed] = entries;
+  assert.equal(request?.clientRequestId, null);
+  assert.deepEqual(
+    [headers?.status, headers?.providerRequestId, headers?.modelHeader],
+    [null, null, null],
+  );
+  assert.deepEqual(
+    [closed?.status, closed?.providerRequestId, closed?.responseId],
+    [null, null, null],
+  );
+  assert.equal(closed?.transportState, "failed");
+  assert.equal(closed?.errorCategory, "upstream_failure");
+  assert.equal(closed?.responseBytes, 0);
+});
+
+test("relay rejects short or non-visible provider credentials before listening", async (t) => {
+  const upstream = await listen((_request, response) => response.end());
+  t.after(upstream.close);
+  const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-relay-secret-test-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  for (const [index, upstreamBearer] of [
+    "event",
+    "x".repeat(31),
+    `${"x".repeat(32)}\n`,
+    `${"x".repeat(16)}\n${"x".repeat(16)}`,
+    `${"x".repeat(32)}\u0000`,
+    `${"x".repeat(32)}\u007f`,
+  ].entries()) {
+    await assert.rejects(
+      startNativeResponsesRelay({
+        runId: `invalid-secret-${index}`,
+        providerId: "test",
+        buildId: "development",
+        expectedModel: MODEL,
+        upstreamResponsesUrl: `${upstream.url}/responses`,
+        upstreamBearer,
+        clientBearer: CLIENT_BEARER,
+        sidecarPath: join(directory, `${index}.jsonl`),
+        expiresAtMs: Date.now() + 60_000,
+      }),
+      /upstreamBearer is invalid/u,
+    );
   }
 });
 

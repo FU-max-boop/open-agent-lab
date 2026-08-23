@@ -182,7 +182,7 @@ class ProbeFixture:
         self.pilot_entries = [self.pilot_entry, {"provider": "zai"}]
         _write(self.root / "run-record.json", {"liveRouteProbes": [self.entry]})
         self.credential = parent / "credential"
-        self.credential.write_bytes(b"fixture-provider-secret\n")
+        self.credential.write_bytes(b"fixture-provider-secret-00000000\n")
         self._job(config, task, overlay, compose_sha)
         self.cap = self.authorizations / "deepseek.cap.json"
         self.authorization = self.authorizations / "deepseek.json"
@@ -682,7 +682,7 @@ class LiveRouteProbeTest(unittest.TestCase):
             self.fixture.validate_cap()
 
         fixture = self._new_fixture()
-        fixture.credential.write_text("another-provider-account\n")
+        fixture.credential.write_text("another-provider-account-secret-0001\n")
         with self.assertRaisesRegex(paired.IntegrityError, "another provider"):
             fixture.validate_cap()
 
@@ -704,18 +704,22 @@ class LiveRouteProbeTest(unittest.TestCase):
 
     def test_credential_boundary_matches_relay_ascii_trim(self) -> None:
         fixture = self._new_fixture()
-        fixture.bind_credential(b"\t fixture-provider-secret \r\n")
+        fixture.bind_credential(b"\t fixture-provider-secret-00000000 \r\n")
         self.assertTrue(fixture.verify()["liveProviderRouteObserved"])
 
         for label, credentials in (
-            ("bom", b"\xef\xbb\xbffixturesafe\n"),
-            ("nbsp", "\u00a0fixturesafe\u00a0".encode()),
+            ("short", b"x" * 31 + b"\n"),
+            ("internal-newline", b"x" * 16 + b"\n" + b"x" * 16),
+            ("nul", b"x" * 32 + b"\0"),
+            ("delete", b"x" * 32 + b"\x7f"),
+            ("bom", b"\xef\xbb\xbf" + b"x" * 32),
+            ("nbsp", "\u00a0".encode() + b"x" * 32),
         ):
             fixture = self._new_fixture()
             fixture.bind_credential(credentials)
             with (
                 self.subTest(label=label, phase="probe authorization"),
-                self.assertRaisesRegex(paired.IntegrityError, "only ASCII bytes"),
+                self.assertRaisesRegex(paired.IntegrityError, "ASCII bytes"),
             ):
                 fixture.validate_cap()
             self.assertFalse(list(fixture.authorizations.glob("*.claim.json")))
@@ -723,7 +727,7 @@ class LiveRouteProbeTest(unittest.TestCase):
             output = fixture.authorization
             with (
                 self.subTest(label=label, phase="receipt"),
-                self.assertRaisesRegex(paired.IntegrityError, "only ASCII bytes"),
+                self.assertRaisesRegex(paired.IntegrityError, "ASCII bytes"),
             ):
                 fixture.verify(output)
             self.assertFalse(output.exists())
@@ -849,7 +853,7 @@ class LiveRouteProbeTest(unittest.TestCase):
 
         self.fixture = self._new_fixture()
         self.fixture.verify(self.fixture.authorization)
-        self.fixture.credential.write_text("replacement-provider-secret\n")
+        self.fixture.credential.write_text("replacement-provider-secret-00000000\n")
         with self.assertRaises(paired.IntegrityError):
             self.fixture.validate_authorization()
 

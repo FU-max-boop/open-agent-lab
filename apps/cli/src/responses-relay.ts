@@ -146,8 +146,8 @@ function redactedResponseMetadata(parseErrors: number): ResponseMetadata {
   };
 }
 
-function validateSecret(value: string, name: string, minimumBytes = 1): void {
-  if (Buffer.byteLength(value) < minimumBytes || /[\r\n]/u.test(value)) {
+function validateSecret(value: string, name: string): void {
+  if (Buffer.byteLength(value) < 32 || !/^[\x21-\x7e]+$/u.test(value)) {
     throw new Error(`${name} is invalid.`);
   }
 }
@@ -287,7 +287,7 @@ function normalizedOptions(options: NativeResponsesRelayOptions): {
   upstream: URL;
 } {
   validateSecret(options.upstreamBearer, "upstreamBearer");
-  validateSecret(options.clientBearer, "clientBearer", 32);
+  validateSecret(options.clientBearer, "clientBearer");
   if (options.upstreamBearer === options.clientBearer) {
     throw new Error("Provider and relay credentials must differ.");
   }
@@ -498,7 +498,11 @@ export async function startNativeResponsesRelay(
           }
           accepted += 1;
           ordinal = accepted;
-          const clientRequestId = safeString(request.headers["x-client-request-id"]);
+          const rawClientRequestId = request.headers["x-client-request-id"];
+          const clientRequestId = safeString(rawClientRequestId);
+          const clientRequestIdEcho =
+            typeof rawClientRequestId === "string" &&
+            rawClientRequestId.includes(options.upstreamBearer);
           await journal.append({
             ...identity,
             event: "transport.responses.request",
@@ -508,9 +512,13 @@ export async function startNativeResponsesRelay(
             requestedModel: options.expectedModel,
             requestBytes: body.length,
             requestSha256: sha256(body),
-            clientRequestId,
+            clientRequestId: clientRequestIdEcho ? null : clientRequestId,
             stream: true,
           });
+          if (clientRequestIdEcho) {
+            countRejection("upstream_secret_echo");
+            throw new RelayHttpError(502, "upstream_failure");
+          }
 
           let connectTimer: NodeJS.Timeout | undefined;
           let connectTimedOut = false;

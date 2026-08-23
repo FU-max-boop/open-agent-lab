@@ -14,6 +14,8 @@ import {
   runRelayCommand,
 } from "../src/relay-command.js";
 
+const PROVIDER_KEY = "provider-secret-1234567890abcdef";
+
 async function waitForFile(path: string, attempts = 100): Promise<string> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -99,6 +101,45 @@ test("relay limit flags reach the native relay and retain established defaults",
     } as const;
     await writeFile(buildFile, `${buildId}\n`);
 
+    for (const [index, value] of [
+      "x".repeat(31),
+      `${"x".repeat(16)}\n${"x".repeat(16)}`,
+      `${"x".repeat(32)}\u0000`,
+      `${"x".repeat(32)}\u007f`,
+      `\u00a0${"x".repeat(32)}\u00a0`,
+    ].entries()) {
+      const credentialFile = join(directory, `invalid-provider-key-${index}`);
+      await writeFile(credentialFile, value);
+      for (const secretEnv of [
+        { TEST_API_KEY: value },
+        { TEST_API_KEY_FILE: credentialFile },
+      ]) {
+        await assert.rejects(
+          runRelayCommand(
+            baseArgs,
+            { ...secretEnv, OAL_EXPECTED_RELAY_BUILD_ID: buildId },
+            () => assert.fail("an invalid provider key must fail before startup"),
+            profiles,
+            authorization,
+          ),
+          /TEST_API_KEY is invalid/u,
+        );
+      }
+    }
+    await assert.rejects(
+      runRelayCommand(
+        baseArgs,
+        {
+          TEST_API_KEY: `\t ${PROVIDER_KEY} \r\n`,
+          OAL_EXPECTED_RELAY_BUILD_ID: buildId,
+        },
+        () => assert.fail("zero ttl must fail before startup"),
+        profiles,
+        authorization,
+      ),
+      /expiresAtMs must be within the next 24 hours/u,
+    );
+
     for (const [flag, nativeName] of [
       ["--max-request-bytes", "maxRequestBytes"],
       ["--max-response-bytes", "maxResponseBytes"],
@@ -108,7 +149,7 @@ test("relay limit flags reach the native relay and retain established defaults",
       await assert.rejects(
         runRelayCommand(
           [...baseArgs, flag, "0"],
-          { TEST_API_KEY: "provider-secret", OAL_EXPECTED_RELAY_BUILD_ID: buildId },
+          { TEST_API_KEY: PROVIDER_KEY, OAL_EXPECTED_RELAY_BUILD_ID: buildId },
           () => assert.fail("an invalid relay limit must fail before startup"),
           profiles,
           authorization,
@@ -269,7 +310,7 @@ test("token publication is non-overwriting and failed publication closes the rel
     await assert.rejects(
       runRelayCommand(
         args,
-        { TEST_API_KEY: "provider-secret", OAL_EXPECTED_RELAY_BUILD_ID: buildId },
+        { TEST_API_KEY: PROVIDER_KEY, OAL_EXPECTED_RELAY_BUILD_ID: buildId },
         () => assert.fail("relay must not announce a conflicting token"),
         {
           test: {
