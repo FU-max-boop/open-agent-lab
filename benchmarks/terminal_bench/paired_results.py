@@ -80,7 +80,7 @@ from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:6ee068dec3aabb7ce9cedbe124e6b13ff61673b9f5033f61a187aca0db60817c"
+    "sha256:cc8bb3ac4176f9ab60179d26a974ef7920ca93e436f5ca242a21b2f1393bf878"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -2877,17 +2877,10 @@ def _attempt(
             for record in verified["records"]
             if record["event"] == "transport.responses.request"
         ],
-        "providerRequestIds": [
-            record["providerRequestId"]
+        "providerResponseIdentities": [
+            (record["providerRequestId"], record["responseId"])
             for record in verified["records"]
             if record["event"] == "transport.responses.closed"
-            and record["providerRequestId"] is not None
-        ],
-        "responseIds": [
-            record["responseId"]
-            for record in verified["records"]
-            if record["event"] == "transport.responses.closed"
-            and record["responseId"] is not None
         ],
         "chainHead": verified["chain_head"],
     }
@@ -3753,7 +3746,7 @@ def _median(values: list[float | str]) -> float | str | None:
 
 
 def _clean_attempt(item: dict[str, Any]) -> dict[str, Any]:
-    hidden = {"startedAt", "probeStartedAt", "providerRequestIds", "responseIds"}
+    hidden = {"startedAt", "probeStartedAt", "providerResponseIdentities"}
     return {key: value for key, value in item.items() if key not in hidden}
 
 
@@ -3783,17 +3776,35 @@ def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
     ]
     if len(set(request_ids)) != len(request_ids):
         raise IntegrityError("relay request IDs must be globally unique")
-    for key, label in (
-        ("providerRequestIds", "provider request IDs"),
-        ("responseIds", "response IDs"),
+    lifecycles = [
+        (item["provider"], *identity)
+        for item in attempts
+        for identity in item["providerResponseIdentities"]
+    ]
+    response_ids = [
+        (provider, response)
+        for provider, _request, response in lifecycles
+        if response is not None
+    ]
+    if len(set(response_ids)) != len(response_ids):
+        raise IntegrityError(
+            "response IDs must be unique within each provider across supplied trials"
+        )
+    request_counts = Counter(
+        (provider, request)
+        for provider, request, _response in lifecycles
+        if request is not None
+    )
+    if any(
+        response is None
+        and request is not None
+        and request_counts[(provider, request)] > 1
+        for provider, request, response in lifecycles
     ):
-        identities = [
-            (item["provider"], value) for item in attempts for value in item[key]
-        ]
-        if len(set(identities)) != len(identities):
-            raise IntegrityError(
-                f"{label} must be unique within each provider across supplied trials"
-            )
+        raise IntegrityError(
+            "fallback provider request IDs must be unique within each provider "
+            "across supplied trials"
+        )
 
 
 def _build_pairs(
