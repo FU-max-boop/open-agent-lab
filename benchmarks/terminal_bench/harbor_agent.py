@@ -571,8 +571,11 @@ class OpenAgentLabCodex(Codex):
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
         environment = self._validated_environment(environment)
-        binding = self._validate_request_source()
+        self._validate_request_source()
         await super().setup(environment)
+
+    async def _authorize_relay(self, environment: _PinnedRelayDockerEnvironment) -> str:
+        binding = self._validate_request_source()
         build_result = await environment.service_exec(
             f"cat {RELAY_BUILD_ID_PATH}",
             service=RELAY_SERVICE,
@@ -629,7 +632,7 @@ class OpenAgentLabCodex(Codex):
             ) from error
         if token_result.return_code != 0:
             raise RuntimeError("Failed to obtain the per-trial relay capability.")
-        self._extra_env[_RELAY_TOKEN_ENV] = relay_token
+        return relay_token
 
     def _validate_route_authorization(
         self,
@@ -687,9 +690,15 @@ class OpenAgentLabCodex(Codex):
             raise RuntimeError("Concurrent Codex runs are not supported.")
         self._codex_run_active = True
         self._codex_launches = 0
+        try:
+            relay_token = await self._authorize_relay(environment)
+        except BaseException:
+            self._codex_run_active = False
+            raise
         primary_error: BaseException | None = None
         try:
-            await self._run_once(instruction, environment, context)
+            with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
+                await self._run_once(instruction, environment, context)
         except BaseException as error:
             primary_error = error
             raise
@@ -704,8 +713,6 @@ class OpenAgentLabCodex(Codex):
         context: AgentContext,
     ) -> None:
         self._validate_request_source()
-        if _RELAY_TOKEN_ENV not in self._extra_env:
-            raise RuntimeError("Relay capability was not initialized during setup.")
         if self._LIVE_ROUTE_PROBE:
             async with asyncio.timeout(LIVE_ROUTE_PROBE_LIMITS["codexTimeoutSeconds"]):
                 await super().run(LIVE_ROUTE_PROBE_INSTRUCTION, environment, context)

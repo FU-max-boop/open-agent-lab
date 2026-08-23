@@ -225,7 +225,7 @@
     "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:1cbf361ed3452c68fe07b9d3e016bdb0416b32d4f8490d58c88933cfa53564b9",
     "benchmarks/terminal_bench/codex_runtime.py": "sha256:b21d780f345fb4e7b42ca476a87f717f3ffa3d2b8a2213e4e06f49abb678eafc",
     "benchmarks/terminal_bench/experiment_contract.py": "sha256:7819f0700a8d505b3e4e500f3a09caecd4db5c38e1fe1be23b2d25625d367bb9",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:259357bbec0e1851cb67bb4281684bf9efbac3a54f1c9ee964b978b25aa9a808",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:510f5f7d400fc159024c762c6beeb35fc286e7fe0de2ab8f2fc8205b419da7a1",
     "benchmarks/terminal_bench/harbor_environment.py": "sha256:96d39f52a4a3b992e1c029e82a005fc847bef7fc2a94d4803cbf20ef1a982798",
     "benchmarks/terminal_bench/live-route-probe-task/environment/.gitkeep": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",

@@ -3,10 +3,11 @@ import json
 import logging
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import yaml
@@ -79,6 +80,7 @@ def _pinned_environment_mock(
     environment._provider_secret_path = None
     environment._provider_credential_identity = None
     environment.trial_paths = SimpleNamespace(trial_dir=Path("/tmp/oal-trial"))
+    environment.scoped_exec_env = MagicMock(return_value=nullcontext())
     return environment
 
 
@@ -753,7 +755,6 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                         ),
                     },
                 )
-            probe._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
             parent_run = AsyncMock(
                 side_effect=lambda *_args, **_kwargs: setattr(
                     probe, "_codex_launches", 1
@@ -766,6 +767,11 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "run", new=parent_run),
                 patch.object(Codex, "exec_as_agent", new=parent_exec),
+                patch.object(
+                    probe,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
                 patch.object(probe, "_seal_and_retain", new=retain),
             ):
                 await probe.run(
@@ -779,6 +785,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             json.dumps(LIVE_ROUTE_PROBE_COMMAND), LIVE_ROUTE_PROBE_INSTRUCTION
         )
         parent_exec.assert_awaited_once()
+        environment.scoped_exec_env.assert_called_once_with(
+            {"OAL_RELAY_TOKEN": "a" * 64}
+        )
         self.assertTrue(probe._open_agent_lab_variant["effect_verified"])
         retain.assert_awaited_once()
 
@@ -1346,11 +1355,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     run_binding=_RUN_BINDING,
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
-            agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
             retain = AsyncMock()
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "run", new=AsyncMock()),
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
                 patch.object(agent, "_seal_and_retain", new=retain),
                 self.assertRaisesRegex(RuntimeError, "did not launch exactly once"),
             ):
@@ -1360,7 +1373,36 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             retain.assert_awaited_once()
             self.assertFalse(agent._codex_run_active)
 
-    async def test_setup_fetches_a_per_trial_token_before_agent_run(self) -> None:
+    async def test_failed_live_authorization_releases_the_run_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
+                agent = OpenAgentLabCodex(
+                    Path(raw),
+                    model_name="zai/glm-5.3",
+                    version="0.149.0",
+                    run_binding=_RUN_BINDING,
+                    extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+                )
+            parent_run = AsyncMock()
+            retain = AsyncMock()
+            with (
+                patch.object(Codex, "run", new=parent_run),
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(side_effect=RuntimeError("authorization failed")),
+                ),
+                patch.object(agent, "_seal_and_retain", new=retain),
+                self.assertRaisesRegex(RuntimeError, "authorization failed"),
+            ):
+                await agent.run(
+                    "instruction", _pinned_environment_mock(None), AgentContext()
+                )
+            parent_run.assert_not_awaited()
+            retain.assert_not_awaited()
+            self.assertFalse(agent._codex_run_active)
+
+    async def test_live_run_fetches_a_per_trial_token_after_setup(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             trial = Path(raw)
             logs = trial / "agent"
@@ -1403,7 +1445,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 ) as parent_setup,
             ):
-                await agent.setup(_pinned_environment_mock(service_exec))
+                environment = _pinned_environment_mock(service_exec)
+                await agent.setup(environment)
+                self.assertEqual(calls, [])
+                relay_token = await agent._authorize_relay(environment)
             parent_setup.assert_awaited_once()
             self.assertEqual(
                 calls,
@@ -1447,6 +1492,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 [
                     "source",
                     "parent",
+                    "source",
                     "exec:cat /app/relay-build-id",
                     f"exec:{_RELAY_BOOTSTRAP_COMMAND}",
                     "source",
@@ -1454,9 +1500,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     f"exec:{_RELAY_TOKEN_COMMAND}",
                 ],
             )
-            self.assertEqual(agent.extra_env["OAL_RELAY_TOKEN"], "a" * 64)
+            self.assertEqual(relay_token, "a" * 64)
+            self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
-    async def test_setup_rejects_the_wrong_relay_build_before_a_token(self) -> None:
+    async def test_live_authorization_rejects_the_wrong_relay_build(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
                 agent = OpenAgentLabCodex(
@@ -1474,13 +1521,14 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
-                patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "build identity"),
             ):
-                await agent.setup(_pinned_environment_mock(service_exec))
+                await agent._authorize_relay(_pinned_environment_mock(service_exec))
             self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
-    async def test_setup_rechecks_source_before_relay_authorization(self) -> None:
+    async def test_live_authorization_rechecks_source_before_opening_relay(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
                 agent = OpenAgentLabCodex(
@@ -1506,16 +1554,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     "benchmarks.terminal_bench.harbor_agent._validate_live_source",
                     side_effect=(None, RuntimeError("source drifted")),
                 ),
-                patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "source drifted"),
             ):
-                await agent.setup(_pinned_environment_mock(service_exec))
+                await agent._authorize_relay(_pinned_environment_mock(service_exec))
             self.assertEqual(
                 commands, ["cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND]
             )
             self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
-    async def test_setup_rejects_mixed_provider_or_model_before_authorization(
+    async def test_live_authorization_rejects_mixed_provider_or_model(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1562,16 +1609,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     patch(
                         "benchmarks.terminal_bench.harbor_agent._validate_live_source"
                     ),
-                    patch.object(Codex, "setup", new=AsyncMock()),
                     self.assertRaisesRegex(RuntimeError, "does not match this trial"),
                 ):
-                    await agent.setup(_pinned_environment_mock(service_exec))
+                    await agent._authorize_relay(_pinned_environment_mock(service_exec))
                 self.assertEqual(
                     commands, ["cat /app/relay-build-id", _RELAY_BOOTSTRAP_COMMAND]
                 )
                 self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
-    async def test_setup_rejects_an_invalid_relay_token(self) -> None:
+    async def test_live_authorization_rejects_an_invalid_relay_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
                 agent = OpenAgentLabCodex(
@@ -1595,13 +1641,14 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
-                patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "per-trial relay capability"),
             ):
-                await agent.setup(_pinned_environment_mock(service_exec))
+                await agent._authorize_relay(_pinned_environment_mock(service_exec))
             self.assertNotIn("OAL_RELAY_TOKEN", agent.extra_env)
 
-    async def test_setup_never_reads_a_token_when_authorization_fails(self) -> None:
+    async def test_live_authorization_never_reads_a_token_when_open_fails(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
                 agent = OpenAgentLabCodex(
@@ -1634,10 +1681,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
-                patch.object(Codex, "setup", new=AsyncMock()),
                 self.assertRaisesRegex(RuntimeError, "post-validation authorization"),
             ):
-                await agent.setup(_pinned_environment_mock(service_exec))
+                await agent._authorize_relay(_pinned_environment_mock(service_exec))
             self.assertEqual(
                 commands,
                 [
@@ -1686,7 +1732,6 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     run_binding=_RUN_BINDING,
                     extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
                 )
-            agent._extra_env["OAL_RELAY_TOKEN"] = "a" * 64
             agent.logger.disabled = True
 
             async def one_launch(*_args: object, **_kwargs: object) -> None:
@@ -1695,6 +1740,11 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             with (
                 patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
                 patch.object(Codex, "run", new=AsyncMock(side_effect=one_launch)),
+                patch.object(
+                    agent,
+                    "_authorize_relay",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
                 patch.object(
                     agent,
                     "_seal_and_retain",
