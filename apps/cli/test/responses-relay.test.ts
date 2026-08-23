@@ -22,7 +22,7 @@ import {
 
 const MODEL = "glm-5.3";
 const CLIENT_BEARER = "relay-client-token-0000000000000001";
-const PROVIDER_BEARER = "provider-secret";
+const PROVIDER_BEARER = "cache-control";
 
 interface TestServer {
   url: string;
@@ -276,6 +276,14 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
       /marker/u,
     );
   }
+  assert.throws(
+    () =>
+      verifyRelaySeal(
+        journal,
+        reseal({ ...seal, rejectedRequests: { upstream_secret_echo: 2 } }),
+      ),
+    /marker/u,
+  );
   const audited = reseal({
     ...seal,
     rejectedRequests: { client_disconnected_after_close: 1 },
@@ -287,6 +295,7 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
   );
   assert.throws(() => verifyRelayJournal(journal.trimEnd()), /newline/u);
   assert.equal(summary.eventCount, 3);
+  assert.deepEqual(summary.rejectedRequests, {});
   assert.ok(!journal.includes(PROVIDER_BEARER));
   assert.ok(!journal.includes(CLIENT_BEARER));
   const entries = records(journal);
@@ -323,6 +332,154 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
     () => verifyRelayJournal(`${tampered.map((entry) => JSON.stringify(entry)).join("\n")}\n`),
     /chain mismatch at line 3/,
   );
+});
+
+test("relay rejects upstream metadata that echoes its provider credential", async (t) => {
+  const headerCases: Array<{
+    status: number;
+    error: string;
+    headers: Record<string, string>;
+  }> = [
+    {
+      status: 200,
+      error: "upstream_failure",
+      headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
+    },
+    {
+      status: 200,
+      error: "upstream_failure",
+      headers: {
+        "openai-model": MODEL,
+        "request-id": `prefix-${PROVIDER_BEARER}-suffix`,
+      },
+    },
+    {
+      status: 200,
+      error: "upstream_failure",
+      headers: {
+        "openai-model": `prefix-${PROVIDER_BEARER}`,
+        "x-request-id": "provider-request-safe",
+      },
+    },
+    {
+      status: 200,
+      error: "upstream_failure",
+      headers: {
+        "cache-control": `${"x".repeat(513)}${PROVIDER_BEARER}`,
+        "openai-model": MODEL,
+        "x-request-id": "provider-request-safe",
+      },
+    },
+    {
+      status: 204,
+      error: "upstream_body_missing",
+      headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
+    },
+    {
+      status: 302,
+      error: "upstream_redirect",
+      headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
+    },
+  ];
+  let requestCount = 0;
+  const upstream = await listen((_request, response) => {
+    const index = requestCount;
+    const headerCase = headerCases[index];
+    requestCount += 1;
+    const metadataCase = index - headerCases.length;
+    response.writeHead(headerCase?.status ?? 200, {
+      "content-type": "text/event-stream",
+      ...(headerCase?.headers ?? {
+        "openai-model": MODEL,
+        "x-request-id": "provider-request-safe",
+      }),
+    });
+    const eventType = metadataCase === 1 ? `probe-${PROVIDER_BEARER}` : "response.completed";
+    const echoValues = metadataCase === 0;
+    response.end(
+      `data: {"type":"${eventType}","response":{"id":"${echoValues ? PROVIDER_BEARER : "safe-response"}","model":"${echoValues ? `prefix-${PROVIDER_BEARER}` : MODEL}","system_fingerprint":"${echoValues ? PROVIDER_BEARER : "safe"}"}}\n\n`,
+    );
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream, {
+    maxRequests: headerCases.length + 2,
+  });
+
+  for (const headerCase of headerCases) {
+    const response = await relayRequest(relay);
+    assert.equal(response.status, 502);
+    const errorBody = await response.text();
+    assert.ok(!errorBody.includes(PROVIDER_BEARER));
+    assert.deepEqual(JSON.parse(errorBody), { error: { code: headerCase.error } });
+    assert.ok([...response.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
+  }
+  for (let index = 0; index < 2; index += 1) {
+    const parsedEcho = await relayRequest(relay);
+    await parsedEcho.arrayBuffer().catch(() => new ArrayBuffer(0));
+    assert.ok([...parsedEcho.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
+  }
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const seal = await readFile(relay.sealPath, "utf8");
+  assert.ok(!journal.includes(PROVIDER_BEARER));
+  assert.ok(!seal.includes(PROVIDER_BEARER));
+  assert.deepEqual(summary.rejectedRequests, {
+    upstream_secret_echo: headerCases.length + 2,
+  });
+  assert.deepEqual(verifyRelaySeal(journal, seal), summary);
+  const entries = records(journal);
+  for (let index = 0; index < headerCases.length; index += 1) {
+    const headerCase = headerCases[index]!;
+    const headers = entries[index * 3 + 1];
+    assert.equal(headers?.status, headerCase.status);
+    assert.equal(headers?.providerRequestId, null);
+    assert.equal(headers?.modelHeader, null);
+    const closed = entries[index * 3 + 2];
+    assert.equal(closed?.responseBytes, 0);
+    assert.equal(closed?.errorCategory, headerCase.error);
+  }
+  const expectedErrors = [
+    ...headerCases.map(({ error }) => error),
+    "upstream_failure",
+    "upstream_failure",
+  ];
+  for (let index = 0; index < headerCases.length + 2; index += 1) {
+    const closed = entries[index * 3 + 2];
+    assert.equal(closed?.transportState, "failed");
+    assert.equal(closed?.errorCategory, expectedErrors[index]);
+    for (const field of [
+      "responseId",
+      "returnedModel",
+      "systemFingerprint",
+      "terminalEvent",
+    ]) {
+      assert.equal(closed?.[field], null);
+    }
+    assert.deepEqual(closed?.modelSources, {});
+  }
+});
+
+test("relay ignores fixed metadata labels when checking short credentials", async (t) => {
+  for (const upstreamBearer of ["http", "event", "model"]) {
+    await t.test(upstreamBearer, async (t) => {
+      const upstream = await listen((_request, response) => {
+        response.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "openai-model": MODEL,
+          "x-request-id": "safe-request",
+        });
+        response.end(
+          `data: {"type":"response.completed","response":{"id":"safe-response","model":"${MODEL}"}}\n\n`,
+        );
+      });
+      const { relay } = await fixture(t, upstream, { upstreamBearer });
+
+      const response = await relayRequest(relay);
+      assert.equal(response.status, 200);
+      await response.arrayBuffer();
+      assert.deepEqual((await relay.close()).rejectedRequests, {});
+    });
+  }
 });
 
 test("relay normalizes ambiguous request JSON before forwarding", async (t) => {
