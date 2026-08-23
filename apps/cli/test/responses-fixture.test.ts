@@ -114,6 +114,57 @@ test("Responses fixture completes one real function-tool round", async (t) => {
   });
 });
 
+test("Responses fixture completes one real custom-tool round", async (t) => {
+  const fixture = await startResponsesFixture({
+    bearer: "fixture-secret",
+    model: "fixture-model",
+    patch: "*** Begin Patch\n*** End Patch\n",
+    callId: "call_patch_test",
+  });
+  t.after(() => fixture.close());
+  const request = (input: unknown): Promise<Response> =>
+    fetch(`${fixture.baseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer fixture-secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "fixture-model", stream: true, input, tools: TOOLS }),
+    });
+
+  const first = await request("apply the patch");
+  assert.equal(first.status, 200);
+  const firstBody = await first.text();
+  assert.match(firstBody, /"type":"custom_tool_call"/u);
+  assert.match(firstBody, /"call_id":"call_patch_test"/u);
+  assert.match(firstBody, /"name":"apply_patch"/u);
+
+  const validOutput = {
+    type: "custom_tool_call_output",
+    call_id: "call_patch_test",
+    output: "Exit code: 0",
+  };
+  for (const invalid of [
+    [{ ...validOutput, type: "function_call_output" }],
+    [{ ...validOutput, call_id: "call_wrong" }],
+    [validOutput, validOutput],
+  ]) {
+    const rejected = await request(invalid);
+    const rejectedBody = await rejected.text();
+    assert.match(rejectedBody, /invalid fixture tool output/u);
+    assert.doesNotMatch(rejectedBody, /response\.completed/u);
+    assert.equal(fixture.snapshot().toolOutput, "");
+  }
+
+  const completed = await request([validOutput]);
+  assert.equal(completed.status, 200);
+  assert.match(await completed.text(), /response\.completed/u);
+  const snapshot = fixture.snapshot();
+  assert.equal(snapshot.requests.length, 5);
+  assert.equal(snapshot.toolName, "apply_patch");
+  assert.equal(snapshot.toolOutput, "Exit code: 0");
+});
+
 test("Responses fixture binds an exact developer-instruction marker", async (t) => {
   const marker = "Run one focused verification pass.\n";
   const fixture = await startResponsesFixture({

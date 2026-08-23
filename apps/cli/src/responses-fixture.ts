@@ -15,16 +15,21 @@ export interface ResponsesFixtureSnapshot {
   readonly toolOutput: string;
 }
 
-export interface ResponsesFixtureOptions {
+interface ResponsesFixtureBaseOptions {
   readonly bearer: string;
   readonly model: string;
-  readonly command: string;
   readonly finalMessage?: string;
   readonly callId?: string;
   readonly instructionMarker?: string;
   readonly host?: string;
   readonly port?: number;
 }
+
+export type ResponsesFixtureOptions = ResponsesFixtureBaseOptions &
+  (
+    | { readonly command: string; readonly patch?: never }
+    | { readonly patch: string; readonly command?: never }
+  );
 
 export interface ResponsesFixture {
   readonly baseUrl: string;
@@ -71,7 +76,7 @@ function complete(response: ServerResponse, id: string, model: string): void {
   response.end();
 }
 
-function execTool(body: Record<string, unknown>): string {
+function validateTools(body: Record<string, unknown>): void {
   const tools = Array.isArray(body.tools) ? body.tools : [];
   const found = tools.find(
     (tool): tool is Record<string, unknown> =>
@@ -103,22 +108,35 @@ function execTool(body: Record<string, unknown>): string {
   ) {
     throw new Error("Codex did not advertise the native apply_patch grammar.");
   }
-  return "exec_command";
 }
 
-function toolResult(body: Record<string, unknown>, callId: string): string | undefined {
+function toolResult(
+  body: Record<string, unknown>,
+  callId: string,
+  toolName: "exec_command" | "apply_patch",
+): string | undefined {
   if (!Array.isArray(body.input)) return undefined;
-  const item = body.input.find(
-    (candidate) =>
+  const outputs = body.input.filter(
+    (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" &&
       candidate !== null &&
       !Array.isArray(candidate) &&
-      candidate.type === "function_call_output" &&
-      candidate.call_id === callId,
+      (candidate.type === "function_call_output" ||
+        candidate.type === "custom_tool_call_output"),
   );
-  return item !== undefined && "output" in item && typeof item.output === "string"
-    ? item.output
-    : undefined;
+  if (outputs.length === 0) return undefined;
+  const item = outputs[0];
+  const expectedType =
+    toolName === "apply_patch" ? "custom_tool_call_output" : "function_call_output";
+  if (
+    outputs.length !== 1 ||
+    item?.type !== expectedType ||
+    item.call_id !== callId ||
+    typeof item.output !== "string"
+  ) {
+    throw new Error("Codex returned an invalid fixture tool output.");
+  }
+  return item.output;
 }
 
 function instructionPaths(value: unknown, marker: string, path = "$"): string[] {
@@ -164,7 +182,7 @@ function hasInstructionMarker(body: Record<string, unknown>, marker: string): bo
   return true;
 }
 
-/** Deterministic two-response fixture for real Codex shell-tool probes. */
+/** Deterministic two-response fixture for real Codex native-tool probes. */
 export async function startResponsesFixture(
   options: ResponsesFixtureOptions,
 ): Promise<ResponsesFixture> {
@@ -172,7 +190,12 @@ export async function startResponsesFixture(
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(options.model)) {
     throw new Error("Fixture model must be a safe provider model ID.");
   }
-  if (options.command.trim() === "") throw new Error("Fixture command must be non-empty.");
+  if ((options.command === undefined) === (options.patch === undefined)) {
+    throw new Error("Fixture requires exactly one command or patch.");
+  }
+  const expectedTool = options.patch === undefined ? "exec_command" : "apply_patch";
+  const toolInput = options.patch ?? options.command;
+  if (toolInput.trim() === "") throw new Error("Fixture tool input must be non-empty.");
   if (options.instructionMarker !== undefined && options.instructionMarker.trim() === "") {
     throw new Error("Fixture instruction marker must be non-empty.");
   }
@@ -223,19 +246,23 @@ export async function startResponsesFixture(
         : "resp_fixture_";
       const id = `${idPrefix}${requests.length}`;
       event(response, { type: "response.created", response: { id, model: options.model } });
-      const output = toolResult(body, callId);
+      const output = toolResult(body, callId, expectedTool);
       if (output === undefined) {
         if (toolIssued) throw new Error("Codex repeated the fixture turn without tool output.");
-        toolName = execTool(body);
+        validateTools(body);
+        toolName = expectedTool;
         toolIssued = true;
         event(response, {
           type: "response.output_item.done",
-          item: {
-            type: "function_call",
-            call_id: callId,
-            name: toolName,
-            arguments: JSON.stringify({ cmd: options.command }),
-          },
+          item:
+            toolName === "apply_patch"
+              ? { type: "custom_tool_call", call_id: callId, name: toolName, input: toolInput }
+              : {
+                  type: "function_call",
+                  call_id: callId,
+                  name: toolName,
+                  arguments: JSON.stringify({ cmd: toolInput }),
+                },
         });
       } else {
         if (!toolIssued) throw new Error("Codex returned tool output before a fixture call.");
