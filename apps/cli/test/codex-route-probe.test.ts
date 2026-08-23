@@ -151,9 +151,9 @@ test("repository revision rejects inherited Git metadata and dirty roots", async
   const submodule = await mkdtemp(join(tmpdir(), "open-agent-lab-submodule-"));
   t.after(async () => rm(parent, { force: true, recursive: true }));
   t.after(async () => rm(submodule, { force: true, recursive: true }));
-  await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
   execFileSync("git", ["init", "--quiet"], { cwd: parent });
   await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
+  await writeFile(join(parent, ".gitignore"), "ignored/\n", "utf8");
   execFileSync("git", ["add", ".gitignore"], { cwd: parent });
   execFileSync(
     "git",
