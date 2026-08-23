@@ -319,6 +319,16 @@ class RelayMetadataTest(unittest.TestCase):
                 {"ok": False, "reasons": ["synthetic_provider"]},
             )
 
+    def test_secret_echo_rejections_cannot_exceed_lifecycles(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_evidence(directory, rejected_requests={"upstream_secret_echo": 2})
+            with self.assertRaisesRegex(ValueError, "seal mismatch"):
+                relay_metadata(
+                    directory / "provider-metadata.ndjson",
+                    directory / "provider-metadata.ndjson.sealed",
+                )
+
     def test_real_rejection_still_blocks_with_a_post_terminal_disconnect(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
