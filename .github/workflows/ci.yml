@@ -93,6 +93,7 @@ jobs:
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_live_route_probe.py \
             benchmarks/terminal_bench/test_paired_results.py \
+            benchmarks/terminal_bench/test_relay_evidence.py \
             benchmarks/terminal_bench/test_validate_harbor_install_only.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py \
             benchmarks/terminal_bench/validate_harbor_install_only.py
@@ -110,6 +111,7 @@ jobs:
             benchmarks/terminal_bench/test_experiment_contract.py \
             benchmarks/terminal_bench/test_live_route_probe.py \
             benchmarks/terminal_bench/test_paired_results.py \
+            benchmarks/terminal_bench/test_relay_evidence.py \
             benchmarks/terminal_bench/test_validate_harbor_install_only.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py \
             benchmarks/terminal_bench/validate_harbor_install_only.py
@@ -130,6 +132,7 @@ jobs:
             benchmarks.terminal_bench.test_harbor_environment \
             benchmarks.terminal_bench.test_live_route_probe \
             benchmarks.terminal_bench.test_paired_results \
+            benchmarks.terminal_bench.test_relay_evidence \
             benchmarks.terminal_bench.test_validate_harbor_install_only
 
   task-image-smoke:
