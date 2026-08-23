@@ -566,6 +566,7 @@ class OpenAgentLabCodex(Codex):
         self._open_agent_lab_run_binding = binding
         self._codex_runtime_spec = codex_runtime_spec()
         self._codex_launches = 0
+        self._codex_launch_active = False
         self._codex_run_active = False
         self._open_agent_lab_variant = _variant(
             enable_verify_instruction_v1,
@@ -627,7 +628,8 @@ class OpenAgentLabCodex(Codex):
         timeout_sec: int | None = None,
     ) -> Any:
         if command.startswith(HARBOR_CODEX_EXEC_PREFIX):
-            if not self._codex_run_active or self._codex_launches:
+            launch_allowed = self._codex_run_active and self._codex_launch_active
+            if not launch_allowed or self._codex_launches:
                 raise RuntimeError("Codex must launch exactly once inside agent.run().")
             command = (
                 build_full_tree_verification_command(self._codex_runtime_spec)
@@ -766,13 +768,18 @@ class OpenAgentLabCodex(Codex):
         if self._codex_run_active:
             raise RuntimeError("Concurrent Codex runs are not supported.")
         self._codex_run_active = True
+        self._codex_launch_active = False
         self._codex_launches = 0
         try:
             relay_token = await self._authorize_relay(environment)
             primary_error: BaseException | None = None
             try:
                 with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
-                    await self._run_once(instruction, environment, context)
+                    self._codex_launch_active = True
+                    try:
+                        await self._run_once(instruction, environment, context)
+                    finally:
+                        self._codex_launch_active = False
             except BaseException as error:
                 primary_error = error
                 raise
