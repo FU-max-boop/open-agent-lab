@@ -61,11 +61,18 @@ without exposing the durable key. Use a disposable key file and a provider-side
 spend cap until those gates pass.
 
 The provider-free route harness tests both exact Codex profiles in hosted CI,
-but it cannot establish live provider identity. Live conformance must execute
-inside Harbor's isolated task container while the durable credential remains in
-the separate relay service. Terminal-Bench preparation does not consume such a
-receipt yet, so the absence of that machine-bound isolated gate remains an
-explicit blocker.
+but it cannot establish live provider identity. A live route/model-identity
+observation must execute inside Harbor's isolated task container while the
+durable credential remains in the separate relay service. This live gate is
+deliberately narrower than conformance: every prepared run contains a dedicated,
+non-scoring `live-route-probe` job. The probe relay is the only service on both
+the task's internal network and a separate egress network. It remains closed
+until the adapter revalidates the run binding, credential identity, and a
+short-lived operator attestation for a provider-side cap. A successful probe
+still does not authorize the pilot by itself: the verifier must publish a new
+mode-0600 receipt at the fixed path for that run. Every pilot trial revalidates
+that receipt, the underlying evidence, the unchanged credential, and its expiry
+immediately before opening its relay.
 
 Five tasks were selected only from the pinned directory names by sorting
 `sha256(seed + NUL + task_id)` and taking the first five. No tests, solutions,
@@ -138,8 +145,9 @@ still requires disposable provider credentials, a provider-side spend cap, and
 the evidence gates described above.
 
 For a live pilot, prepare both predeclared repetitions **before the first live
-request**, while the same commit is still clean. The output roots and provider
-key files must be outside this repository.
+request**, while the same commit is still clean. The analyzer enforces output
+roots outside this repository; the operator must also keep provider key files
+outside it.
 Preparation and execution must use the same Linux Docker daemon; immutable local
 relay image IDs are intentionally not portable aliases. The following commands
 document the operator procedure; do not run it until the disposable credentials
@@ -152,35 +160,88 @@ python -m benchmarks.terminal_bench.paired_results prepare \
   /absolute/path/to/oal-mirror --replication mirror-v1
 ```
 
-Inside the relay container the key file must be owned by a different uid than
-1000 and be unreadable after privilege drop (on rootful Linux, use root:root
-mode 0400). The relay fails closed otherwise. Its capability is generated
-separately for every trial. Do not export the provider key itself into Harbor,
-and never run the immutable template directly:
+The normal Harbor host process must hash the exact key bytes before Docker
+starts, while the relay must lose access after dropping to uid/gid 1000. On
+rootful Linux, put each key in a dedicated root-owned directory whose group is
+Harbor's effective gid: directory mode 0750, key owner `root:<Harbor gid>`, and
+key mode 0440. Every ancestor must be root-owned and not group/other-writable.
+Harbor rejects effective gid 1000 because it would leave the relay's post-drop
+group able to read the key. The relay also clears supplementary groups and
+fails closed if the key remains readable. Its capability is generated
+separately for every trial. Do not export the provider key itself into Harbor.
+
+For example, stage a disposable DeepSeek key outside the repository before
+preparation (replace the source path with the protected key material supplied
+for this run):
 
 ```bash
-export OAL_DEEPSEEK_API_KEY_FILE="/absolute/path/to/deepseek-key"
+harbor_gid="$(id -g)"
+test "$harbor_gid" -ne 1000
+sudo install -d -o 0 -g "$harbor_gid" -m 0750 /run/open-agent-lab
+sudo install -o 0 -g "$harbor_gid" -m 0440 \
+  /absolute/protected/path/to/disposable-deepseek-key \
+  /run/open-agent-lab/deepseek-key
+export OAL_DEEPSEEK_API_KEY_FILE=/run/open-agent-lab/deepseek-key
+```
+
+If the operator's normal effective gid is 1000, an administrator must create a
+dedicated group with a different gid, add the operator, and run the entire
+prepare/probe/pilot/analyze workflow from a shell whose effective group is that
+group (for example, `newgrp open-agent-lab`). Do not relax the gid-1000 guard.
+
+For each provider and each prepared repetition, first confirm a provider-side
+cap of at most USD 2. Then write one canonical JSON attestation to the fixed
+`authorizations/<provider>.cap.json` path. `observedAt` must precede the probe,
+`expiresAt` may be at most 24 hours later, and `evidenceSha256` must identify the
+operator-retained cap evidence. `preflightSha256` must equal the same field in
+that repetition's `run-record.json`, so cap files cannot be copied across runs.
+`providerCredentialSha256` must be the SHA-256 of the exact credential file
+mounted into the relay. Keep at least 11 minutes
+remaining before the probe and 4 hours 1 minute before every pilot trial so the
+authorization covers the relay's entire fixed lifetime. The verifier deliberately labels this
+`operator_attested`; it is not independent provider-side proof:
+
+```json
+{"assertedBy":"<operator>","evidenceSha256":"sha256:<64 lowercase hex>","expiresAt":"<UTC timestamp>","limitUsd":2,"model":"<exact frozen model>","observedAt":"<UTC timestamp>","preflightSha256":"sha256:<run-record preflightSha256>","proofClass":"live-route-probe-spend-cap-v1","provider":"<deepseek or zai>","providerCredentialSha256":"sha256:<SHA-256 of the exact credential file>","schemaVersion":1,"verification":"operator_attested"}
+```
+
+The resulting probe receipt is a frozen-gate audit record, not independent
+evidence or a proof against a malicious operator.
+
+The only permitted execution order is probe, verification/receipt publication,
+then pilot. For DeepSeek, for example:
+
+```bash
+export OAL_DEEPSEEK_API_KEY_FILE="/run/open-agent-lab/deepseek-key"
 export OPEN_AGENT_LAB_REPO_ROOT="/absolute/path/to/oal-screen/source"
 export PYTHONPATH="$OPEN_AGENT_LAB_REPO_ROOT"
 export PYTHONSAFEPATH=1
 unset PYTHONHOME DEEPSEEK_API_KEY ZAI_API_KEY
 cd "$OPEN_AGENT_LAB_REPO_ROOT"
+harbor jobs start \
+  --config /absolute/path/to/oal-screen/live-route-probes/deepseek.yaml \
+  --yes
+python -m benchmarks.terminal_bench.live_route_probe \
+  /absolute/path/to/oal-screen \
+  --provider deepseek \
+  --credential-file "$OAL_DEEPSEEK_API_KEY_FILE" \
+  --cap-attestation-file \
+    /absolute/path/to/oal-screen/authorizations/deepseek.cap.json \
+  --output /absolute/path/to/oal-screen/authorizations/deepseek.json
 harbor jobs start \
   --config /absolute/path/to/oal-screen/configs/deepseek.yaml \
   --yes
 ```
 
-```bash
-export OAL_ZAI_API_KEY_FILE="/absolute/path/to/zai-key"
-export OPEN_AGENT_LAB_REPO_ROOT="/absolute/path/to/oal-screen/source"
-export PYTHONPATH="$OPEN_AGENT_LAB_REPO_ROOT"
-export PYTHONSAFEPATH=1
-unset PYTHONHOME DEEPSEEK_API_KEY ZAI_API_KEY
-cd "$OPEN_AGENT_LAB_REPO_ROOT"
-harbor jobs start \
-  --config /absolute/path/to/oal-screen/configs/zai.yaml \
-  --yes
-```
+Use `OAL_ZAI_API_KEY_FILE`, `zai`, and the corresponding ZAI paths for GLM.
+Repeat the complete sequence for the separately prepared mirror; receipts and
+cap attestations cannot be reused across runs. Missing, stale, misplaced,
+rewritten, or cross-run receipts fail before the first scored pilot provider
+request. The gate also creates a private, one-shot claim for each planned
+task/arm slot before opening its relay. An interrupted claimed slot stays
+closed; prepare a fresh output root instead of deleting or rewriting a claim.
+The probe observes a bounded live route and model identity only; its receipt
+sets `liveProviderConformance` to `false` and is not a benchmark score.
 
 Then produce a deterministic redacted screen summary. It exits 0 only when the
 evidence is valid; the result is still `not_promotable` until the separately

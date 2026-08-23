@@ -18,7 +18,8 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -28,14 +29,14 @@ import yaml
 from dirhash import dirhash
 from harbor.environments.docker.docker import _sanitize_docker_compose_project_name
 from harbor.models.job.config import JobConfig
-from harbor.models.job.lock import JobLock
+from harbor.models.job.lock import JobLock, build_trial_lock
 from harbor.models.job.result import JobResult
 from harbor.models.task.id import PackageTaskId
 from harbor.models.trajectories.trajectory import Trajectory
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
 from harbor.publisher.packager import Packager
-from harbor.tasks.client import TaskClient
+from harbor.tasks.client import TaskClient, TaskDownloadResult
 
 from .codex_runtime import (
     CODEX_ARCHIVE_ENV,
@@ -48,27 +49,39 @@ from .codex_runtime import (
     verify_tree,
 )
 from .experiment_contract import (
+    CODEX_VERSION,
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
+    LIVE_ROUTE_PROBE_LIMITS,
+    LIVE_ROUTE_PROBE_TASK,
+    PILOT_RECEIPT_ENV,
     PREFLIGHT_KEYS,
     RELAY_ARTIFACT_LIMITS,
+    RELAY_CLAIM_FIELDS,
     RELAY_JOURNAL_PATH,
     RELAY_SEAL_PATH,
     artifact_manifest,
+    canonical_digest,
     canonical_json,
     digest_bytes,
+    is_digest,
     is_revision,
     is_strict_int,
+    live_route_probe_config,
+    live_route_probe_networks,
+    live_route_probe_relay_command,
+    relay_claim_name,
+    same_json,
 )
 from .relay_evidence import _EVENT_FIELDS as _RELAY_FIELDS
 from .relay_evidence import _SEAL_FIELDS, relay_metadata
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:c5cf66148f8674bac34424eeae6569d9af618bc753417f228a76dbbdcabbc322"
+    "sha256:182db83f15feb5fbec894a35708ef5f349d6f837dc9a560b9e117476bae06c26"
 )
 _HARBOR_VERSION = "0.22.0"
-_CODEX_VERSION = "0.149.0"
+_CODEX_VERSION = CODEX_VERSION
 _RELAY_REQUEST_CAP = 256
 _RELAY_JOURNAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH]
 _RELAY_SEAL_CAP = RELAY_ARTIFACT_LIMITS[RELAY_SEAL_PATH]
@@ -103,6 +116,41 @@ _PROVIDER_METADATA_FIELDS = frozenset(
         "records",
         "harbor_binding",
         "agent_variant",
+    }
+)
+_PROBE_RECEIPT_FIELDS = frozenset(
+    {
+        "schemaVersion",
+        "proofClass",
+        "provider",
+        "model",
+        "sourceRevision",
+        "preflightSha256",
+        "runBindingSha256",
+        "configSha256",
+        "composeSha256",
+        "fullComposeSha256",
+        "providerCredentialSha256",
+        "probeClaimSha256",
+        "relayMarkerSha256",
+        "relayChainHead",
+        "providerRequestIdsSha256",
+        "responseIdsSha256",
+        "requestCount",
+        "usage",
+        "credentialLeakScan",
+        "spendCap",
+        "pilotJob",
+        "probeStartedAt",
+        "probeFinishedAt",
+        "authorizationExpiresAt",
+        "liveProviderRouteObserved",
+        "liveProviderConformance",
+        "benchmarkTaskInstructionUsed",
+        "benchmarkRewardUsed",
+        "spendCapVerification",
+        "benchmarkStartAuthorized",
+        "verifiedAt",
     }
 )
 _DATASET = "terminal-bench/terminal-bench-2-1"
@@ -141,6 +189,7 @@ _TASKS = (
     "terminal-bench/large-scale-text-editing",
     "terminal-bench/multi-source-data-merger",
 )
+_ALL_TASKS = (*_TASKS, LIVE_ROUTE_PROBE_TASK)
 _TASK_DIGESTS = {
     "terminal-bench/model-extraction-relu-logits": (
         "sha256:1ae5045ad68b5d34c3398b612066a07c4a08b6dc330d28868ec4021e17c94b17"
@@ -234,13 +283,37 @@ _TASK_RUNTIME_BINDINGS = {
         ),
         "platform": "linux/amd64",
     },
+    LIVE_ROUTE_PROBE_TASK: {
+        "taskDigest": (
+            "sha256:79484e87208b106689f18701db89b85e10c59fc8ea923f55c727e630196f4e8f"
+        ),
+        "taskChecksum": (
+            "fb65a775a56b52655c0877b546a583010023f97ef237d66e61db7423469aaf45"
+        ),
+        "declaredImage": "ubuntu:24.04",
+        "immutableImage": (
+            "ubuntu@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316"
+        ),
+        "imageConfigDigest": (
+            "sha256:a6f81fb630d51837271b89f8193810a5fc493fa4f30a55d7ebcdb3a66f3cc63a"
+        ),
+        "platform": "linux/amd64",
+    },
 }
+
+
+def _task_relative(task: str) -> str:
+    return (
+        task.removeprefix("terminal-bench/")
+        if task.startswith("terminal-bench/")
+        else task.removeprefix("open-agent-lab/")
+    )
 
 
 def _declared_task_snapshots() -> dict[str, dict[str, str]]:
     return {
         task: {
-            "relativePath": f"tasks/{task.removeprefix('terminal-bench/')}",
+            "relativePath": f"tasks/{_task_relative(task)}",
             "taskDigest": binding["taskDigest"],
             "taskChecksum": binding["taskChecksum"],
         }
@@ -462,7 +535,7 @@ def _canonical(value: Any) -> str:
 
 def _same_json(left: Any, right: Any) -> bool:
     try:
-        return _canonical(left) == _canonical(right)
+        return same_json(left, right)
     except (TypeError, ValueError) as error:
         raise IntegrityError(f"non-canonical JSON value: {error}") from error
 
@@ -472,7 +545,7 @@ def _digest_bytes(value: bytes) -> str:
 
 
 def _digest(value: Any) -> str:
-    return _digest_bytes(_canonical(value).encode())
+    return canonical_digest(value)
 
 
 def _task_content_identity(path: Path) -> tuple[str, str]:
@@ -490,7 +563,7 @@ def _validate_task_snapshots(
     if tasks_root.is_symlink() or not tasks_root.is_dir():
         raise IntegrityError("prepared task snapshot root is unavailable")
     if {item.name for item in tasks_root.iterdir()} != {
-        task.removeprefix("terminal-bench/") for task in expected
+        _task_relative(task) for task in expected
     }:
         raise IntegrityError("prepared task snapshot root has unexpected entries")
     for task, binding in expected.items():
@@ -514,7 +587,7 @@ def _validate_task_snapshots(
     return expected
 
 
-def _materialize_task_snapshots(temp: Path) -> dict[str, dict[str, str]]:
+def _materialize_task_snapshots(source: Path, temp: Path) -> dict[str, dict[str, str]]:
     tasks_root = temp / "tasks"
     tasks_root.mkdir()
     task_ids = [
@@ -542,6 +615,10 @@ def _materialize_task_snapshots(temp: Path) -> dict[str, dict[str, str]]:
         for result, expected in zip(batch.results, expected_paths, strict=True)
     ):
         raise IntegrityError("frozen task materialization returned unexpected paths")
+    shutil.copytree(
+        source / "benchmarks" / "terminal_bench" / "live-route-probe-task",
+        tasks_root / _task_relative(LIVE_ROUTE_PROBE_TASK),
+    )
     return _validate_task_snapshots(temp, _declared_task_snapshots())
 
 
@@ -843,8 +920,15 @@ def _merge_compose(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, A
 
 
 def _pinned_overlay(
-    source: Path, provider: str, image: str, *, fixture: bool = False
+    source: Path,
+    provider: str,
+    image: str,
+    *,
+    fixture: bool = False,
+    live_route_probe: bool = False,
 ) -> dict[str, Any]:
+    if fixture and live_route_probe:
+        raise IntegrityError("fixture and live-route policies are mutually exclusive")
     base = _load_yaml(
         source / "benchmarks" / "terminal_bench" / f"relay.{provider}.compose.yaml"
     )
@@ -860,6 +944,9 @@ def _pinned_overlay(
     relay.pop("build", None)
     relay["image"] = image
     relay["pull_policy"] = "never"
+    if live_route_probe:
+        relay["command"] = live_route_probe_relay_command(relay.get("command"))
+        base = live_route_probe_networks(base)
     return base
 
 
@@ -878,6 +965,22 @@ def _render_pinned_overlays(
         rendered[provider] = {
             "path": f"overlays/{name}",
             "sha256": _digest_bytes(text.encode()),
+            "image": images["production"],
+        }
+        probe_name = f"relay.{provider}.live-route-probe.compose.yaml"
+        probe_text = yaml.safe_dump(
+            _pinned_overlay(
+                source,
+                provider,
+                images["production"],
+                live_route_probe=True,
+            ),
+            sort_keys=False,
+        )
+        (overlays / probe_name).write_text(probe_text)
+        rendered[f"{provider}-live-route-probe"] = {
+            "path": f"overlays/{probe_name}",
+            "sha256": _digest_bytes(probe_text.encode()),
             "image": images["production"],
         }
     fixture_name = "relay.fixture.compose.yaml"
@@ -1107,6 +1210,7 @@ def _bound_config(
     compose_path: Path,
     compose_sha256: str,
     runtime_root: Path,
+    authorization_path: Path,
 ) -> dict[str, Any]:
     config["datasets"] = []
     config["tasks"] = [
@@ -1119,6 +1223,10 @@ def _bound_config(
     config["agents"] = [by_variant[variant] for variant in order]
     for agent in config["agents"]:
         agent["kwargs"] = {**agent["kwargs"], "run_binding": binding}
+        agent["env"] = {
+            "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
+            PILOT_RECEIPT_ENV: str(authorization_path),
+        }
     config["job_name"] = job_name
     config["jobs_dir"] = str(jobs_dir)
     environment = _mapping(config.get("environment"), "environment")
@@ -1209,6 +1317,52 @@ def _write_fixture_configs(
         (temp / "fixtures" / name).write_text(yaml.safe_dump(fixture, sort_keys=False))
 
 
+def _write_live_route_probe_configs(
+    temp: Path,
+    output: Path,
+    binding: dict[str, Any],
+    overlays: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for provider, profile in _PROVIDERS.items():
+        job_name = (
+            f"open-agent-lab-{binding['replication_id']}-{provider}-live-route-probe"
+        )
+        overlay = overlays[f"{provider}-live-route-probe"]
+        config = live_route_probe_config(
+            output,
+            binding,
+            provider,
+            profile["model"],
+            profile["reasoning"],
+            output / overlay["path"],
+            overlay["sha256"],
+        )
+        try:
+            JobConfig.model_validate(config)
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("live-route probe config is invalid") from error
+        rendered = yaml.safe_dump(config, sort_keys=False)
+        relative = f"live-route-probes/{provider}.yaml"
+        (temp / relative).write_text(rendered)
+        records.append(
+            {
+                "provider": provider,
+                "model": profile["model"],
+                "reasoning": profile["reasoning"],
+                "task": LIVE_ROUTE_PROBE_TASK,
+                "config": relative,
+                "configSha256": _digest_bytes(rendered.encode()),
+                "jobDir": f"live-route-jobs/{provider}/{job_name}",
+                "compose": overlay["path"],
+                "composeSha256": overlay["sha256"],
+                "relayImageSha256": overlay["image"],
+                "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
+            }
+        )
+    return records
+
+
 def _prepare_run(
     root: Path,
     output: Path,
@@ -1224,7 +1378,7 @@ def _prepare_run(
     _, runtime_receipt = _materialize_codex_runtime(temp, runtime_spec)
     published_runtime_root = output / CODEX_RUNTIME_PREPARED_RELATIVE
     replication = _replication(manifest, replication_id)
-    task_snapshots = _materialize_task_snapshots(temp)
+    task_snapshots = _materialize_task_snapshots(snapshot, temp)
     images = _build_relay_images(
         snapshot, manifest["relayBuildIds"], temp, tags, created_images
     )
@@ -1251,6 +1405,8 @@ def _prepare_run(
         raise IntegrityError("paired config providers drifted")
     (temp / "configs").mkdir()
     (temp / "fixtures").mkdir()
+    (temp / "live-route-probes").mkdir()
+    (temp / "authorizations").mkdir(mode=0o700)
     providers: list[dict[str, Any]] = []
     for provider, spec in _PROVIDERS.items():
         configured = _mapping(configs[provider], f"{provider} paired config")
@@ -1273,6 +1429,7 @@ def _prepare_run(
             output / overlays[provider]["path"],
             overlays[provider]["sha256"],
             published_runtime_root,
+            output / "authorizations" / f"{provider}.json",
         )
         rendered = yaml.safe_dump(config, sort_keys=False)
         (temp / "configs" / f"{provider}.yaml").write_text(rendered)
@@ -1301,6 +1458,12 @@ def _prepare_run(
         overlays["fixture"]["sha256"],
         published_runtime_root,
     )
+    live_route_probes = _write_live_route_probe_configs(
+        temp,
+        output,
+        binding,
+        overlays,
+    )
     if _clean_revision(root) != revision:
         raise IntegrityError("source revision changed while preparing the run")
     record = {
@@ -1312,6 +1475,7 @@ def _prepare_run(
         "taskSnapshots": task_snapshots,
         "codexRuntime": runtime_receipt,
         "providers": providers,
+        "liveRouteProbes": live_route_probes,
     }
     pending_record = temp / ".run-record.json"
     pending_record.write_text(_canonical(record) + "\n")
@@ -1353,12 +1517,98 @@ def prepare(output: Path, replication_id: str = "screen-v1") -> Path:
     return output / "run-record.json"
 
 
+def _validate_live_route_probe_records(
+    run_dir: Path,
+    probes: list[Any],
+    preflight: dict[str, Any],
+    preflight_sha: str,
+    production_image: str,
+) -> list[dict[str, Any]]:
+    if len(probes) != len(_PROVIDERS):
+        raise IntegrityError("live-route probe records are incomplete")
+    observed_providers: set[str] = set()
+    validated: list[dict[str, Any]] = []
+    binding = _expected_binding(preflight, preflight_sha)
+    for raw in probes:
+        probe = _mapping(raw, "live-route probe")
+        provider = probe.get("provider")
+        job_name = (
+            f"open-agent-lab-{preflight['replicationId']}-{provider}-live-route-probe"
+        )
+        if (
+            set(probe)
+            != {
+                "provider",
+                "model",
+                "reasoning",
+                "task",
+                "config",
+                "configSha256",
+                "jobDir",
+                "compose",
+                "composeSha256",
+                "relayImageSha256",
+                "limits",
+            }
+            or provider not in _PROVIDERS
+            or provider in observed_providers
+            or probe.get("config") != f"live-route-probes/{provider}.yaml"
+            or probe.get("jobDir") != f"live-route-jobs/{provider}/{job_name}"
+            or probe.get("compose")
+            != f"overlays/relay.{provider}.live-route-probe.compose.yaml"
+            or probe.get("model") != _PROVIDERS[provider]["model"]
+            or probe.get("reasoning") != _PROVIDERS[provider]["reasoning"]
+            or probe.get("task") != LIVE_ROUTE_PROBE_TASK
+            or probe.get("relayImageSha256") != production_image
+            or probe.get("limits") != dict(LIVE_ROUTE_PROBE_LIMITS)
+        ):
+            raise IntegrityError("live-route probe record drifted")
+        observed_providers.add(provider)
+        artifacts: dict[str, bytes] = {}
+        for field in ("config", "compose"):
+            relative = _relative(probe.get(field), f"live-route {field}")
+            try:
+                data = _artifact_bytes(run_dir, relative.as_posix())
+            except OSError as error:
+                raise IntegrityError(f"live-route {field} is unavailable") from error
+            if _digest_bytes(data) != probe.get(f"{field}Sha256"):
+                raise IntegrityError(f"live-route {field} drifted")
+            artifacts[field] = data
+        compose_path = run_dir / str(probe["compose"])
+        expected_config = live_route_probe_config(
+            run_dir,
+            binding,
+            provider,
+            probe["model"],
+            probe["reasoning"],
+            compose_path,
+            probe["composeSha256"],
+        )
+        if not _same_json(
+            _yaml_bytes(artifacts["config"], "live-route probe config"),
+            expected_config,
+        ) or not _same_json(
+            _yaml_bytes(artifacts["compose"], "live-route probe compose"),
+            _pinned_overlay(
+                _repo_root(),
+                provider,
+                production_image,
+                live_route_probe=True,
+            ),
+        ):
+            raise IntegrityError("live-route probe policy drifted")
+        validated.append(probe)
+    if observed_providers != set(_PROVIDERS):
+        raise IntegrityError("live-route probe providers drifted")
+    return validated
+
+
 def _validate_record(
     run_dir: Path,
     manifest_sha: str,
     production_build_id: str,
     runtime_spec: object,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     record = _mapping(
         _artifact_json(run_dir, "run-record.json", "run record"), "run record"
     )
@@ -1373,6 +1623,7 @@ def _validate_record(
             "taskSnapshots",
             "codexRuntime",
             "providers",
+            "liveRouteProbes",
         }
         or not is_strict_int(record.get("schemaVersion"))
         or record["schemaVersion"] != 1
@@ -1413,7 +1664,14 @@ def _validate_record(
     if not _same_json(runtime_receipt, observed_runtime):
         raise IntegrityError("prepared Codex runtime receipt drifted")
     _iso(preflight.get("createdAt"), "preflight.createdAt")
-    return preflight, _sequence(record.get("providers"), "providers")
+    probes = _validate_live_route_probe_records(
+        run_dir,
+        _sequence(record.get("liveRouteProbes"), "liveRouteProbes"),
+        preflight,
+        str(record["preflightSha256"]),
+        relay_images["production"],
+    )
+    return preflight, _sequence(record.get("providers"), "providers"), probes
 
 
 def _expected_binding(preflight: dict[str, Any], preflight_sha: str) -> dict[str, Any]:
@@ -1776,7 +2034,12 @@ def _expected_trial_lock(
                 "enable_verify_instruction_v1": spec["enabled"],
                 "run_binding": binding,
             },
-            "env": {"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            "env": {
+                "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
+                PILOT_RECEIPT_ENV: str(
+                    task_path.parent.parent / "authorizations" / f"{provider}.json"
+                ),
+            },
             "mcp_servers": [],
         },
         "bridge_inputs": {},
@@ -2053,6 +2316,7 @@ def _validate_cleanup_receipt(
     trial_dir: Path,
     binding: dict[str, Any],
     task: str,
+    provider_credential_sha256: str,
     verifier_finished: datetime,
     trial_finished: datetime,
 ) -> None:
@@ -2074,6 +2338,7 @@ def _validate_cleanup_receipt(
             "preflightSha256",
             "runBindingSha256",
             "relayImageSha256",
+            "providerCredentialSha256",
             "fullComposeSha256",
             "taskId",
             "taskDigest",
@@ -2092,6 +2357,7 @@ def _validate_cleanup_receipt(
         or receipt.get("preflightSha256") != binding["preflight_sha256"]
         or receipt.get("runBindingSha256") != _digest(binding)
         or receipt.get("relayImageSha256") != binding["relay_image_sha256"]
+        or receipt.get("providerCredentialSha256") != provider_credential_sha256
         or not _SHA256.fullmatch(str(receipt.get("fullComposeSha256", "")))
         or receipt.get("taskId") != task
         or receipt.get("taskDigest") != _TASK_RUNTIME_BINDINGS[task]["taskDigest"]
@@ -2228,10 +2494,229 @@ def _job_agent_totals(agent_result: dict[str, Any]) -> dict[str, int | float | N
     return totals
 
 
+def _probe_receipt_payloads(
+    receipt: dict[str, Any], pilot: dict[str, Any]
+) -> tuple[datetime, datetime]:
+    usage = _mapping(receipt.get("usage"), "probe receipt usage")
+    scan = _mapping(receipt.get("credentialLeakScan"), "credential leak scan")
+    spend = _mapping(receipt.get("spendCap"), "probe spend cap")
+    pilot_job = _mapping(receipt.get("pilotJob"), "probe pilot job")
+    input_tokens = _integer(usage.get("input_tokens"), "probe input_tokens")
+    output_tokens = _integer(usage.get("output_tokens"), "probe output_tokens")
+    total_tokens = _integer(usage.get("total_tokens"), "probe total_tokens")
+    cached = usage.get("cached_input_tokens")
+    reasoning = usage.get("reasoning_output_tokens")
+    cached = None if cached is None else _integer(cached, "probe cached_input_tokens")
+    reasoning = (
+        None
+        if reasoning is None
+        else _integer(reasoning, "probe reasoning_output_tokens")
+    )
+    scan_counts = [
+        _integer(scan.get(field), f"credentialLeakScan.{field}")
+        for field in ("files", "bytes", "directories")
+    ]
+    limit = _number(spend.get("limitUsd"), "probe spend cap limit")
+    expected_pilot = {
+        key: pilot[key]
+        for key in (
+            "armOrder",
+            "config",
+            "configSha256",
+            "jobDir",
+            "compose",
+            "composeSha256",
+        )
+    }
+    if (
+        set(usage)
+        != {
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "total_tokens",
+        }
+        or total_tokens != input_tokens + output_tokens
+        or (cached is not None and cached > input_tokens)
+        or (reasoning is not None and reasoning > output_tokens)
+        or set(scan) != {"ok", "files", "bytes", "directories"}
+        or scan.get("ok") is not True
+        or any(value > _MAX_SAFE_INTEGER for value in scan_counts)
+        or set(spend)
+        != {"limitUsd", "observedAt", "expiresAt", "evidenceSha256", "assertedBy"}
+        or not 0 < limit <= 2
+        or not is_digest(spend.get("evidenceSha256"))
+        or not isinstance(spend.get("assertedBy"), str)
+        or not spend["assertedBy"].strip()
+        or not _same_json(pilot_job, expected_pilot)
+    ):
+        raise IntegrityError("pilot authorization receipt payload drifted")
+    observed = _iso(spend.get("observedAt"), "probe spend cap observedAt")
+    expires = _iso(spend.get("expiresAt"), "probe spend cap expiresAt")
+    if not timedelta(0) < expires - observed <= timedelta(hours=24):
+        raise IntegrityError("pilot authorization receipt window drifted")
+    return observed, expires
+
+
+def _validated_pilot_receipt(
+    receipt: dict[str, Any],
+    provider: str,
+    model: str,
+    binding: dict[str, Any],
+    probe: dict[str, Any],
+    pilot: dict[str, Any],
+    not_before: datetime,
+    claimed_at: datetime,
+    pilot_started: datetime,
+    pilot_finished: datetime,
+) -> tuple[str, datetime]:
+    observed, expires = _probe_receipt_payloads(receipt, pilot)
+    probe_started = _iso(receipt.get("probeStartedAt"), "probe startedAt")
+    probe_finished = _iso(receipt.get("probeFinishedAt"), "probe finishedAt")
+    verified = _iso(receipt.get("verifiedAt"), "probe verifiedAt")
+    credential_sha256 = receipt.get("providerCredentialSha256")
+    digest_fields = (
+        "configSha256",
+        "composeSha256",
+        "fullComposeSha256",
+        "providerCredentialSha256",
+        "probeClaimSha256",
+        "relayMarkerSha256",
+        "relayChainHead",
+        "providerRequestIdsSha256",
+        "responseIdsSha256",
+    )
+    if (
+        set(receipt) != _PROBE_RECEIPT_FIELDS
+        or not is_strict_int(receipt.get("schemaVersion"))
+        or receipt.get("schemaVersion") != 1
+        or receipt.get("proofClass") != "live-route-probe-v1"
+        or receipt.get("provider") != provider
+        or receipt.get("model") != model
+        or receipt.get("sourceRevision") != binding["source_revision"]
+        or receipt.get("preflightSha256") != binding["preflight_sha256"]
+        or receipt.get("runBindingSha256") != _digest(binding)
+        or receipt.get("configSha256") != probe["configSha256"]
+        or receipt.get("composeSha256") != probe["composeSha256"]
+        or any(not is_digest(receipt.get(field)) for field in digest_fields)
+        or not is_strict_int(receipt.get("requestCount"))
+        or receipt.get("requestCount") != 2
+        or receipt.get("authorizationExpiresAt") != receipt["spendCap"]["expiresAt"]
+        or receipt.get("liveProviderRouteObserved") is not True
+        or receipt.get("liveProviderConformance") is not False
+        or receipt.get("benchmarkTaskInstructionUsed") is not False
+        or receipt.get("benchmarkRewardUsed") is not False
+        or receipt.get("spendCapVerification") != "operator_attested"
+        or receipt.get("benchmarkStartAuthorized") is not True
+        or not (
+            not_before
+            <= observed
+            <= probe_started
+            < probe_finished
+            <= verified
+            <= claimed_at
+            <= pilot_started
+            < pilot_finished
+            <= expires
+        )
+    ):
+        raise IntegrityError("pilot authorization receipt drifted")
+    return str(credential_sha256), probe_started
+
+
+def _validate_pilot_claim(
+    run_dir: Path,
+    provider: str,
+    job_dir: Path,
+    job_id: UUID,
+    trial_lock: dict[str, Any],
+    model: str,
+    binding: dict[str, Any],
+    probe: dict[str, Any],
+    pilot: dict[str, Any],
+    not_before: datetime,
+    before: datetime,
+    trial_finished: datetime,
+) -> tuple[str, datetime]:
+    lock_sha256 = _digest(trial_lock)
+    authorization = run_dir / "authorizations" / f"{provider}.json"
+    claim = (
+        run_dir / "authorizations" / relay_claim_name(provider, "pilot", lock_sha256)
+    )
+    try:
+        authorization_info = authorization.lstat()
+        claim_info = claim.lstat()
+    except OSError as error:
+        raise IntegrityError("pilot authorization claim is unavailable") from error
+    if any(
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        for info in (authorization_info, claim_info)
+    ):
+        raise IntegrityError("pilot authorization evidence must be private files")
+    authorization_raw = _artifact_bytes(
+        run_dir,
+        authorization.relative_to(run_dir),
+        max_bytes=_JSON_ARTIFACT_CAP,
+    )
+    claim_raw = _artifact_bytes(
+        run_dir, claim.relative_to(run_dir), max_bytes=_JSON_ARTIFACT_CAP
+    )
+    try:
+        authorization_value = _mapping(
+            _loads(authorization_raw.decode(), "pilot authorization"),
+            "pilot authorization",
+        )
+        claim_value = _mapping(
+            _loads(claim_raw.decode(), "pilot authorization claim"),
+            "pilot authorization claim",
+        )
+    except UnicodeError as error:
+        raise IntegrityError("pilot authorization claim must be UTF-8") from error
+    claimed_at = _iso(claim_value.get("claimedAt"), "pilot authorization claimedAt")
+    expected = {
+        "schemaVersion": 1,
+        "proofClass": "pilot-relay-slot-claim-v1",
+        "provider": provider,
+        "policySha256": _digest_bytes(authorization_raw),
+        "jobId": str(job_id),
+        "jobDir": str(job_dir),
+        "trialLockSha256": lock_sha256,
+        "claimedAt": claim_value.get("claimedAt"),
+    }
+    if (
+        authorization_raw != canonical_json(authorization_value)
+        or set(claim_value) != RELAY_CLAIM_FIELDS
+        or claim_raw != canonical_json(claim_value)
+        or not is_strict_int(claim_value.get("schemaVersion"))
+        or not _same_json(claim_value, expected)
+        or not not_before <= claimed_at <= before
+    ):
+        raise IntegrityError("pilot authorization claim differs from the trial")
+    return _validated_pilot_receipt(
+        authorization_value,
+        provider,
+        model,
+        binding,
+        probe,
+        pilot,
+        not_before,
+        claimed_at,
+        before,
+        trial_finished,
+    )
+
+
 def _attempt(
+    run_dir: Path,
+    job_dir: Path,
     trial_dir: Path,
     provider: str,
     model: str,
+    probe: dict[str, Any],
+    pilot: dict[str, Any],
     preflight: dict[str, Any],
     preflight_sha: str,
     selected_tasks: set[str],
@@ -2277,8 +2762,27 @@ def _attempt(
         verifier_started,
         verifier_finished,
     ) = _trial_timing(result)
+    credential_sha256, probe_started = _validate_pilot_claim(
+        run_dir,
+        provider,
+        job_dir,
+        job_id,
+        lock,
+        model,
+        binding_expected,
+        probe,
+        pilot,
+        _iso(preflight["createdAt"], "preflight.createdAt"),
+        agent_started,
+        finished,
+    )
     _validate_cleanup_receipt(
-        trial_dir, binding_expected, task, verifier_finished, finished
+        trial_dir,
+        binding_expected,
+        task,
+        credential_sha256,
+        verifier_finished,
+        finished,
     )
     agent_wall = (agent_finished - agent_started).total_seconds()
     if exception_info is not None and not (
@@ -2341,6 +2845,7 @@ def _attempt(
         "model": model,
         "replication": preflight["replicationId"],
         "sourceRevision": preflight["sourceRevision"],
+        "probeStartedAt": probe_started,
         "task": task,
         "taskDigest": task_lock["digest"],
         "taskChecksum": result["task_checksum"],
@@ -2490,6 +2995,7 @@ def _validated_job_dir(
         compose_path,
         compose_sha256,
         run_dir / CODEX_RUNTIME_PREPARED_RELATIVE,
+        run_dir / "authorizations" / f"{provider}.json",
     )
     if not _same_json(config, expected_config):
         raise IntegrityError("generated config differs from its frozen template")
@@ -2595,6 +3101,489 @@ def _validate_job_completion(
     return job_lock, stats, parsed_job_config, job_result, parsed_job_lock
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedJob:
+    """One validated Harbor job target from a prepared experiment run."""
+
+    run_dir: Path
+    provider: str
+    entry: dict[str, Any]
+    job_dir: Path
+    binding: dict[str, Any]
+    config: dict[str, Any]
+    compose_path: Path
+    compose_sha256: str
+    role: str
+
+    def _trial_config(
+        self, job: JobConfig, task: Any, agent: Any, trial_name: str, job_id: UUID
+    ) -> TrialConfig:
+        return TrialConfig(
+            task=task,
+            trial_name=trial_name,
+            trials_dir=job.jobs_dir / job.job_name,
+            install_only=job.install_only,
+            timeout_multiplier=job.timeout_multiplier,
+            agent_timeout_multiplier=job.agent_timeout_multiplier,
+            verifier_timeout_multiplier=job.verifier_timeout_multiplier,
+            agent_setup_timeout_multiplier=job.agent_setup_timeout_multiplier,
+            environment_build_timeout_multiplier=(
+                job.environment_build_timeout_multiplier
+            ),
+            agent=agent,
+            user_agent=job.user_agent,
+            environment=job.environment,
+            verifier=job.verifier,
+            artifacts=job.artifacts,
+            extra_instruction_paths=job.extra_instruction_paths,
+            extra_instructions=job.extra_instructions,
+            job_id=job_id,
+        )
+
+    def expected_trial_locks(self) -> list[dict[str, Any]]:
+        """Build the complete frozen lock set for this prepared job."""
+        if self.role == "pilot":
+            order = self.entry.get("armOrder")
+            if not isinstance(order, list) or set(order) != set(_VARIANTS):
+                raise IntegrityError("prepared pilot arm order is invalid")
+            locks = [
+                _expected_trial_lock(
+                    self.provider,
+                    str(self.entry["model"]),
+                    task,
+                    variant,
+                    self.binding,
+                    self.run_dir / "tasks" / task.removeprefix("terminal-bench/"),
+                    self.compose_path,
+                    self.compose_sha256,
+                )
+                for task in _TASKS
+                for variant in order
+            ]
+            if len(locks) != len(_TASKS) * len(_VARIANTS):
+                raise IntegrityError("prepared pilot arm order is invalid")
+            return locks
+        if self.role != "probe":
+            raise IntegrityError("unknown prepared job role")
+        try:
+            job = JobConfig.model_validate(self.config)
+        except ValueError as error:
+            raise IntegrityError("prepared Harbor job config is invalid") from error
+        if len(job.tasks) != 1 or len(job.agents) != 1:
+            raise IntegrityError("live-route probe config cardinality drifted")
+        lock = build_trial_lock(
+            trial_config=self._trial_config(
+                job, job.tasks[0], job.agents[0], "live-route-probe", UUID(int=0)
+            ),
+            task_download_result=TaskDownloadResult(
+                path=self.run_dir / "tasks" / "live-route-probe",
+                download_time_sec=0,
+                cached=True,
+            ),
+        )
+        value = json.loads(lock.model_dump_json(exclude_none=True))
+        if _sequence(value.get("extra_docker_compose"), "probe compose lock") != [
+            {"path": str(self.compose_path), "digest": self.compose_sha256}
+        ]:
+            raise IntegrityError("live-route probe compose lock drifted")
+        return [value]
+
+    def _active_trial_dir(self, active_trial_dir: Path) -> Path:
+        raw_trial = active_trial_dir.expanduser()
+        if not raw_trial.is_absolute():
+            raise IntegrityError("active trial directory must be absolute")
+        trial_dir = Path(os.path.abspath(raw_trial))
+        absolute_job = Path(os.path.abspath(self.job_dir))
+        try:
+            resolved_job = self.job_dir.resolve(strict=True)
+            resolved_trial = trial_dir.resolve(strict=True)
+        except OSError as error:
+            raise IntegrityError("active Harbor job is unavailable") from error
+        path_is_bound = all(
+            (
+                not self.job_dir.is_symlink(),
+                not trial_dir.is_symlink(),
+                resolved_job == absolute_job,
+                resolved_trial == trial_dir,
+                resolved_trial.parent == resolved_job,
+            )
+        )
+        if not path_is_bound:
+            raise IntegrityError("authorization belongs to another Harbor job")
+        return trial_dir
+
+    def claim_active_trial(self, active_trial_dir: Path) -> tuple[UUID, str]:
+        """Bind authorization to the exact prepared Harbor trial now executing."""
+        trial_dir = self._active_trial_dir(active_trial_dir)
+        try:
+            parsed_config = JobConfig.model_validate(self.config)
+        except ValueError as error:
+            raise IntegrityError("prepared Harbor job config is invalid") from error
+        actual_config = _mapping(
+            _artifact_json(self.job_dir, "config.json", "active job config"),
+            "active job config",
+        )
+        if not _same_json(
+            actual_config,
+            parsed_config.model_dump(mode="json", exclude_defaults=True),
+        ):
+            raise IntegrityError(
+                "active Harbor job config differs from the prepared run"
+            )
+        job_lock = _harbor_job_lock(
+            _mapping(
+                _artifact_json(self.job_dir, "lock.json", "active job lock"),
+                "active job lock",
+            )
+        )
+        expected = sorted(canonical_json(item) for item in self.expected_trial_locks())
+        actual = sorted(
+            canonical_json(json.loads(item.model_dump_json(exclude_none=True)))
+            for item in job_lock.trials
+        )
+        if actual != expected:
+            raise IntegrityError("active Harbor job lock differs from the prepared run")
+        active_lock = _mapping(
+            _artifact_json(trial_dir, "lock.json", "active trial lock"),
+            "active trial lock",
+        )
+        if canonical_json(active_lock) not in expected:
+            raise IntegrityError(
+                "active Harbor trial lock differs from the prepared run"
+            )
+        locked_agent = _mapping(active_lock.get("agent"), "active trial agent")
+        agents = [
+            agent
+            for agent in parsed_config.agents
+            if _same_json(
+                json.loads(agent.model_dump_json(exclude_none=True)), locked_agent
+            )
+        ]
+        locked_task = _mapping(active_lock.get("task"), "active trial task")
+        tasks = [
+            task
+            for task in parsed_config.tasks
+            if task.path is not None
+            and Path(task.path).resolve()
+            == Path(str(locked_task.get("path"))).resolve()
+            and task.source == locked_task.get("source")
+        ]
+        job_result = _mapping(
+            _artifact_json(self.job_dir, "result.json", "active job result"),
+            "active job result",
+        )
+        try:
+            job_id = UUID(str(job_result.get("id")))
+        except ValueError as error:
+            raise IntegrityError("active Harbor job ID is invalid") from error
+        if len(agents) != 1 or len(tasks) != 1:
+            raise IntegrityError(
+                "active Harbor trial is absent from the prepared config"
+            )
+        expected_trial = self._trial_config(
+            parsed_config, tasks[0], agents[0], trial_dir.name, job_id
+        )
+        actual_trial = _mapping(
+            _artifact_json(trial_dir, "config.json", "active trial config"),
+            "active trial config",
+        )
+        if not _same_json(
+            actual_trial,
+            expected_trial.model_dump(mode="json", exclude_defaults=True),
+        ):
+            raise IntegrityError(
+                "active Harbor trial config differs from the prepared run"
+            )
+        return job_id, _digest(active_lock)
+
+    def validate_completion(self) -> CompletedJob:
+        """Validate a finished single-trial probe job and its Harbor envelope."""
+        if self.role != "probe" or not self.job_dir.is_dir():
+            raise IntegrityError("live-route job directory is unavailable")
+        _, stats, config, result, lock = _validate_job_completion(
+            self.job_dir, self.config, 1
+        )
+        if stats["n_errored_trials"] != 0 or stats["n_cancelled_trials"] != 0:
+            raise IntegrityError("live-route probe did not complete successfully")
+        return CompletedJob(self, stats, config, result, lock)
+
+    @staticmethod
+    def environment_identity(trial_dir: Path) -> tuple[str, str]:
+        session = f"{trial_dir.name}__env"
+        return session, _sanitize_docker_compose_project_name(session)
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedJob:
+    """A completed Harbor envelope validated against one prepared job."""
+
+    prepared: PreparedJob
+    stats: dict[str, Any]
+    config: JobConfig
+    result: JobResult
+    lock: JobLock
+
+    def single_trial(self) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+        with os.scandir(self.prepared.job_dir) as entries:
+            children = [
+                entry for entry in entries if entry.is_dir(follow_symlinks=False)
+            ]
+        if len(children) != 1:
+            raise IntegrityError("live-route job must contain exactly one trial")
+        trial_dir = Path(children[0].path)
+        result = _mapping(
+            _artifact_json(trial_dir, "result.json", "trial result"), "trial result"
+        )
+        _harbor_trial_result(result)
+        lock = _mapping(
+            _artifact_json(trial_dir, "lock.json", "trial lock"), "trial lock"
+        )
+        root_locks = [
+            json.loads(item.model_dump_json(exclude_none=True))
+            for item in self.lock.trials
+        ]
+        if len(root_locks) != 1 or not _same_json(root_locks[0], lock):
+            raise IntegrityError("job and trial locks disagree")
+        return trial_dir, result, lock
+
+    @staticmethod
+    def artifact_json(
+        root: Path, relative: str, label: str, *, max_bytes: int = _JSON_ARTIFACT_CAP
+    ) -> Any:
+        return _artifact_json(root, relative, label, max_bytes=max_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class RelayEvidence:
+    """Complete relay evidence and the usage derived from its sealed journal."""
+
+    verified: dict[str, Any]
+    usage: dict[str, int | None]
+
+    @classmethod
+    def complete(
+        cls,
+        trial_dir: Path,
+        provider: str,
+        model: str,
+        binding: dict[str, Any],
+        started: datetime,
+        finished: datetime,
+    ) -> RelayEvidence:
+        verified, usage = _validate_relay(
+            trial_dir,
+            provider,
+            model,
+            str(binding["relay_build_sha256"]),
+            started,
+            finished,
+            False,
+        )
+        if usage is None:
+            raise IntegrityError("complete relay evidence has no usage")
+        return cls(verified, usage)
+
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        return self.verified["records"]
+
+    @property
+    def seal(self) -> dict[str, Any]:
+        return self.verified["seal"]
+
+    def validate_embedded(
+        self,
+        agent_result: dict[str, Any],
+        trajectory: dict[str, Any],
+        expected_variant: dict[str, Any],
+        expected_harbor: dict[str, Any],
+    ) -> None:
+        """Validate Harbor accounting and the embedded copy of sealed evidence."""
+        _validate_agent_totals(agent_result, self.usage, False)
+        metrics = _mapping(trajectory.get("final_metrics"), "trajectory metrics")
+        _validate_trajectory_metrics(metrics, self.usage, len(trajectory["steps"]))
+        metadata = _mapping(agent_result.get("metadata"), "agent metadata")
+        provider_data = _mapping(
+            metadata.get("open_agent_lab_provider"), "provider metadata"
+        )
+        if set(provider_data) != _PROVIDER_METADATA_FIELDS:
+            raise IntegrityError("provider metadata schema drifted")
+        for key in (
+            "schema_version",
+            "event_count",
+            "chain_head",
+            "seal",
+            "records",
+            "publication_gate",
+        ):
+            if not _same_json(provider_data.get(key), self.verified.get(key)):
+                raise IntegrityError(f"embedded provider {key} drifted")
+        if not _same_json(provider_data.get("agent_variant"), expected_variant):
+            raise IntegrityError("live-route agent variant drifted")
+        harbor = _mapping(provider_data.get("harbor_binding"), "harbor binding")
+        unhashed = {
+            key: value for key, value in harbor.items() if key != "binding_sha256"
+        }
+        if not _same_json(unhashed, expected_harbor) or harbor.get(
+            "binding_sha256"
+        ) != _digest(expected_harbor):
+            raise IntegrityError("live-route Harbor binding drifted")
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRouteRun:
+    """Validated live-route and pilot views of one prepared experiment run."""
+
+    run_dir: Path
+    provider: str
+    preflight: dict[str, Any]
+    binding: dict[str, Any]
+    probe: dict[str, Any]
+    pilot: dict[str, Any]
+    probe_job: PreparedJob
+
+    @classmethod
+    def providers(cls) -> tuple[str, ...]:
+        return tuple(_PROVIDERS)
+
+    @classmethod
+    def open(cls, run_dir: Path, provider: str) -> LiveRouteRun:
+        if provider not in _PROVIDERS:
+            raise IntegrityError("unknown live-route provider")
+        manifest, _, manifest_sha = _manifest(_repo_root())
+        runtime = _mapping(manifest.get("runtime"), "runtime")["codexRuntime"]
+        preflight, providers, probes = _validate_record(
+            run_dir,
+            manifest_sha,
+            manifest["relayBuildIds"]["production"],
+            runtime,
+        )
+        matches = [
+            _mapping(item, "live-route probe")
+            for item in probes
+            if isinstance(item, dict) and item.get("provider") == provider
+        ]
+        if len(matches) != 1:
+            raise IntegrityError("live-route probe record is missing or duplicated")
+        provider_entries = _provider_entries(providers)
+        probe, pilot = matches[0], provider_entries[provider]
+        profile = _PROVIDERS[provider]
+        expected_job = (
+            f"live-route-jobs/{provider}/open-agent-lab-"
+            f"{preflight['replicationId']}-{provider}-live-route-probe"
+        )
+        if (
+            probe.get("model") != profile["model"]
+            or probe.get("reasoning") != profile["reasoning"]
+            or probe.get("task") != LIVE_ROUTE_PROBE_TASK
+            or probe.get("config") != f"live-route-probes/{provider}.yaml"
+            or probe.get("compose")
+            != f"overlays/relay.{provider}.live-route-probe.compose.yaml"
+            or probe.get("jobDir") != expected_job
+            or probe.get("limits") != dict(LIVE_ROUTE_PROBE_LIMITS)
+            or probe.get("relayImageSha256") != preflight["relayImageSha256"]
+        ):
+            raise IntegrityError("live-route probe record drifted")
+        replication = _replication(manifest, preflight["replicationId"])
+        preflight_sha = _digest(preflight)
+        for entry_provider, entry in provider_entries.items():
+            _validated_job_dir(
+                run_dir,
+                entry,
+                preflight,
+                preflight_sha,
+                list(_TASKS),
+                replication["armOrderByProvider"][entry_provider],
+            )
+        binding = _expected_binding(preflight, preflight_sha)
+        job_dir = run_dir / _relative(probe.get("jobDir"), "live-route job")
+        config_relative = _relative(probe.get("config"), "live-route config")
+        compose_relative = _relative(probe.get("compose"), "live-route compose")
+        config_bytes = _artifact_bytes(run_dir, config_relative)
+        compose_bytes = _artifact_bytes(run_dir, compose_relative)
+        if _digest_bytes(config_bytes) != probe.get("configSha256") or _digest_bytes(
+            compose_bytes
+        ) != probe.get("composeSha256"):
+            raise IntegrityError("live-route config or compose drifted")
+        config = _yaml_bytes(config_bytes, "live-route config")
+        compose = _yaml_bytes(compose_bytes, "live-route compose")
+        compose_path = run_dir / compose_relative
+        if not _same_json(
+            compose,
+            _pinned_overlay(
+                _repo_root(),
+                provider,
+                probe["relayImageSha256"],
+                live_route_probe=True,
+            ),
+        ) or not _same_json(
+            config,
+            live_route_probe_config(
+                run_dir,
+                binding,
+                provider,
+                profile["model"],
+                profile["reasoning"],
+                compose_path,
+                probe["composeSha256"],
+            ),
+        ):
+            raise IntegrityError("live-route probe policy drifted")
+        if job_dir.is_symlink() or not job_dir.resolve().is_relative_to(
+            run_dir.resolve()
+        ):
+            raise IntegrityError("live-route job directory escapes the prepared run")
+        prepared = PreparedJob(
+            run_dir,
+            provider,
+            probe,
+            job_dir,
+            binding,
+            config,
+            compose_path,
+            str(probe["composeSha256"]),
+            "probe",
+        )
+        return cls(run_dir, provider, preflight, binding, probe, pilot, prepared)
+
+    @property
+    def model(self) -> str:
+        return str(_PROVIDERS[self.provider]["model"])
+
+    @property
+    def reasoning(self) -> str:
+        return str(_PROVIDERS[self.provider]["reasoning"])
+
+    @property
+    def codex_version(self) -> str:
+        return _CODEX_VERSION
+
+    @property
+    def probe_task_binding(self) -> dict[str, Any]:
+        return _TASK_RUNTIME_BINDINGS[LIVE_ROUTE_PROBE_TASK]
+
+    def pilot_job(self) -> PreparedJob:
+        provider, job_dir, config, compose_path, compose_sha256 = _validated_job_dir(
+            self.run_dir,
+            self.pilot,
+            self.preflight,
+            _digest(self.preflight),
+            list(_TASKS),
+            self.pilot["armOrder"],
+        )
+        return PreparedJob(
+            self.run_dir,
+            provider,
+            self.pilot,
+            job_dir,
+            self.binding,
+            config,
+            compose_path,
+            compose_sha256,
+            "pilot",
+        )
+
+
 def _optional_total(attempts: list[dict[str, Any]], field: str) -> int | float | None:
     values = [
         item["harborAgentTotals"][field]
@@ -2658,6 +3647,7 @@ def _validate_job_aggregates(
 def _job_attempts(
     run_dir: Path,
     entry: dict[str, Any],
+    probe: dict[str, Any],
     preflight: dict[str, Any],
     preflight_sha: str,
     tasks: list[str],
@@ -2676,9 +3666,13 @@ def _job_attempts(
         raise IntegrityError("job has a missing or extra trial directory")
     attempts = [
         _attempt(
+            run_dir,
+            job_dir,
             path,
             provider,
             entry["model"],
+            probe,
+            entry,
             preflight,
             preflight_sha,
             set(tasks),
@@ -2745,7 +3739,8 @@ def _median(values: list[float | str]) -> float | str | None:
 
 
 def _clean_attempt(item: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in item.items() if key != "startedAt"}
+    hidden = {"startedAt", "probeStartedAt"}
+    return {key: value for key, value in item.items() if key not in hidden}
 
 
 def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
@@ -2967,7 +3962,7 @@ def summarize(run_dirs: list[Path]) -> dict[str, Any]:
         run_dir = raw.expanduser().resolve()
         if not run_dir.is_dir():
             raise IntegrityError("each input must be an exact prepared run directory")
-        preflight, providers = _validate_record(
+        preflight, providers, probes = _validate_record(
             run_dir,
             manifest_sha,
             manifest["relayBuildIds"]["production"],
@@ -2984,17 +3979,23 @@ def summarize(run_dirs: list[Path]) -> dict[str, Any]:
         elif source_revision != preflight["sourceRevision"]:
             raise IntegrityError("replications use different source revisions")
         by_provider = _provider_entries(providers)
+        by_probe = _provider_entries(probes)
         for provider in _PROVIDERS:
             attempts.extend(
                 _job_attempts(
                     run_dir,
                     by_provider[provider],
+                    by_probe[provider],
                     preflight,
                     _digest(preflight),
                     tasks,
                     replication["armOrderByProvider"][provider],
                 )
             )
+    if any(item["probeStartedAt"] < max(prepared_at) for item in attempts):
+        raise IntegrityError(
+            "all replications must be prepared before the first live probe"
+        )
     if any(item["startedAt"] < max(prepared_at) for item in attempts):
         raise IntegrityError("all replications must be prepared before the first trial")
     return _summary(attempts, manifest, tasks)

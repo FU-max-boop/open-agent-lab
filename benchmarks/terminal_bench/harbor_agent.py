@@ -4,13 +4,13 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any, TypedDict, cast, override
-from urllib.parse import urlsplit
 
 from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment
@@ -19,6 +19,7 @@ from harbor.models.agent.context import AgentContext
 from . import codex_runtime as _codex_runtime
 from . import experiment_contract as _experiment_contract
 from . import harbor_environment as _harbor_environment
+from . import live_route_probe as _live_route_probe
 from .codex_runtime import (
     CODEX_RUNTIME_ENTRYPOINT,
     CODEX_RUNTIME_SPEC_SHA256,
@@ -30,6 +31,13 @@ from .codex_runtime import (
 )
 from .experiment_contract import (
     EXPERIMENT_ID,
+    LIVE_ROUTE_PROBE_CAP_ENV,
+    LIVE_ROUTE_PROBE_COMMAND_SHA256,
+    LIVE_ROUTE_PROBE_EFFECT_SHA256,
+    LIVE_ROUTE_PROBE_INSTRUCTION,
+    LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
+    LIVE_ROUTE_PROBE_LIMITS,
+    PILOT_RECEIPT_ENV,
     RELAY_BUILD_ID_PATH,
     RELAY_JOURNAL_PATH,
     RELAY_SEAL_PATH,
@@ -78,6 +86,7 @@ _RELAY_TOKEN_COMMAND = (
 )
 _RELAY_TOKEN_ENV = "OAL_RELAY_TOKEN"
 _RELAY_URL_ENV = "OAL_RELAY_URL"
+_RELAY_URL = f"http://{RELAY_SERVICE}:8080/v1"
 _VERIFY_INSTRUCTION_PATH = Path(__file__).with_name("verify-instruction-v1.txt")
 _VERIFY_INSTRUCTION_SHA256 = (
     "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
@@ -201,6 +210,19 @@ def _relay_capability(raw: str, capability_id: str) -> str:
     return value["bearer"]
 
 
+def _validate_authorization_source() -> None:
+    root = _REPOSITORY_ROOT / "benchmarks" / "terminal_bench"
+    try:
+        trusted = (
+            Path(_live_route_probe.__file__).resolve(strict=True)
+            == root / "live_route_probe.py"
+        )
+    except (OSError, TypeError) as error:
+        raise RuntimeError("Authorization source is unavailable.") from error
+    if not trusted:
+        raise RuntimeError("Authorization source drifted.")
+
+
 def _validate_live_source(binding: dict[str, Any]) -> None:
     def git(*args: str) -> str:
         completed = subprocess.run(
@@ -240,6 +262,7 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
         ):
             raise ValueError("hermetic Codex runtime gate is invalid")
         validate_codex_runtime_spec(runtime["codexRuntime"])
+        _validate_authorization_source()
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise RuntimeError("Live source identity could not be verified.") from error
     manifest_sha = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
@@ -270,28 +293,166 @@ def _validate_live_source(binding: dict[str, Any]) -> None:
 
 
 def _relay_url(env: dict[str, str]) -> str:
-    value = env.get(_RELAY_URL_ENV, "")
-    parsed = urlsplit(value)
+    value = env.get(_RELAY_URL_ENV)
+    if value != _RELAY_URL:
+        raise ValueError(f"{_RELAY_URL_ENV} must be exactly {_RELAY_URL}.")
+    return value
+
+
+def _policy_path(env: dict[str, str], name: str, *, required: bool) -> Path | None:
+    value = env.pop(name, None)
+    if value is None:
+        if required:
+            raise ValueError(f"{name} is required for this run class.")
+        return None
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise ValueError(f"{name} must be an absolute path.")
+    return Path(value)
+
+
+def _provider_profile(model_name: str | None) -> tuple[str, str, _Profile]:
     if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path.rstrip("/") != "/v1"
+        model_name is None
+        or "/" not in model_name
+        or not _MODEL_ID.fullmatch(model_name)
     ):
-        raise ValueError(f"{_RELAY_URL_ENV} must be one fixed /v1 endpoint.")
-    if parsed.scheme == "http" and parsed.hostname not in {
-        RELAY_SERVICE,
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }:
-        raise ValueError(
-            f"{_RELAY_URL_ENV} must use HTTPS outside the private relay service."
+        raise ValueError("model_name must be '<deepseek|zai>/<exact-model-id>'.")
+    provider, model = model_name.split("/", 1)
+    profile = _PROFILES.get(provider)
+    if profile is None or model not in profile["models"]:
+        supported = ", ".join(
+            f"{owner}/{candidate}"
+            for owner, value in _PROFILES.items()
+            for candidate in sorted(value["models"])
         )
-    return value.rstrip("/")
+        raise ValueError(f"Unsupported model variant. Choose one of: {supported}.")
+    return provider, model, profile
+
+
+def _validate_constructor_options(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    version: str | None,
+    config: Path | str | dict[str, Any] | None,
+    enable_verification: bool,
+    live_route_probe: bool,
+    profile: _Profile,
+) -> None:
+    if version != _CODEX_VERSION:
+        raise ValueError(f"version must be exactly {_CODEX_VERSION}.")
+    if config is not None:
+        raise ValueError("OpenAgentLabCodex owns its benchmark config.")
+    if "provider_free_fixture" in kwargs:
+        raise ValueError("Provider-free runs require a prepared source binding.")
+    if type(enable_verification) is not bool:
+        raise ValueError(
+            "enable_verify_instruction_v1 must be a boolean experiment switch."
+        )
+    if live_route_probe and enable_verification:
+        raise ValueError("The live-route probe cannot enable an experiment arm.")
+    reasoning_effort = kwargs.pop("reasoning_effort", None)
+    if args or kwargs:
+        raise ValueError("Unsupported Codex constructor inputs are forbidden.")
+    if reasoning_effort not in (None, profile["reasoning"]):
+        raise ValueError("reasoning_effort must match the frozen provider profile.")
+
+
+def _agent_environment(
+    extra_env: dict[str, str] | None, *, live_route_probe: bool
+) -> tuple[dict[str, str], str, Path | None]:
+    agent_env = dict(extra_env or {})
+    forbidden = {"DEEPSEEK_API_KEY", "ZAI_API_KEY", _RELAY_TOKEN_ENV}.intersection(
+        agent_env
+    )
+    if forbidden:
+        raise ValueError(
+            "Provider keys and per-trial relay tokens belong only in the relay service."
+        )
+    policy_name = LIVE_ROUTE_PROBE_CAP_ENV if live_route_probe else PILOT_RECEIPT_ENV
+    expected = {_RELAY_URL_ENV, policy_name}
+    if not live_route_probe and policy_name not in agent_env:
+        expected.remove(policy_name)
+    if set(agent_env) != expected:
+        raise ValueError("Agent environment contains an unsupported input.")
+    relay_url = _relay_url(agent_env)
+    policy_file = _policy_path(agent_env, policy_name, required=live_route_probe)
+    return agent_env, relay_url, policy_file
+
+
+def _provider_config(
+    provider: str,
+    profile: _Profile,
+    relay_url: str,
+    *,
+    live_route_probe: bool,
+    enable_verification: bool,
+) -> dict[str, Any]:
+    context_window = profile["context_window"]
+    config: dict[str, Any] = {
+        "model_provider": "open-agent-lab",
+        "model_context_window": context_window,
+        "model_auto_compact_token_limit": context_window * 9 // 10,
+        "model_reasoning_effort": profile["reasoning"],
+        "model_reasoning_summary": "none",
+        "features": {
+            "shell_zsh_fork": False,
+            "unified_exec_zsh_fork": False,
+        },
+        "shell_environment_policy": {
+            "ignore_default_excludes": False,
+            "set": {_RELAY_TOKEN_ENV: ""},
+        },
+        "model_providers": {
+            "open-agent-lab": {
+                "name": f"Open Agent Lab ({provider})",
+                "base_url": relay_url,
+                "env_key": _RELAY_TOKEN_ENV,
+                "wire_api": "responses",
+                "request_max_retries": 0 if live_route_probe else 4,
+                "stream_max_retries": 0 if live_route_probe else 5,
+                "stream_idle_timeout_ms": (
+                    LIVE_ROUTE_PROBE_LIMITS["idleTimeoutMs"]
+                    if live_route_probe
+                    else 300_000
+                ),
+                "requires_openai_auth": False,
+                "supports_websockets": False,
+            }
+        },
+    }
+    if enable_verification:
+        config["developer_instructions"] = _VERIFY_INSTRUCTION
+    return config
+
+
+def _variant(enable_verification: bool, *, live_route_probe: bool) -> dict[str, Any]:
+    if live_route_probe:
+        return {
+            "schema_version": 1,
+            "variant_id": "live-route-probe-v1",
+            "developer_instruction_requested": False,
+            "requested_developer_instructions_sha256": None,
+            "benchmark_task_instruction_used": False,
+            "benchmark_reward_used": False,
+            "instruction_sha256": LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
+            "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
+            "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
+            "effect_verified": False,
+            "request_max_retries": 0,
+            "stream_max_retries": 0,
+            "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
+        }
+    return {
+        "schema_version": 1,
+        "variant_id": (
+            "verify-instruction-v1" if enable_verification else "control-v1"
+        ),
+        "developer_instruction_requested": enable_verification,
+        "requested_developer_instructions_sha256": (
+            _VERIFY_INSTRUCTION_SHA256 if enable_verification else None
+        ),
+    }
 
 
 class OpenAgentLabCodex(Codex):
@@ -299,12 +460,14 @@ class OpenAgentLabCodex(Codex):
 
     MODEL_CONNECTION = None
     SUPPORTS_RESUME = False
+    _LIVE_ROUTE_PROBE = False
 
     def __init__(
         self,
         logs_dir: Path,
         model_name: str | None = None,
         *args: Any,
+        logger: logging.Logger | None = None,
         config: Path | str | dict[str, Any] | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
@@ -313,79 +476,30 @@ class OpenAgentLabCodex(Codex):
         **kwargs: Any,
     ) -> None:
         _validate_harbor_runtime()
-        if version != _CODEX_VERSION:
-            raise ValueError(f"version must be exactly {_CODEX_VERSION}.")
-        if config is not None:
-            raise ValueError("OpenAgentLabCodex owns its benchmark config.")
-        if "provider_free_fixture" in kwargs:
-            raise ValueError("Provider-free runs require a prepared source binding.")
-        if type(enable_verify_instruction_v1) is not bool:
-            raise ValueError(
-                "enable_verify_instruction_v1 must be a boolean experiment switch."
-            )
-        if (
-            model_name is None
-            or "/" not in model_name
-            or not _MODEL_ID.fullmatch(model_name)
-        ):
-            raise ValueError("model_name must be '<deepseek|zai>/<exact-model-id>'.")
-        provider, model = model_name.split("/", 1)
-        profile = _PROFILES.get(provider)
-        if profile is None or model not in profile["models"]:
-            supported = ", ".join(
-                f"{owner}/{candidate}"
-                for owner, value in _PROFILES.items()
-                for candidate in sorted(value["models"])
-            )
-            raise ValueError(f"Unsupported model variant. Choose one of: {supported}.")
-
-        agent_env = dict(extra_env or {})
-        forbidden = {
-            "DEEPSEEK_API_KEY",
-            "ZAI_API_KEY",
-            _RELAY_TOKEN_ENV,
-        }.intersection(agent_env)
-        if forbidden:
-            raise ValueError(
-                "Provider keys and per-trial relay tokens belong only in the relay service."
-            )
-        relay_url = _relay_url(agent_env)
+        provider, model, profile = _provider_profile(model_name)
+        _validate_constructor_options(
+            args,
+            kwargs,
+            version=version,
+            config=config,
+            enable_verification=enable_verify_instruction_v1,
+            live_route_probe=self._LIVE_ROUTE_PROBE,
+            profile=profile,
+        )
+        agent_env, relay_url, self._policy_file = _agent_environment(
+            extra_env, live_route_probe=self._LIVE_ROUTE_PROBE
+        )
         binding = _run_binding(run_binding)
         if binding is None:
             raise RuntimeError("Live provider work requires a prepared run binding.")
         _validate_live_source(binding)
-
-        context_window = profile["context_window"]
-        provider_config = {
-            "model_provider": "open-agent-lab",
-            "model_context_window": context_window,
-            "model_auto_compact_token_limit": context_window * 9 // 10,
-            "model_reasoning_effort": profile["reasoning"],
-            "model_reasoning_summary": "none",
-            "features": {
-                "shell_zsh_fork": False,
-                "unified_exec_zsh_fork": False,
-            },
-            "shell_environment_policy": {
-                "ignore_default_excludes": False,
-                "set": {_RELAY_TOKEN_ENV: ""},
-            },
-            "model_providers": {
-                "open-agent-lab": {
-                    "name": f"Open Agent Lab ({provider})",
-                    "base_url": relay_url,
-                    "env_key": _RELAY_TOKEN_ENV,
-                    "wire_api": "responses",
-                    "request_max_retries": 4,
-                    "stream_max_retries": 5,
-                    "stream_idle_timeout_ms": 300_000,
-                    "requires_openai_auth": False,
-                    "supports_websockets": False,
-                }
-            },
-        }
-        if enable_verify_instruction_v1:
-            provider_config["developer_instructions"] = _VERIFY_INSTRUCTION
+        provider_config = _provider_config(
+            provider,
+            profile,
+            relay_url,
+            live_route_probe=self._LIVE_ROUTE_PROBE,
+            enable_verification=enable_verify_instruction_v1,
+        )
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
@@ -393,18 +507,10 @@ class OpenAgentLabCodex(Codex):
         self._codex_runtime_spec = codex_runtime_spec()
         self._codex_launches = 0
         self._codex_run_active = False
-        self._open_agent_lab_variant = {
-            "schema_version": 1,
-            "variant_id": (
-                "verify-instruction-v1"
-                if enable_verify_instruction_v1
-                else "control-v1"
-            ),
-            "developer_instruction_requested": enable_verify_instruction_v1,
-            "requested_developer_instructions_sha256": (
-                _VERIFY_INSTRUCTION_SHA256 if enable_verify_instruction_v1 else None
-            ),
-        }
+        self._open_agent_lab_variant = _variant(
+            enable_verify_instruction_v1,
+            live_route_probe=self._LIVE_ROUTE_PROBE,
+        )
         self._provider_evidence_dir = (
             logs_dir.parent / "artifacts" / "provider-evidence"
         )
@@ -412,6 +518,7 @@ class OpenAgentLabCodex(Codex):
             logs_dir,
             *args,
             model_name=model_name,
+            logger=logger,
             config=provider_config,
             extra_env=agent_env,
             version=version,
@@ -420,7 +527,7 @@ class OpenAgentLabCodex(Codex):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        environment = _pinned_environment(environment)
+        environment = self._validated_environment(environment)
         self._validate_request_source()
         command = (
             build_full_tree_verification_command(self._codex_runtime_spec)
@@ -463,9 +570,12 @@ class OpenAgentLabCodex(Codex):
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
-        environment = _pinned_environment(environment)
-        binding = self._validate_request_source()
+        environment = self._validated_environment(environment)
+        self._validate_request_source()
         await super().setup(environment)
+
+    async def _authorize_relay(self, environment: _PinnedRelayDockerEnvironment) -> str:
+        binding = self._validate_request_source()
         build_result = await environment.service_exec(
             f"cat {RELAY_BUILD_ID_PATH}",
             service=RELAY_SERVICE,
@@ -497,6 +607,7 @@ class OpenAgentLabCodex(Codex):
         ):
             raise RuntimeError("Relay bootstrap identity does not match this trial.")
         self._validate_request_source()
+        self._validate_route_authorization(environment, binding)
         authorization = await environment.service_exec(
             _RELAY_AUTHORIZE_COMMAND,
             service=RELAY_SERVICE,
@@ -521,46 +632,129 @@ class OpenAgentLabCodex(Codex):
             ) from error
         if token_result.return_code != 0:
             raise RuntimeError("Failed to obtain the per-trial relay capability.")
-        self._extra_env[_RELAY_TOKEN_ENV] = relay_token
+        return relay_token
+
+    def _validate_route_authorization(
+        self,
+        environment: _PinnedRelayDockerEnvironment,
+        binding: dict[str, Any],
+    ) -> None:
+        role = environment._relay_role
+        if role == "fixture":
+            if self._policy_file is not None:
+                raise RuntimeError("Fixture runs cannot carry live authorization.")
+            return
+        active_trial_dir = Path(environment.trial_paths.trial_dir)
+        if not active_trial_dir.is_absolute() or Path(
+            os.path.abspath(active_trial_dir)
+        ) != Path(os.path.abspath(self.logs_dir.parent)):
+            raise RuntimeError("Agent and environment trial directories disagree.")
+        credential_path = getattr(environment, "_provider_secret_path", None)
+        credential_identity = getattr(
+            environment, "_provider_credential_identity", None
+        )
+        if (
+            self._policy_file is None
+            or credential_path is None
+            or credential_identity is None
+            or _harbor_environment._credential_identity(credential_path)
+            != credential_identity
+        ):
+            raise RuntimeError("Live provider authorization inputs are unavailable.")
+        _validate_authorization_source()
+        if self._LIVE_ROUTE_PROBE:
+            _live_route_probe.validate_probe_cap(
+                self._policy_file,
+                self._open_agent_lab_provider,
+                self._open_agent_lab_model,
+                binding,
+                credential_path,
+                active_trial_dir,
+            )
+        else:
+            _live_route_probe.validate_pilot_authorization(
+                self._policy_file,
+                self._open_agent_lab_provider,
+                self._open_agent_lab_model,
+                binding,
+                credential_path,
+                active_trial_dir,
+            )
 
     @override
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
-        environment = _pinned_environment(environment)
+        environment = self._validated_environment(environment)
         if self._codex_run_active:
             raise RuntimeError("Concurrent Codex runs are not supported.")
         self._codex_run_active = True
         self._codex_launches = 0
+        try:
+            relay_token = await self._authorize_relay(environment)
+        except BaseException:
+            self._codex_run_active = False
+            raise
         primary_error: BaseException | None = None
         try:
-            self._validate_request_source()
-            if _RELAY_TOKEN_ENV not in self._extra_env:
-                raise RuntimeError("Relay capability was not initialized during setup.")
-            await super().run(instruction, environment, context)
-            if self._codex_launches != 1:
-                raise RuntimeError("Codex did not launch exactly once.")
+            with environment.scoped_exec_env({_RELAY_TOKEN_ENV: relay_token}):
+                await self._run_once(instruction, environment, context)
         except BaseException as error:
             primary_error = error
             raise
         finally:
             self._codex_run_active = False
-            retained = asyncio.create_task(self._seal_and_retain(environment))
+            await self._retain_after_run(environment, primary_error)
+
+    async def _run_once(
+        self,
+        instruction: str,
+        environment: _PinnedRelayDockerEnvironment,
+        context: AgentContext,
+    ) -> None:
+        self._validate_request_source()
+        if self._LIVE_ROUTE_PROBE:
+            async with asyncio.timeout(LIVE_ROUTE_PROBE_LIMITS["codexTimeoutSeconds"]):
+                await super().run(LIVE_ROUTE_PROBE_INSTRUCTION, environment, context)
+        else:
+            await super().run(instruction, environment, context)
+        if self._codex_launches != 1:
+            raise RuntimeError("Codex did not launch exactly once.")
+        if not self._LIVE_ROUTE_PROBE:
+            return
+        effect = await super().exec_as_agent(
+            environment,
+            command=(
+                'test "$(cat /tmp/open-agent-lab-live-route-probe)" = '
+                "live-route-probe-v1"
+            ),
+            timeout_sec=10,
+        )
+        if effect.return_code != 0:
+            raise RuntimeError("Live-route probe effect is unavailable.")
+        self._open_agent_lab_variant["effect_verified"] = True
+
+    async def _retain_after_run(
+        self,
+        environment: _PinnedRelayDockerEnvironment,
+        primary_error: BaseException | None,
+    ) -> None:
+        retained = asyncio.create_task(self._seal_and_retain(environment))
+        try:
+            await asyncio.shield(retained)
+        except asyncio.CancelledError:
             try:
-                await asyncio.shield(retained)
-            except asyncio.CancelledError:
-                try:
-                    await retained
-                except Exception:
-                    self.logger.exception("Failed to retain provider metadata")
-                raise
+                await retained
             except Exception:
-                self.logger.exception(
-                    "Failed to retain provider metadata%s",
-                    " after agent failure" if primary_error is not None else "",
-                )
-                if primary_error is None:
-                    raise
+                self.logger.exception("Failed to retain provider metadata")
+            raise
+        except Exception:
+            self.logger.exception(
+                "Failed to retain provider metadata%s",
+                " after agent failure" if primary_error is not None else "",
+            )
+            if primary_error is None:
+                raise
 
     def _validate_request_source(self) -> dict[str, Any]:
         if self._open_agent_lab_run_binding is None:
@@ -568,8 +762,19 @@ class OpenAgentLabCodex(Codex):
         _validate_live_source(self._open_agent_lab_run_binding)
         return self._open_agent_lab_run_binding
 
+    def _validated_environment(
+        self, environment: BaseEnvironment
+    ) -> _PinnedRelayDockerEnvironment:
+        pinned = _pinned_environment(environment)
+        allowed = (
+            {"live-route-probe"} if self._LIVE_ROUTE_PROBE else {"pilot", "fixture"}
+        )
+        if getattr(pinned, "_relay_role", None) not in allowed:
+            raise RuntimeError("Agent and relay policy roles do not match.")
+        return pinned
+
     async def _seal_and_retain(self, environment: BaseEnvironment) -> None:
-        environment = _pinned_environment(environment)
+        environment = self._validated_environment(environment)
         command = (
             f"kill -USR2 1 && i=0; while [ ! -f {RELAY_SEAL_PATH} ]; do "
             'i=$((i+1)); [ "$i" -lt 150 ] || exit 1; sleep 0.1; done'
@@ -724,3 +929,14 @@ class OpenAgentLabCodexVerifyInstructionV1(OpenAgentLabCodex):
     @override
     def name() -> str:
         return "open-agent-lab-codex-verify-instruction-v1"
+
+
+class OpenAgentLabCodexLiveRouteProbe(OpenAgentLabCodex):
+    """One fixed, non-scoring tool round through the isolated production relay."""
+
+    _LIVE_ROUTE_PROBE = True
+
+    @staticmethod
+    @override
+    def name() -> str:
+        return "open-agent-lab-codex-live-route-probe-v1"

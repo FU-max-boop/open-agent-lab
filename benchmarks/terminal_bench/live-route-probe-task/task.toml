@@ -1,0 +1,32 @@
+schema_version = "1.4"
+
+[task]
+name = "open-agent-lab/live-route-probe"
+version = "1.0.0"
+authors = []
+keywords = ["conformance", "non-scoring"]
+
+[metadata]
+author_name = "Open Agent Lab"
+difficulty = "trivial"
+category = "infrastructure"
+tags = ["live-route-probe", "non-scoring"]
+
+[verifier]
+timeout_sec = 30.0
+
+[agent]
+timeout_sec = 480.0
+
+[environment]
+docker_image = "ubuntu:24.04"
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+mcp_servers = []
+
+[verifier.env]
+
+[solution.env]

@@ -3,6 +3,10 @@ import unittest
 from benchmarks.terminal_bench.experiment_contract import (
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
+    LIVE_ROUTE_PROBE_EGRESS_NETWORK,
+    LIVE_ROUTE_PROBE_INTERNAL_NETWORK,
+    LIVE_ROUTE_PROBE_LIMITS,
+    PILOT_RELAY_TTL_SECONDS,
     PREFLIGHT_KEYS,
     RELAY_ARTIFACT_LIMITS,
     RELAY_BUILD_ID_PATH,
@@ -16,7 +20,22 @@ from benchmarks.terminal_bench.experiment_contract import (
     is_digest,
     is_revision,
     is_strict_int,
+    live_route_probe_networks,
+    live_route_probe_relay_command,
 )
+
+_PILOT_RELAY_COMMAND = [
+    "open-agent-lab",
+    "relay",
+    "--provider",
+    "deepseek",
+    "--ttl-seconds",
+    str(PILOT_RELAY_TTL_SECONDS),
+    "--max-requests",
+    "256",
+    "--build-id-file",
+    "/app/relay-build-id",
+]
 
 _EXPECTED_MANIFEST = [
     {
@@ -148,6 +167,127 @@ class ExperimentContractTest(unittest.TestCase):
         self.assertFalse(is_strict_int(True))
         self.assertFalse(is_strict_int(False))
         self.assertFalse(is_strict_int(1.0))
+
+    def test_live_route_probe_relay_command_is_exact_and_non_mutating(self) -> None:
+        command = list(_PILOT_RELAY_COMMAND)
+
+        result = live_route_probe_relay_command(command)
+
+        self.assertEqual(command, _PILOT_RELAY_COMMAND)
+        self.assertIsNot(result, command)
+        self.assertEqual(
+            result,
+            [
+                "open-agent-lab",
+                "relay",
+                "--provider",
+                "deepseek",
+                "--ttl-seconds",
+                "600",
+                "--max-requests",
+                "2",
+                "--max-request-bytes",
+                str(512 * 1024),
+                "--max-response-bytes",
+                str(512 * 1024),
+                "--connect-timeout-ms",
+                "30000",
+                "--idle-timeout-ms",
+                "180000",
+                "--build-id-file",
+                "/app/relay-build-id",
+            ],
+        )
+        self.assertEqual(
+            dict(LIVE_ROUTE_PROBE_LIMITS),
+            {
+                "ttlSeconds": 600,
+                "maxRequests": 2,
+                "maxRequestBytes": 512 * 1024,
+                "maxResponseBytes": 512 * 1024,
+                "connectTimeoutMs": 30_000,
+                "idleTimeoutMs": 180_000,
+                "codexTimeoutSeconds": 480,
+            },
+        )
+
+    def test_live_route_probe_networks_isolates_main_from_egress(self) -> None:
+        compose = {
+            "services": {"main": {}, "open-agent-lab-relay": {"image": "relay"}},
+            "secrets": {"provider-api-key": {"file": "/key"}},
+        }
+
+        result = live_route_probe_networks(compose)
+
+        self.assertEqual(compose["services"]["main"], {})
+        self.assertEqual(
+            result["services"]["main"]["networks"],
+            {LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {}},
+        )
+        self.assertEqual(
+            result["services"]["open-agent-lab-relay"]["networks"],
+            {
+                LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {
+                    "aliases": ["open-agent-lab-relay"]
+                },
+                LIVE_ROUTE_PROBE_EGRESS_NETWORK: {},
+            },
+        )
+        self.assertEqual(
+            result["networks"],
+            {
+                LIVE_ROUTE_PROBE_INTERNAL_NETWORK: {"internal": True},
+                LIVE_ROUTE_PROBE_EGRESS_NETWORK: {"internal": False},
+            },
+        )
+
+    def test_live_route_probe_networks_rejects_existing_network_policy(self) -> None:
+        for compose in (
+            None,
+            {"services": {}},
+            {
+                "services": {
+                    "main": {"network_mode": "host"},
+                    "open-agent-lab-relay": {},
+                }
+            },
+            {
+                "services": {"main": {}, "open-agent-lab-relay": {}},
+                "networks": {"default": {}},
+            },
+        ):
+            with (
+                self.subTest(compose=compose),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                live_route_probe_networks(compose)
+
+    def test_live_route_probe_relay_command_rejects_invalid_shapes(self) -> None:
+        for command in (None, "relay", tuple(_PILOT_RELAY_COMMAND), ["relay", 1]):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                live_route_probe_relay_command(command)
+
+    def test_live_route_probe_relay_command_rejects_missing_policy_flags(self) -> None:
+        for flag in ("--ttl-seconds", "--max-requests", "--build-id-file"):
+            command = list(_PILOT_RELAY_COMMAND)
+            index = command.index(flag)
+            del command[index : index + 2]
+            original = list(command)
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                live_route_probe_relay_command(command)
+            self.assertEqual(command, original)
+
+    def test_live_route_probe_relay_command_rejects_duplicate_policy_flags(
+        self,
+    ) -> None:
+        for flag in ("--ttl-seconds", "--max-requests", "--build-id-file"):
+            command = list(_PILOT_RELAY_COMMAND)
+            index = command.index(flag)
+            command[index:index] = command[index : index + 2]
+            original = list(command)
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                live_route_probe_relay_command(command)
+            self.assertEqual(command, original)
 
 
 if __name__ == "__main__":

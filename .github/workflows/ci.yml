@@ -84,12 +84,14 @@ jobs:
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/live_route_probe.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
             benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
+            benchmarks/terminal_bench/test_live_route_probe.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/test_validate_harbor_install_only.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py \
@@ -99,12 +101,14 @@ jobs:
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/live_route_probe.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
             benchmarks/terminal_bench/test_codex_runtime.py \
             benchmarks/terminal_bench/test_harbor_environment.py \
             benchmarks/terminal_bench/test_experiment_contract.py \
+            benchmarks/terminal_bench/test_live_route_probe.py \
             benchmarks/terminal_bench/test_paired_results.py \
             benchmarks/terminal_bench/test_validate_harbor_install_only.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py \
@@ -114,6 +118,7 @@ jobs:
             benchmarks/terminal_bench/experiment_contract.py \
             benchmarks/terminal_bench/harbor_agent.py \
             benchmarks/terminal_bench/harbor_environment.py \
+            benchmarks/terminal_bench/live_route_probe.py \
             benchmarks/terminal_bench/paired_results.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/validate_harbor_e2e.py \
@@ -123,6 +128,7 @@ jobs:
             benchmarks.terminal_bench.test_experiment_contract \
             benchmarks.terminal_bench.test_harbor_agent \
             benchmarks.terminal_bench.test_harbor_environment \
+            benchmarks.terminal_bench.test_live_route_probe \
             benchmarks.terminal_bench.test_paired_results \
             benchmarks.terminal_bench.test_validate_harbor_install_only
 
@@ -186,10 +192,11 @@ jobs:
           )"
           mapfile -t bindings < <(
             jq --exit-status --raw-output \
-              '.runtime.taskOrder[] as $task | [$task, .taskRuntimeBindings[$task].immutableImage, .taskRuntimeBindings[$task].imageConfigDigest] | @tsv' \
+              '(.runtime.taskOrder + ["open-agent-lab/live-route-probe"])[] as $task | [$task, .taskRuntimeBindings[$task].immutableImage, .taskRuntimeBindings[$task].imageConfigDigest] | @tsv' \
               benchmarks/terminal_bench/verify-instruction-v1.experiment.json
           )
-          test "${#bindings[@]}" -eq 5
+          # Five frozen pilot tasks plus the dedicated non-scoring route probe.
+          test "${#bindings[@]}" -eq 6
           for binding in "${bindings[@]}"; do
             IFS=$'\t' read -r task image config_digest <<<"$binding"
             echo "Smoketesting $task in $image"
@@ -286,14 +293,23 @@ jobs:
         env:
           OPEN_AGENT_LAB_REPO_ROOT: ${{ github.workspace }}
           OPEN_AGENT_LAB_CODEX_ARCHIVE: /tmp/codex-0.149.0-linux-x64.tgz
-          OAL_DEEPSEEK_API_KEY_FILE: /tmp/open-agent-lab-harbor-provider-key
+          OAL_DEEPSEEK_API_KEY_FILE: /run/open-agent-lab/provider-key
           PYTHONPATH: ${{ github.workspace }}
         run: |
           curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
             --retry 3 --output "$OPEN_AGENT_LAB_CODEX_ARCHIVE" \
             https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-x64.tgz
-          sudo install -o 0 -g 0 -m 0400 /dev/null "$OAL_DEEPSEEK_API_KEY_FILE"
+          credential_dir=/run/open-agent-lab
+          harbor_gid="$(id -g)"
+          test "$harbor_gid" -ne 1000
+          sudo install -d -o 0 -g "$harbor_gid" -m 0750 "$credential_dir"
+          sudo install -o 0 -g "$harbor_gid" -m 0440 /dev/null "$OAL_DEEPSEEK_API_KEY_FILE"
           openssl rand -hex 32 | sudo tee "$OAL_DEEPSEEK_API_KEY_FILE" >/dev/null
+          cleanup_credential() {
+            sudo rm -f -- "$OAL_DEEPSEEK_API_KEY_FILE"
+            sudo rmdir -- "$credential_dir" 2>/dev/null || true
+          }
+          trap cleanup_credential EXIT
           prepared_parent="$(mktemp -d)"
           prepared_run="$prepared_parent/source-bound-e2e"
           python3 -m benchmarks.terminal_bench.paired_results prepare \
@@ -327,7 +343,7 @@ jobs:
             --jobs-dir "$proof_jobs" \
             --job-name "$proof_name" \
             --yes
-          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+          if ! cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_install_only \
             "$prepared_run" --provider deepseek; then
             find "$proof_jobs/$proof_name" -maxdepth 2 -name result.json -print -exec cat {} \;
@@ -335,7 +351,7 @@ jobs:
           fi
           harbor jobs start --config "$prepared_run/fixtures/harbor-e2e.yaml" --yes
           control_job="$prepared_run/fixture-jobs/harbor-e2e/open-agent-lab-harbor-provider-free-e2e"
-          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+          if ! cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e "$control_job"; then
             cat "$control_job"/*/artifacts/manifest.json
             exit 1
@@ -344,7 +360,7 @@ jobs:
             --config "$prepared_run/fixtures/harbor-verify-instruction-e2e.yaml" \
             --yes
           treatment_job="$prepared_run/fixture-jobs/harbor-verify-instruction-e2e/open-agent-lab-harbor-verify-instruction-e2e"
-          if ! sudo cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
+          if ! cat "$OAL_DEEPSEEK_API_KEY_FILE" | \
             python3 -m benchmarks.terminal_bench.validate_harbor_e2e \
             "$treatment_job" verify-instruction-v1; then
             cat "$treatment_job"/*/artifacts/manifest.json
