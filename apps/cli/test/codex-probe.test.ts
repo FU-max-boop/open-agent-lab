@@ -87,6 +87,15 @@ grep -F ${shellQuote('"type":"turn.completed"')} "$output"
 grep -F ${shellQuote('"type":"thread.started"')} "$output"`,
         expected: /thread\.started before turn\.started before turn\.completed/u,
       },
+      {
+        name: "completion before turn start",
+        renderOutput: `grep -Fv ${shellQuote('"type":"turn.started"')} "$output" | grep -Fv ${shellQuote(
+          '"type":"turn.completed"',
+        )} || :
+grep -F ${shellQuote('"type":"turn.completed"')} "$output"
+grep -F ${shellQuote('"type":"turn.started"')} "$output"`,
+        expected: /thread\.started before turn\.started before turn\.completed/u,
+      },
     ]) {
       await t.test(name, async () => {
         const wrapper = join(directory, name);
