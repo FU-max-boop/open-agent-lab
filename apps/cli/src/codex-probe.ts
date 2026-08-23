@@ -30,6 +30,28 @@ export interface CodexProbeResult {
   sawDeveloperInstruction: boolean;
 }
 
+function codexEventTypes(stdout: string): Set<string> {
+  const types = new Set<string>();
+  for (const [index, line] of stdout.split(/\r?\n/u).entries()) {
+    if (line === "") continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      throw new Error(`Codex probe emitted invalid JSONL at line ${index + 1}.`);
+    }
+    if (typeof event !== "object" || event === null || Array.isArray(event)) {
+      throw new Error(`Codex probe emitted invalid JSONL event at line ${index + 1}.`);
+    }
+    const type = (event as Record<string, unknown>).type;
+    if (typeof type !== "string") {
+      throw new Error(`Codex probe emitted an untyped JSONL event at line ${index + 1}.`);
+    }
+    types.add(type);
+  }
+  return types;
+}
+
 function instructionPaths(value: unknown, marker: string, path = "$"): string[] {
   if (typeof value === "string") return value.includes(marker) ? [path] : [];
   if (Array.isArray(value)) {
@@ -164,14 +186,21 @@ export async function runCodexProbe(
           `found ${JSON.stringify(paths)}.`,
       );
     }
+    const eventTypes = codexEventTypes(stdout);
+    if (!eventTypes.has("thread.started")) {
+      throw new Error("Codex probe did not observe thread.started.");
+    }
+    if (!eventTypes.has("turn.completed")) {
+      throw new Error("Codex probe did not observe turn.completed.");
+    }
     return {
       ok: true,
       requests: snapshot.requests.length,
       callId: CALL_ID,
       tool: snapshot.toolName,
       output: output.trimEnd(),
-      sawThreadStart: stdout.includes('"type":"thread.started"'),
-      sawTurnComplete: stdout.includes('"type":"turn.completed"'),
+      sawThreadStart: true,
+      sawTurnComplete: true,
       sawDeveloperInstruction,
     };
   } finally {
