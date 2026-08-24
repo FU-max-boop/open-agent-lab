@@ -1750,10 +1750,28 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             )
         immutable = authority["immutableImage"]
         platform = authority["platform"]
-        await self._capture(
-            ["docker", "pull", "--quiet", "--platform", platform, immutable],
-            timeout=900,
+        cached = set(
+            (
+                await self._capture(
+                    [
+                        "docker",
+                        "image",
+                        "ls",
+                        "--quiet",
+                        "--no-trunc",
+                        "--filter",
+                        f"reference={immutable}",
+                    ]
+                )
+            )
+            .decode(errors="replace")
+            .split()
         )
+        if authority["imageConfigDigest"] not in cached:
+            await self._capture(
+                ["docker", "pull", "--quiet", "--platform", platform, immutable],
+                timeout=900,
+            )
         identity = (
             (
                 await self._capture(
