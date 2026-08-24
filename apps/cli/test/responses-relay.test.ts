@@ -499,7 +499,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
 });
 
 test("relay rejects malformed upstream turn state before writing client headers", async (t) => {
-  const invalidTurnStates = ["", "bad\tstate", "é", "x".repeat(513)];
+  const invalidTurnStates = ["", "first,second", "bad\tstate", "é", "x".repeat(513)];
   let responseIndex = 0;
   const upstream = await listen((_request, response) => response.end());
   const { relay, sidecarPath } = await fixture(t, upstream, {
