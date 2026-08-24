@@ -88,7 +88,7 @@ from .relay_evidence import (
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:a68061525454cb73a60dfc84ae64ca967ca5c87705570ea27a0387a7a9994ff9"
+    "sha256:b46b447546f265fff12a4da7b64cbed01c02bf0d42cd8ff2e48699292aed424d"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
