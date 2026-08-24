@@ -265,10 +265,13 @@ def provider_control_window(
         raise ValueError("providerControl window must be positive and at most 24 hours")
     if provider == "zai":
         quota = control["quotaSnapshot"]
-        for period in ("fiveHour", "weekly"):
+        for period, duration in (
+            ("fiveHour", timedelta(hours=5)),
+            ("weekly", timedelta(days=7)),
+        ):
             reset = utc("resetsAt", quota[period])
-            if not expires < reset:
-                raise ValueError("providerControl expiresAt must precede quota reset")
+            if not expires < reset or not observed < reset <= observed + duration:
+                raise ValueError("providerControl quota reset is outside its period")
     return control, observed, expires
 
 

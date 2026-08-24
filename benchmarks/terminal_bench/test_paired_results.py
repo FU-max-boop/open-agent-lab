@@ -825,7 +825,7 @@ def _pilot_authorization(
             .replace("+00:00", "Z")
         )
 
-    expires = base_start + timedelta(hours=5)
+    expires = base_start + timedelta(hours=4 if provider == "zai" else 5)
     control = {
         "scope": "campaign",
         "observedAt": stamp(0),
@@ -852,7 +852,7 @@ def _pilot_authorization(
                 "quotaSnapshot": {
                     period: {"remainingPercent": remaining, "resetsAt": reset}
                     for period, remaining, reset in (
-                        ("fiveHour", 80, stamp(6 * 60 * 60 * 1000)),
+                        ("fiveHour", 80, stamp(5 * 60 * 60 * 1000)),
                         ("weekly", 60, stamp(7 * 24 * 60 * 60 * 1000)),
                     )
                 },

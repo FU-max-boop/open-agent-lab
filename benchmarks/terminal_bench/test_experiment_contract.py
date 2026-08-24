@@ -130,6 +130,8 @@ class ExperimentContractTest(unittest.TestCase):
                 "quotaSnapshot.fiveHour.resetsAt",
                 common["expiresAt"],
             ),
+            ("zai", "quotaSnapshot.fiveHour.resetsAt", "2026-08-24T05:00:01Z"),
+            ("zai", "quotaSnapshot.weekly.resetsAt", "2026-08-31T00:00:01Z"),
             (
                 "zai",
                 "sourceUrls.endpointProtocol",
