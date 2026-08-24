@@ -1,6 +1,7 @@
 import unittest
 
 from benchmarks.terminal_bench.experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_EGRESS_NETWORK,
@@ -121,6 +122,16 @@ class ExperimentContractTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH] = 0  # type: ignore[index]
+        self.assertEqual(
+            dict(CODEX_PROVIDER_RETRY_POLICY),
+            {
+                "request_max_retries": 0,
+                "stream_max_retries": 0,
+                "unbounded_connection_retries": False,
+            },
+        )
+        with self.assertRaises(TypeError):
+            CODEX_PROVIDER_RETRY_POLICY["request_max_retries"] = 1  # type: ignore[index]
 
     def test_artifact_manifest_is_exact_and_fresh(self) -> None:
         first = artifact_manifest()

@@ -695,7 +695,11 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("developer_instructions", control._build_effective_config())
         self.assertEqual(
             control._build_effective_config()["features"],
-            {"shell_zsh_fork": False, "unified_exec_zsh_fork": False},
+            {
+                "shell_zsh_fork": False,
+                "unified_exec_zsh_fork": False,
+                "unbounded_connection_retries": False,
+            },
         )
         self.assertEqual(
             treatment._build_effective_config()["developer_instructions"],
@@ -709,8 +713,24 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 "variant_id": "verify-instruction-v1",
                 "developer_instruction_requested": True,
                 "requested_developer_instructions_sha256": _VERIFY_INSTRUCTION_SHA256,
+                "request_max_retries": 0,
+                "stream_max_retries": 0,
+                "unbounded_connection_retries": False,
             },
         )
+
+        for agent in (control, treatment):
+            with self.subTest(variant=agent._open_agent_lab_variant["variant_id"]):
+                provider = agent._build_effective_config()["model_providers"][
+                    "open-agent-lab"
+                ]
+                self.assertEqual(provider["request_max_retries"], 0)
+                self.assertEqual(provider["stream_max_retries"], 0)
+                self.assertFalse(
+                    agent._build_effective_config()["features"][
+                        "unbounded_connection_retries"
+                    ]
+                )
 
     def test_live_route_probe_is_zero_retry_and_non_scoring(self) -> None:
         with (
@@ -734,6 +754,11 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertEqual(provider["request_max_retries"], 0)
             self.assertEqual(provider["stream_max_retries"], 0)
+            self.assertFalse(
+                probe._build_effective_config()["features"][
+                    "unbounded_connection_retries"
+                ]
+            )
             self.assertEqual(
                 probe._open_agent_lab_variant["variant_id"], "live-route-probe-v1"
             )
@@ -754,6 +779,47 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                             Path(raw) / "authorizations" / "zai.cap.json"
                         ),
                     },
+                )
+
+    async def test_effective_retry_policy_fails_closed(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
+        ):
+            agent = OpenAgentLabCodex(
+                Path(raw),
+                model_name="deepseek/deepseek-v4-pro",
+                version="0.149.0",
+                run_binding=_RUN_BINDING,
+                extra_env={"OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1"},
+            )
+
+        mutations = {
+            "missing-request": ("provider", "request_max_retries", None),
+            "request-one": ("provider", "request_max_retries", 1),
+            "request-bool": ("provider", "request_max_retries", False),
+            "missing-stream": ("provider", "stream_max_retries", None),
+            "stream-one": ("provider", "stream_max_retries", 1),
+            "missing-unbounded": ("features", "unbounded_connection_retries", None),
+            "unbounded-true": ("features", "unbounded_connection_retries", True),
+        }
+        for label, (section, field, value) in mutations.items():
+            config = agent._build_effective_config()
+            target = (
+                config["model_providers"]["open-agent-lab"]
+                if section == "provider"
+                else config["features"]
+            )
+            if value is None:
+                target.pop(field)
+            else:
+                target[field] = value
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(RuntimeError, "retry policy drifted"),
+            ):
+                await agent._upload_effective_config(
+                    MagicMock(), config, "/tmp/codex-config.toml"
                 )
 
     async def test_live_route_probe_replaces_task_instruction_and_checks_effect(
@@ -1994,6 +2060,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     "variant_id": "control-v1",
                     "developer_instruction_requested": False,
                     "requested_developer_instructions_sha256": None,
+                    "request_max_retries": 0,
+                    "stream_max_retries": 0,
+                    "unbounded_connection_retries": False,
                 },
             )
 

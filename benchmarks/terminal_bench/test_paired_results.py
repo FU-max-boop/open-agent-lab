@@ -1135,6 +1135,9 @@ class RunFixture:
                             "requested_developer_instructions_sha256": spec[
                                 "instruction_sha256"
                             ],
+                            "request_max_retries": 0,
+                            "stream_max_retries": 0,
+                            "unbounded_connection_retries": False,
                         },
                     }
                     result_config, task_id = paired._expected_result_config(

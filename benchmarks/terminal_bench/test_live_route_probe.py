@@ -253,6 +253,7 @@ class ProbeFixture:
             "effect_verified": True,
             "request_max_retries": 0,
             "stream_max_retries": 0,
+            "unbounded_connection_retries": False,
             "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
         }
         provider_data = {

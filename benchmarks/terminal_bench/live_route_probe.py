@@ -16,6 +16,7 @@ from harbor.models.trajectories.trajectory import Trajectory
 
 from .codex_runtime import CODEX_RUNTIME_SPEC_SHA256
 from .experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_AGENT,
     LIVE_ROUTE_PROBE_AGENT_IMPORT,
@@ -581,8 +582,7 @@ def _relay_and_metadata(
         "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
         "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
         "effect_verified": True,
-        "request_max_retries": 0,
-        "stream_max_retries": 0,
+        **CODEX_PROVIDER_RETRY_POLICY,
         "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
     }
     expected_harbor = {

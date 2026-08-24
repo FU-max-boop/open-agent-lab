@@ -51,6 +51,7 @@ from .codex_runtime import (
     verify_tree,
 )
 from .experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     CODEX_VERSION,
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
@@ -2811,6 +2812,7 @@ def _attempt(
         "variant_id": variant,
         "developer_instruction_requested": expected["enabled"],
         "requested_developer_instructions_sha256": expected["instruction_sha256"],
+        **CODEX_PROVIDER_RETRY_POLICY,
     }
     harbor_binding = _provider_binding(
         provider_data,
