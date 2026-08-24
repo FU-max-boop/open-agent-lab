@@ -1,7 +1,5 @@
 import { canonicalJson } from "@open-agent-lab/contracts";
 
-const MAX_SSE_EVENT_BYTES = 1_048_576;
-
 export interface ResponseMetadata {
   responseId: string | null;
   returnedModel: string | null;
@@ -109,50 +107,13 @@ function numericUsage(value: unknown): Record<string, number> | null {
   return Object.keys(fields).length > 0 ? fields : null;
 }
 
-function hasDuplicateObjectKeys(source: string): boolean {
-  type Context =
-    | { kind: "array" }
-    | { kind: "object"; keys: Set<string>; expectsKey: boolean };
-  const stack: Context[] = [];
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-    if (character === '"') {
-      const start = index;
-      while (++index < source.length) {
-        if (source[index] === "\\") index += 1;
-        else if (source[index] === '"') break;
-      }
-      const context = stack.at(-1);
-      if (context?.kind === "object" && context.expectsKey) {
-        const key = JSON.parse(source.slice(start, index + 1)) as string;
-        if (context.keys.has(key)) return true;
-        context.keys.add(key);
-        context.expectsKey = false;
-      }
-    } else if (character === "{") {
-      stack.push({ kind: "object", keys: new Set(), expectsKey: true });
-    } else if (character === "[") {
-      stack.push({ kind: "array" });
-    } else if (character === "}" || character === "]") {
-      stack.pop();
-    } else if (character === ",") {
-      const context = stack.at(-1);
-      if (context?.kind === "object") context.expectsKey = true;
-    }
-  }
-  return false;
-}
-
 export class SseMetadataObserver {
-  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private readonly models = new Map<string, string>();
   private readonly modelValues = new Set<string>();
   private readonly responseIds = new Set<string>();
   private readonly fingerprints = new Set<string>();
   private readonly terminalEvents = new Set<string>();
   private readonly usages = new Map<string, Record<string, number>>();
-  private buffer = "";
-  private disabled = false;
   private terminalModel: string | null = null;
   private terminalResponseId: string | null = null;
   private terminalUsage: Record<string, number> | null = null;
@@ -165,25 +126,7 @@ export class SseMetadataObserver {
     if (modelHeader !== null) this.addModel("http.openai-model", modelHeader);
   }
 
-  feed(chunk: Uint8Array): void {
-    if (this.disabled) return;
-    try {
-      this.buffer += this.decoder.decode(chunk, { stream: true });
-      this.consume(false);
-    } catch {
-      this.failParsing();
-    }
-  }
-
   finish(): ResponseMetadata {
-    if (!this.disabled) {
-      try {
-        this.buffer += this.decoder.decode();
-        this.consume(true);
-      } catch {
-        this.failParsing();
-      }
-    }
     const conflicts = [
       ...(this.modelConflict ? ["model"] : []),
       ...(this.responseIds.size > 1 ? ["response_id"] : []),
@@ -214,42 +157,12 @@ export class SseMetadataObserver {
     };
   }
 
-  private consume(flush: boolean): void {
-    while (true) {
-      const match = /(?:\r\n|\r|\n){2}/u.exec(this.buffer);
-      if (match === null) break;
-      const frame = this.buffer.slice(0, match.index);
-      this.buffer = this.buffer.slice(match.index + match[0].length);
-      this.observe(frame);
-    }
-    if (flush && this.buffer.length > 0) {
-      this.observe(this.buffer);
-      this.buffer = "";
-    }
-    if (this.buffer.length > MAX_SSE_EVENT_BYTES) {
-      this.failParsing();
-    }
+  recordParseError(): void {
+    this.parseErrors += 1;
   }
 
-  private observe(frame: string): void {
-    if (frame.length > MAX_SSE_EVENT_BYTES) {
-      this.parseErrors += 1;
-      return;
-    }
-    const data = frame
-      .split(/\r\n|\r|\n/u)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n");
-    if (data.length === 0 || data === "[DONE]") return;
+  observe(event: Record<string, unknown>): void {
     try {
-      if (hasDuplicateObjectKeys(data)) throw new Error("duplicate JSON key");
-      const event = JSON.parse(data) as unknown;
-      canonicalJson(event);
-      if (!isObject(event)) {
-        this.parseErrors += 1;
-        return;
-      }
       const eventType = safeString(event.type);
       if (eventType === null) {
         this.parseErrors += 1;
@@ -312,11 +225,5 @@ export class SseMetadataObserver {
 
   private addBounded(values: Set<string>, value: string): void {
     if (values.size < 2 || values.has(value)) values.add(value);
-  }
-
-  private failParsing(): void {
-    this.parseErrors += 1;
-    this.buffer = "";
-    this.disabled = true;
   }
 }

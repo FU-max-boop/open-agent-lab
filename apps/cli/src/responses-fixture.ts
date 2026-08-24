@@ -19,6 +19,7 @@ interface ResponsesFixtureBaseOptions {
   readonly bearer: string;
   readonly model: string;
   readonly finalMessage?: string;
+  readonly finalMessageParts?: readonly string[];
   readonly callId?: string;
   readonly instructionMarker?: string;
   readonly turnState?: string;
@@ -194,6 +195,14 @@ export async function startResponsesFixture(
   if ((options.command === undefined) === (options.patch === undefined)) {
     throw new Error("Fixture requires exactly one command or patch.");
   }
+  if (
+    options.finalMessage !== undefined && options.finalMessageParts !== undefined ||
+    options.finalMessageParts !== undefined &&
+      (options.finalMessageParts.length === 0 ||
+        options.finalMessageParts.some((part) => typeof part !== "string"))
+  ) {
+    throw new Error("Fixture final message parts are invalid.");
+  }
   const expectedTool = options.patch === undefined ? "exec_command" : "apply_patch";
   const toolInput = options.patch ?? options.command;
   if (toolInput.trim() === "") throw new Error("Fixture tool input must be non-empty.");
@@ -290,7 +299,10 @@ export async function startResponsesFixture(
             type: "message",
             role: "assistant",
             id: "msg_fixture_complete",
-            content: [{ type: "output_text", text: options.finalMessage ?? "Done." }],
+            content: (options.finalMessageParts ?? [options.finalMessage ?? "Done."]).map((text) => ({
+              type: "output_text",
+              text,
+            })),
           },
         });
       }

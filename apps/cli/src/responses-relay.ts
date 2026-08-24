@@ -14,6 +14,12 @@ import { sha256 } from "@open-agent-lab/evidence";
 
 import { SseMetadataObserver, type ResponseMetadata } from "./responses-metadata.js";
 import {
+  Codex149SecretGuard,
+  ResponsesSseParser,
+  inspectNonSuccessBody,
+  type ParsedSseFrame,
+} from "./responses-sse.js";
+import {
   RELAY_VERSION,
   RelayJournal,
   writeRelaySeal,
@@ -112,33 +118,6 @@ function containsSecret(values: Iterable<string | null>, secret: string): boolea
     if (value?.includes(secret) === true) return true;
   }
   return false;
-}
-
-function modelSourceEventType(source: string): string | null {
-  const ordinalAt = source.lastIndexOf(".");
-  if (ordinalAt < 0 || !/^\d+$/u.test(source.slice(ordinalAt + 1))) return null;
-  const stem = source.slice(0, ordinalAt);
-  for (const suffix of [".response.model", ".response.headers.openai-model"]) {
-    if (stem.startsWith("event.") && stem.endsWith(suffix)) {
-      return stem.slice("event.".length, -suffix.length);
-    }
-  }
-  return null;
-}
-
-function responseMetadataContainsSecret(metadata: ResponseMetadata, secret: string): boolean {
-  return containsSecret(
-    [
-      metadata.responseId,
-      metadata.returnedModel,
-      metadata.systemFingerprint,
-      ...Object.entries(metadata.modelSources).flatMap(([source, model]) => [
-        modelSourceEventType(source),
-        model,
-      ]),
-    ],
-    secret,
-  );
 }
 
 function redactedResponseMetadata(parseErrors: number): ResponseMetadata {
@@ -481,6 +460,14 @@ export async function startNativeResponsesRelay(
         let terminalError: RelayHttpError | null = null;
         let observer = new SseMetadataObserver(null);
         const controller = new AbortController();
+        let secretEchoConfirmed = false;
+        const secretFailure = (): RelayHttpError => {
+          if (!secretEchoConfirmed) countRejection("upstream_secret_echo");
+          secretEchoConfirmed = true;
+          controller.abort();
+          if (response.headersSent) response.destroy();
+          return new RelayHttpError(502, "upstream_failure");
+        };
         controllers.add(controller);
         let clientDisconnected = false;
         let expiredInFlight = false;
@@ -537,8 +524,7 @@ export async function startNativeResponsesRelay(
             stream: true,
           });
           if (clientRequestIdEcho || turnStateEcho) {
-            countRejection("upstream_secret_echo");
-            throw new RelayHttpError(502, "upstream_failure");
+            throw secretFailure();
           }
 
           let connectTimer: NodeJS.Timeout | undefined;
@@ -598,15 +584,8 @@ export async function startNativeResponsesRelay(
               options.upstreamBearer,
             )
           ) {
-            countRejection("upstream_secret_echo");
             await upstreamResponse.body?.cancel().catch(() => undefined);
-            const errorCategory =
-              upstreamStatus >= 300 && upstreamStatus < 400
-                ? "upstream_redirect"
-                : upstreamStatus === 204 || upstreamStatus === 205 || upstreamResponse.body === null
-                  ? "upstream_body_missing"
-                  : "upstream_failure";
-            throw new RelayHttpError(502, errorCategory);
+            throw secretFailure();
           }
           const upstreamTurnState = forwarded[TURN_STATE_HEADER];
           if (upstreamTurnState !== undefined && codexTurnState(upstreamTurnState) === null) {
@@ -639,23 +618,54 @@ export async function startNativeResponsesRelay(
             await upstreamResponse.body?.cancel();
             throw new RelayHttpError(502, "upstream_compressed");
           }
-          response.writeHead(upstreamStatus, forwarded);
-
           const reader = upstreamResponse.body?.getReader();
           if (reader === undefined) throw new RelayHttpError(502, "upstream_body_missing");
+          const success = upstreamStatus >= 200 && upstreamStatus < 300;
+          const parser = success ? new ResponsesSseParser() : null;
+          const guard = success ? new Codex149SecretGuard(options.upstreamBearer) : null;
+          const failureChunks: Uint8Array[] = [];
+          const forwardFrames = async (frames: ParsedSseFrame[]): Promise<void> => {
+            for (const frame of frames) {
+              const stage = guard!.stage(frame);
+              if (stage.secret) throw secretFailure();
+              if (frame.error !== null || stage.invalid) {
+                observer.recordParseError();
+                controller.abort();
+                if (response.headersSent) response.destroy();
+                throw new RelayHttpError(502, "upstream_failure");
+              }
+              if (frame.event !== null) observer.observe(frame.event);
+              if (!response.headersSent) response.writeHead(upstreamResponse.status, forwarded);
+              await writeWithBackpressure(response, frame.raw);
+              stage.commit();
+            }
+          };
           while (true) {
             const result = await readWithIdleTimeout(reader, limits.idleTimeoutMs, controller);
             if (result.done) break;
             const chunk = result.value;
             if (chunk.byteLength > 0) firstByteAt ??= clock();
-            if (responseBytes + chunk.byteLength > limits.maxResponseBytes) {
+            responseBytes += chunk.byteLength;
+            responseHash.update(chunk);
+            if (responseBytes > limits.maxResponseBytes) {
               controller.abort();
               throw new RelayHttpError(502, "response_too_large");
             }
-            responseBytes += chunk.byteLength;
-            responseHash.update(chunk);
-            observer.feed(chunk);
-            await writeWithBackpressure(response, chunk);
+            if (parser === null) failureChunks.push(chunk);
+            else await forwardFrames(parser.feed(chunk));
+          }
+          if (parser === null) {
+            const failureBody = Buffer.concat(failureChunks, responseBytes);
+            const failureInspection = inspectNonSuccessBody(failureBody, options.upstreamBearer);
+            if (failureInspection === "secret") throw secretFailure();
+            if (failureInspection === "invalid") {
+              throw new RelayHttpError(502, "upstream_failure");
+            }
+            response.writeHead(upstreamResponse.status, forwarded);
+            if (failureBody.byteLength > 0) await writeWithBackpressure(response, failureBody);
+          } else {
+            await forwardFrames(parser.finish());
+            if (!response.headersSent) response.writeHead(upstreamResponse.status, forwarded);
           }
           transportState = "completed";
         } catch (error) {
@@ -700,13 +710,7 @@ export async function startNativeResponsesRelay(
             if (ordinal > 0) {
               const endedAt = clock();
               let metadata = observer.finish();
-              if (responseMetadataContainsSecret(metadata, options.upstreamBearer)) {
-                countRejection("upstream_secret_echo");
-                terminalError = new RelayHttpError(502, "upstream_failure");
-                transportState = "failed";
-                errorCategory = "upstream_failure";
-                metadata = redactedResponseMetadata(metadata.parseErrors);
-              }
+              if (secretEchoConfirmed) metadata = redactedResponseMetadata(metadata.parseErrors);
               await journal.append({
                 ...identity,
                 event: "transport.responses.closed",

@@ -360,6 +360,7 @@ _RELAY_BUILD_INPUTS = (
     "apps/cli/src/relay-evidence.ts",
     "apps/cli/src/responses-metadata.ts",
     "apps/cli/src/responses-relay.ts",
+    "apps/cli/src/responses-sse.ts",
     "apps/cli/tsconfig.relay.json",
     "benchmarks/terminal_bench/relay.Dockerfile",
     "packages/contracts/package.json",

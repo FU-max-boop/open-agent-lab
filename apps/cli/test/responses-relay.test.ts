@@ -116,6 +116,40 @@ async function turnStateRequest(
   });
 }
 
+async function interruptedRelayRequest(
+  relay: NativeResponsesRelay,
+): Promise<{ body: Buffer; complete: boolean; status: number }> {
+  const payload = requestBody();
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      `${relay.baseUrl}/responses`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${CLIENT_BEARER}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("error", () => undefined);
+        response.once("close", () => {
+          assert.ok(response.statusCode !== undefined);
+          resolve({
+            body: Buffer.concat(chunks),
+            complete: response.complete,
+            status: response.statusCode,
+          });
+        });
+      },
+    );
+    request.on("error", reject);
+    request.end(payload);
+  });
+}
+
 async function fixture(
   t: { after: (callback: () => void | Promise<void>) => void },
   upstream: TestServer,
@@ -562,6 +596,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     status: number;
     error: string;
     headers: Record<string, string>;
+    body?: string;
   }> = [
     {
       status: 200,
@@ -604,13 +639,25 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     },
     {
       status: 204,
-      error: "upstream_body_missing",
+      error: "upstream_failure",
       headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
     },
     {
       status: 302,
-      error: "upstream_redirect",
+      error: "upstream_failure",
       headers: { "openai-model": MODEL, "x-request-id": PROVIDER_BEARER },
+    },
+    {
+      status: 400,
+      error: "upstream_failure",
+      headers: { "content-type": "application/json", "x-request-id": "safe-raw" },
+      body: PROVIDER_BEARER,
+    },
+    {
+      status: 422,
+      error: "upstream_failure",
+      headers: { "content-type": "application/json", "x-request-id": "safe-escaped" },
+      body: JSON.stringify({ error: PROVIDER_BEARER }).replaceAll("-", "\\u002d"),
     },
   ];
   const safeResponse = {
@@ -660,7 +707,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
       type: "response.completed",
       response: safeResponse,
     };
-    response.end(`data: ${JSON.stringify(event)}\n\n`);
+    response.end(headerCase?.body ?? `data: ${JSON.stringify(event)}\n\n`);
   });
   const { relay, sidecarPath } = await fixture(t, upstream, {
     maxRequests: headerCases.length + metadataCases.length,
@@ -672,6 +719,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     const errorBody = await response.text();
     assert.ok(!errorBody.includes(PROVIDER_BEARER));
     assert.deepEqual(JSON.parse(errorBody), { error: { code: headerCase.error } });
+    assert.equal(response.headers.get("x-request-id"), null);
     assert.ok([...response.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
   }
   for (const _case of metadataCases) {
@@ -694,10 +742,11 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     const headerCase = headerCases[index]!;
     const headers = entries[index * 3 + 1];
     assert.equal(headers?.status, headerCase.status);
-    assert.equal(headers?.providerRequestId, null);
+    assert.equal(headers?.providerRequestId, headerCase.body === undefined ? null : headerCase.headers["x-request-id"]);
     assert.equal(headers?.modelHeader, null);
     const closed = entries[index * 3 + 2];
-    assert.equal(closed?.responseBytes, 0);
+    assert.equal(closed?.responseBytes, Buffer.byteLength(headerCase.body ?? ""));
+    if (headerCase.body !== undefined) assert.equal(closed?.responseSha256, sha256(headerCase.body));
     assert.equal(closed?.errorCategory, headerCase.error);
   }
   const expectedErrors = [
@@ -718,6 +767,154 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     }
     assert.deepEqual(closed?.modelSources, {});
   }
+});
+
+test("relay fails closed on an invalid UTF-8 non-success body", async (t) => {
+  const escaped = JSON.stringify(PROVIDER_BEARER).slice(1, -1).replaceAll("-", "\\u002d");
+  const upstreamBody = Buffer.concat([
+    Buffer.from(`{"error":{"message":"${escaped}","noise":"`),
+    Buffer.from([0xff]),
+    Buffer.from('"}}'),
+  ]);
+  const upstream = await listen((_request, response) => {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(upstreamBody);
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream, { maxRequests: 1 });
+
+  const response = await relayRequest(relay);
+  assert.equal(response.status, 502);
+  const clientBody = await response.text();
+  assert.deepEqual(JSON.parse(clientBody), { error: { code: "upstream_failure" } });
+  assert.ok(!clientBody.includes(PROVIDER_BEARER));
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const closed = records(journal)[2];
+  assert.deepEqual(summary.rejectedRequests, {});
+  assert.equal(closed?.transportState, "failed");
+  assert.equal(closed?.errorCategory, "upstream_failure");
+  assert.equal(closed?.responseBytes, upstreamBody.byteLength);
+  assert.equal(closed?.responseSha256, sha256(upstreamBody));
+  assert.ok(!journal.includes(PROVIDER_BEARER));
+});
+
+test("relay rejects a split raw first-frame echo before committing client headers", async (t) => {
+  const malicious = Buffer.from(`: ${PROVIDER_BEARER}\r\n\r\n`);
+  const splitAt = malicious.indexOf(Buffer.from(PROVIDER_BEARER)) + 13;
+  const upstream = await listen((_request, response) => {
+    void (async () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(malicious.subarray(0, splitAt));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      response.end(malicious.subarray(splitAt));
+    })().catch((error: unknown) => response.destroy(error instanceof Error ? error : undefined));
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream);
+
+  const response = await relayRequest(relay);
+  const clientBody = await response.text();
+  assert.equal(response.status, 502);
+  assert.deepEqual(JSON.parse(clientBody), { error: { code: "upstream_failure" } });
+  assert.ok(!clientBody.includes(PROVIDER_BEARER));
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const closed = records(journal)[2];
+  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+  assert.equal(closed?.transportState, "failed");
+  assert.equal(closed?.errorCategory, "upstream_failure");
+  assert.equal(closed?.responseBytes, malicious.byteLength);
+  assert.equal(closed?.responseSha256, sha256(malicious));
+  assert.ok(!journal.includes(PROVIDER_BEARER));
+});
+
+test("relay preserves a safe prefix but drops an escaped late echo and following frame", async (t) => {
+  const escaped = (value: string): string =>
+    [...value].map((character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+  const prefix = PROVIDER_BEARER.slice(0, 17);
+  const suffix = PROVIDER_BEARER.slice(17);
+  const added = Buffer.from(
+    'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg","content":[]}}\n\n',
+  );
+  const first = Buffer.from(
+    `data: {"type":"response.output_text.delta","delta":"${escaped(prefix)}"}\n\n`,
+  );
+  const offending = Buffer.from(
+    `data: {"type":"response.output_text.delta","delta":"${escaped(suffix)}"}\n\n`,
+  );
+  const following = Buffer.from('data: {"type":"response.output_text.delta","delta":"after"}\n\n');
+  const safePrefix = Buffer.concat([added, first]);
+  const allUpstreamBytes = Buffer.concat([safePrefix, offending, following]);
+  const upstream = await listen((_request, response) => {
+    void (async () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(safePrefix);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      response.end(Buffer.concat([offending, following]));
+    })().catch((error: unknown) => response.destroy(error instanceof Error ? error : undefined));
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream);
+
+  const client = await interruptedRelayRequest(relay);
+  assert.equal(client.status, 200);
+  assert.equal(client.complete, false);
+  assert.deepEqual(client.body, safePrefix);
+  assert.ok(!client.body.includes(PROVIDER_BEARER));
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const closed = records(journal)[2];
+  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+  assert.equal(closed?.transportState, "failed");
+  assert.equal(closed?.errorCategory, "upstream_failure");
+  assert.equal(closed?.responseBytes, allUpstreamBytes.byteLength);
+  assert.equal(closed?.responseSha256, sha256(allUpstreamBytes));
+  assert.ok(!journal.includes(PROVIDER_BEARER));
+});
+
+test("relay drops a malformed state-affecting frame before it can reset Codex state", async (t) => {
+  const prefix = PROVIDER_BEARER.slice(0, 17);
+  const suffix = PROVIDER_BEARER.slice(17);
+  const added = Buffer.from(
+    'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg","content":[]}}\n\n',
+  );
+  const first = Buffer.from(
+    `data: ${JSON.stringify({ type: "response.output_text.delta", delta: prefix })}\n\n`,
+  );
+  const malformed = Buffer.from(
+    'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","phase":123,"content":[]}}\n\n',
+  );
+  const following = Buffer.from(
+    `data: ${JSON.stringify({ type: "response.output_text.delta", delta: suffix })}\n\n`,
+  );
+  const safePrefix = Buffer.concat([added, first]);
+  const allUpstreamBytes = Buffer.concat([safePrefix, malformed, following]);
+  const upstream = await listen((_request, response) => {
+    void (async () => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(safePrefix);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      response.end(Buffer.concat([malformed, following]));
+    })().catch((error: unknown) => response.destroy(error instanceof Error ? error : undefined));
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream);
+
+  const client = await interruptedRelayRequest(relay);
+  assert.equal(client.status, 200);
+  assert.equal(client.complete, false);
+  assert.deepEqual(client.body, safePrefix);
+
+  const summary = await relay.close();
+  const journal = await readFile(sidecarPath, "utf8");
+  const closed = records(journal)[2];
+  assert.deepEqual(summary.rejectedRequests, {});
+  assert.equal(closed?.transportState, "failed");
+  assert.equal(closed?.errorCategory, "upstream_failure");
+  assert.equal(closed?.parseErrors, 1);
+  assert.equal(closed?.responseBytes, allUpstreamBytes.byteLength);
+  assert.equal(closed?.responseSha256, sha256(allUpstreamBytes));
+  assert.ok(!journal.includes(PROVIDER_BEARER));
 });
 
 test("relay redacts a provider credential from client metadata", async (t) => {
@@ -1095,9 +1292,7 @@ test("upstream timeouts and response cap fail closed with complete evidence", as
     response.end("x".repeat(64));
   });
   const capped = await fixture(t, oversized, { maxResponseBytes: 32 });
-  await assert.rejects(
-    relayRequest(capped.relay).then(async (response) => response.text()),
-  );
+  await assertRelayError(await relayRequest(capped.relay), 502, "response_too_large");
   assert.equal(records(await readFile(capped.sidecarPath, "utf8"))[2]?.errorCategory, "response_too_large");
 
   const unused = await listen((_request, response) => response.end());
@@ -1121,9 +1316,7 @@ test("upstream timeouts and response cap fail closed with complete evidence", as
     response.flushHeaders();
   });
   const idle = await fixture(t, stalled, { idleTimeoutMs: 10 });
-  await assert.rejects(
-    relayRequest(idle.relay).then(async (response) => response.text()),
-  );
+  await assertRelayError(await relayRequest(idle.relay), 504, "upstream_idle_timeout");
   assert.equal(
     records(await readFile(idle.sidecarPath, "utf8"))[2]?.errorCategory,
     "upstream_idle_timeout",

@@ -16,6 +16,7 @@ import {
 } from "../src/codex-runner.js";
 import { runCodexProbe } from "../src/codex-probe.js";
 import { startResponsesFixture } from "../src/responses-fixture.js";
+import { startNativeResponsesRelay } from "../src/responses-relay.js";
 
 test("DeepSeek invocation is native Responses, isolated, and secret-free", () => {
   const invocation = buildCodexInvocation({
@@ -574,6 +575,90 @@ test(
     assert.equal(result.ok, true);
     assert.equal(result.requests, 2);
     assert.equal(result.output, "codex-native-responses");
+  },
+);
+
+test(
+  "installed Codex blocks a provider-secret custom patch before side effects",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async (t) => {
+    const codexPath = process.env.OPEN_AGENT_LAB_CODEX_BIN!;
+    const workspace = await mkdtemp(join(tmpdir(), "open-agent-lab-secret-patch-"));
+    const upstreamBearer = "open-agent-lab-malicious-provider-secret-1";
+    const clientBearer = "open-agent-lab-malicious-client-secret-001";
+    await writeFile(join(workspace, "patch-target.txt"), "before\n", "utf8");
+    const fixture = await startResponsesFixture({
+      bearer: upstreamBearer,
+      model: "open-agent-lab-probe",
+      patch: `*** Begin Patch\n*** Update File: patch-target.txt\n@@\n-before\n+${upstreamBearer}\n*** End Patch\n`,
+    });
+    const relay = await startNativeResponsesRelay({
+      runId: "codex-secret-probe", providerId: "probe", buildId: "development",
+      expectedModel: "open-agent-lab-probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
+      upstreamBearer, clientBearer, sidecarPath: join(workspace, "provider-metadata.ndjson"), expiresAtMs: Date.now() + 60_000,
+    });
+    t.after(async () => { await relay.close(); await fixture.close(); await rm(workspace, { force: true, recursive: true }); });
+    let stderr = "";
+    const invocation = buildCodexProbeInvocation({
+      workspace, prompt: "Apply the provided patch exactly once.", baseUrl: relay.baseUrl, codexPath,
+    });
+    const code = await runCodexInvocation(
+      invocation, { ...process.env, OPEN_AGENT_LAB_PROBE_KEY: clientBearer },
+      { stdout: () => undefined, stderr: (chunk) => (stderr += chunk) },
+    );
+    const summary = await relay.close();
+    const snapshot = fixture.snapshot();
+    assert.notEqual(code, 0, stderr.slice(-2_000));
+    assert.deepEqual([snapshot.requests.length, snapshot.toolOutput], [1, ""]);
+    assert.equal(await readFile(join(workspace, "patch-target.txt"), "utf8"), "before\n");
+    assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+    const evidence = `${await readFile(join(workspace, "provider-metadata.ndjson"), "utf8")}${await readFile(relay.sealPath, "utf8")}`;
+    assert.ok(!evidence.includes(upstreamBearer));
+  },
+);
+
+test(
+  "installed Codex never reconstructs a provider secret around hidden citation markup",
+  { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
+  async (t) => {
+    const codexPath = process.env.OPEN_AGENT_LAB_CODEX_BIN!;
+    const workspace = await mkdtemp(join(tmpdir(), "open-agent-lab-secret-message-"));
+    const upstreamBearer = "open-agent-lab-malicious-provider-secret-2";
+    const clientBearer = "open-agent-lab-malicious-client-secret-002";
+    const fixture = await startResponsesFixture({
+      bearer: upstreamBearer,
+      model: "open-agent-lab-probe",
+      command: "printf safe",
+      finalMessageParts: [
+        upstreamBearer.slice(0, 17),
+        "<oai-mem-citation>safe-source</oai-mem-citation>",
+        upstreamBearer.slice(17),
+      ],
+    });
+    const relay = await startNativeResponsesRelay({
+      runId: "codex-secret-message", providerId: "probe", buildId: "development",
+      expectedModel: "open-agent-lab-probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
+      upstreamBearer, clientBearer, sidecarPath: join(workspace, "provider-metadata.ndjson"), expiresAtMs: Date.now() + 60_000,
+    });
+    t.after(async () => { await relay.close(); await fixture.close(); await rm(workspace, { force: true, recursive: true }); });
+    let output = "";
+    const invocation = buildCodexProbeInvocation({
+      workspace, prompt: "Run the provided command exactly once.", baseUrl: relay.baseUrl, codexPath,
+    });
+    const code = await runCodexInvocation(
+      invocation, { ...process.env, OPEN_AGENT_LAB_PROBE_KEY: clientBearer },
+      { stdout: (chunk) => (output += chunk), stderr: (chunk) => (output += chunk) },
+    );
+    const summary = await relay.close();
+    assert.notEqual(code, 0, output.slice(-2_000));
+    assert.equal(fixture.snapshot().requests.length, 2);
+    assert.ok(!output.includes(upstreamBearer));
+    assert.deepEqual(summary.rejectedRequests, {
+      client_disconnected_after_close: 1,
+      upstream_secret_echo: 1,
+    });
+    const evidence = `${await readFile(join(workspace, "provider-metadata.ndjson"), "utf8")}${await readFile(relay.sealPath, "utf8")}`;
+    assert.ok(!evidence.includes(upstreamBearer));
   },
 );
 
