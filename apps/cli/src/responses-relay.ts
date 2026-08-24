@@ -100,7 +100,9 @@ function safeString(value: unknown): string | null {
 }
 
 function codexTurnState(value: unknown): string | null {
-  return typeof value === "string" && /^[\x20-\x7e]{1,512}$/u.test(value)
+  return typeof value === "string" &&
+    !value.includes(",") &&
+    /^[\x20-\x7e]{1,512}$/u.test(value)
     ? value
     : null;
 }

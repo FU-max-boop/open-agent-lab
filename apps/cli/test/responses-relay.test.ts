@@ -470,6 +470,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
   const malformed = [
     { name: "empty", values: [""] },
     { name: "duplicate", values: ["first", "second"] },
+    { name: "ambiguous comma", values: ["first,second"] },
     { name: "htab", values: ["bad\tstate"] },
     { name: "non-ascii", values: ["é"] },
     { name: "oversized", values: ["x".repeat(513)] },
@@ -487,7 +488,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
   assert.equal(upstreamRequests, 1);
   assert.equal(observedTurnState, validTurnState);
   const summary = await relay.close();
-  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 5 });
+  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 6 });
   assert.deepEqual(
     verifyRelaySeal(
       await readFile(sidecarPath, "utf8"),
@@ -534,6 +535,26 @@ test("relay rejects malformed upstream turn state before writing client headers"
     assert.equal(closed?.errorCategory, "upstream_failure");
     assert.equal(closed?.responseBytes, 0);
   }
+});
+
+test("relay rejects folded duplicate upstream turn state before writing headers", async (t) => {
+  const upstream = await listen((_request, response) => {
+    response.setHeader(TURN_STATE_HEADER, ["first", "second"]);
+    response.end();
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream, { maxRequests: 1 });
+
+  const response = await relayRequest(relay);
+  assert.equal(response.headers.get(TURN_STATE_HEADER), null);
+  await assertRelayError(response, 502, "upstream_failure");
+
+  const summary = await relay.close();
+  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 1 });
+  const entries = records(await readFile(sidecarPath, "utf8"));
+  assert.equal(entries[1]?.status, 200);
+  assert.equal(entries[2]?.transportState, "failed");
+  assert.equal(entries[2]?.errorCategory, "upstream_failure");
+  assert.equal(entries[2]?.responseBytes, 0);
 });
 
 test("relay rejects upstream metadata that echoes its provider credential", async (t) => {
