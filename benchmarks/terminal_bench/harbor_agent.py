@@ -629,7 +629,7 @@ class OpenAgentLabCodex(Codex):
                 else None
             ),
         }
-        if any(
+        if config.get("model_provider") != "open-agent-lab" or any(
             type(observed[key]) is not type(expected) or observed[key] != expected
             for key, expected in CODEX_PROVIDER_RETRY_POLICY.items()
         ):

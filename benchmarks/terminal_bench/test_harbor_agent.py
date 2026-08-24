@@ -795,6 +795,8 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             )
 
         mutations = {
+            "missing-selected-provider": ("root", "model_provider", None),
+            "wrong-selected-provider": ("root", "model_provider", "other"),
             "missing-request": ("provider", "request_max_retries", None),
             "request-one": ("provider", "request_max_retries", 1),
             "request-bool": ("provider", "request_max_retries", False),
@@ -806,7 +808,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
         for label, (section, field, value) in mutations.items():
             config = agent._build_effective_config()
             target = (
-                config["model_providers"]["open-agent-lab"]
+                config
+                if section == "root"
+                else config["model_providers"]["open-agent-lab"]
                 if section == "provider"
                 else config["features"]
             )
