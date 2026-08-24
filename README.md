@@ -105,7 +105,7 @@ internal engineering suites used to build toward them.
 
 | Stage | Evaluation | Purpose |
 | --- | --- | --- |
-| First public leaderboard | [Terminal-Bench 2.1](https://www.tbench.ai/leaderboard/terminal-bench/2.1) | Compare agent harnesses under the same model route and budget on terminal and systems workflows. |
+| Headline benchmark target | [Terminal-Bench 3.0](https://hub.harborframework.com/datasets/terminal-bench/terminal-bench/3.0.0) | Compare exact agent/model variants on the official 74-task `v3.0.0` release; the frozen 2.1 five-task pilot remains an internal infrastructure experiment. |
 | Browser regression | [WebArena-Verified](https://github.com/ServiceNow/webarena-verified) Hard | Detect browser-runtime regressions with an audited, programmatically scored environment. |
 | Browser leaderboard | [Online-Mind2Web](https://github.com/OSU-NLP-Group/Online-Mind2Web) | Evaluate live-site browser behavior through the benchmark's submission and review process. |
 | Second-stage computer use | [OSWorld 2.0](https://github.com/xlang-ai/OSWorld-V2) | Evaluate long-horizon GUI and cross-application behavior after the core runtime is stable. |
@@ -154,14 +154,17 @@ third-party agent harness should become an irreplaceable core dependency.
    evidence schema are frozen for the first experiment.
 2. **Kernel:** a minimal CLI can complete controlled smoke tasks, survive a
    process interruption, and produce verifier-backed evidence.
-3. **Pilot:** pinned Terminal-Bench 2.1 and disclosed WebArena-Verified Hard
-   development samples run against at least one pinned baseline using the paired
-   protocol.
-4. **Release evaluation:** full, predeclared suites run with complete attempts,
-   uncertainty, cost/time/token telemetry, and public redacted artifacts.
-5. **External evaluation:** seek a team-verified Terminal-Bench 2.1 row, then
-   submit Online-Mind2Web v2 trajectories under its current review rules, only
-   after their disclosure packages are ready.
+3. **Pilot:** the pinned Terminal-Bench 2.1 infrastructure experiment and
+   disclosed WebArena-Verified Hard development samples run against at least one
+   pinned baseline using the paired protocol.
+4. **Release evaluation:** after a positive, attributable 2.1 pilot, a separately
+   pinned Terminal-Bench 3.0 release runs with complete attempts, uncertainty,
+   cost/time/token telemetry, and public redacted artifacts. Other full,
+   predeclared suites follow their own gates and the same disclosure standard.
+5. **External evaluation:** publish a complete Terminal-Bench 3.0 Harbor Hub job
+   and seek listing on the official leaderboard after confirming the current
+   maintainer admission path; then submit Online-Mind2Web v2 trajectories under
+   its current review rules, only after their disclosure packages are ready.
 6. **Computer use:** ship the shared browser/desktop workspace, then evaluate on
    one pinned OSWorld 2.0 release without mixing release components.
 
@@ -179,7 +182,7 @@ Detailed exit criteria live in [CHARTER.md](CHARTER.md).
 - [docs/model-drivers.md](docs/model-drivers.md): GLM/DeepSeek adapter contract,
   limitations, and live-conformance gate
 - [benchmarks/terminal_bench](benchmarks/terminal_bench/README.md): pinned Harbor
-  adapter and predeclared Terminal-Bench 2.1 pilot
+  adapter and predeclared Terminal-Bench 2.1 infrastructure experiment
 - [docs/decisions](docs/decisions): accepted persistence and recovery decisions
 
 ## License
