@@ -57,8 +57,8 @@ That green gate proves the adapter and isolation machinery, not DeepSeek, GLM,
 or Terminal-Bench capability. Fixture metadata is labeled `synthetic-fixture`
 and fails both publication gates by design. Before any result is publishable,
 live probes must produce consistent returned-model and provider request IDs
-without exposing the durable key. Use a disposable key file and a provider-side
-spend cap until those gates pass.
+without exposing the durable key. Use a disposable key file and the exact
+provider-side launch control described below until those gates pass.
 
 The provider-free route harness tests both exact Codex profiles in hosted CI,
 but it cannot establish live provider identity. A live route/model-identity
@@ -68,8 +68,9 @@ deliberately narrower than conformance: every prepared run contains a dedicated,
 non-scoring `live-route-probe` job. The probe relay is the only service on both
 the task's internal network and a separate egress network. It remains closed
 until the adapter revalidates the run binding, credential identity, and a
-short-lived operator attestation for a provider-side cap. A successful probe
-still does not authorize the pilot by itself: the verifier must publish a new
+short-lived operator attestation for a provider-side launch control. A
+successful probe still does not authorize the pilot by itself: the verifier
+must publish a new
 mode-0600 receipt at the fixed path for that run. Every pilot trial revalidates
 that receipt, the underlying evidence, the unchanged credential, and its expiry
 immediately before opening its relay.
@@ -141,7 +142,7 @@ the native provider-free tool round, direct five-image compatibility preflight,
 and production-bound Harbor install-only lifecycle all pass on hosted Linux.
 This removes only the runtime blocker. It does not prove provider conformance,
 model capability, a benchmark score, or permission to publish one. A live pilot
-still requires disposable provider credentials, a provider-side spend cap, and
+still requires disposable provider credentials, a provider-side launch control, and
 the evidence gates described above.
 
 For a live pilot, the operator procedure is to finish preparing both predeclared
@@ -158,7 +159,7 @@ it.
 Preparation and execution must use the same Linux Docker daemon; immutable local
 relay image IDs are intentionally not portable aliases. The following commands
 document the operator procedure; do not run it until the disposable credentials
-and spend caps are in place:
+and provider controls are in place:
 
 ```bash
 python -m benchmarks.terminal_bench.paired_results prepare \
@@ -196,20 +197,28 @@ dedicated group with a different gid, add the operator, and run the entire
 prepare/probe/pilot/analyze workflow from a shell whose effective group is that
 group (for example, `newgrp open-agent-lab`). Do not relax the gid-1000 guard.
 
-For each provider and each prepared repetition, first confirm a provider-side
-cap of at most USD 2. Then write one canonical JSON attestation to the fixed
-`authorizations/<provider>.cap.json` path. `observedAt` must precede the probe,
-`expiresAt` may be at most 24 hours later, and `evidenceSha256` must identify the
-operator-retained cap evidence. `preflightSha256` must equal the same field in
-that repetition's `run-record.json`, so cap files cannot be copied across runs.
-`providerCredentialSha256` must be the SHA-256 of the exact credential file
-mounted into the relay. Keep at least 11 minutes
-remaining before the probe and 4 hours 1 minute before every pilot trial so the
-authorization covers the relay's entire fixed lifetime. The verifier deliberately labels this
-`operator_attested`; it is not independent provider-side proof:
+Write one canonical provider-authorization v2 object to each repetition's fixed
+`authorizations/<provider>.cap.json` path. DeepSeek requires a campaign hard USD
+cap with `0 < limitUsd <= 2`. Z.AI instead requires the Coding Plan subscription
+quota/no-balance-deduction control; it must not contain a USD-limit field, and
+both quota periods must be positive and cover the local authorization window.
+For every provider, require `observedAt < expiresAt <= observedAt + 24h`, with
+at least 11 minutes remaining before the probe and at least 4 hours 1 minute
+before every pilot trial. For each Z.AI quota period, require
+`0 < remainingPercent <= 100`; also require
+`expiresAt < resetsAt <= observedAt + 5h` for `fiveHour` and
+`expiresAt < resetsAt <= observedAt + 7d` for `weekly`.
+`preflightSha256`, `observedAt`, `expiresAt`, quota snapshots and resets, and
+`assertedBy` are root-local. Across screen and mirror, the same provider must
+retain the same credential digest, evidence digest, control class, scope, fixed
+route/source policy, and provider-specific stable terms (DeepSeek limit; Z.AI
+plan/no-balance). The combined analyzer checks that identity retrospectively;
+this is not a cross-root launch-time lock. These operator attestations are not
+independent provider-side proof. Their exact v2 shapes are:
 
 ```json
-{"assertedBy":"<operator>","evidenceSha256":"sha256:<64 lowercase hex>","expiresAt":"<UTC timestamp>","limitUsd":2,"model":"<exact frozen model>","observedAt":"<UTC timestamp>","preflightSha256":"sha256:<run-record preflightSha256>","proofClass":"live-route-probe-spend-cap-v1","provider":"<deepseek or zai>","providerCredentialSha256":"sha256:<SHA-256 of the exact credential file>","schemaVersion":1,"verification":"operator_attested"}
+{"experimentId":"terminal-bench-2.1-verify-instruction-v1","model":"<exact frozen model>","preflightSha256":"sha256:<root preflight>","proofClass":"live-route-provider-authorization-v2","provider":"deepseek","providerControl":{"assertedBy":"<operator>","controlClass":"provider_hard_spend_cap_usd","evidenceSha256":"sha256:<retained evidence>","expiresAt":"<UTC timestamp>","limitUsd":2,"observedAt":"<UTC timestamp>","scope":"campaign","sourceUrls":{"providerControl":"https://platform.deepseek.com/"}},"providerCredentialSha256":"sha256:<exact credential bytes>","schemaVersion":2,"verification":"operator_attested"}
+{"experimentId":"terminal-bench-2.1-verify-instruction-v1","model":"<exact frozen model>","preflightSha256":"sha256:<root preflight>","proofClass":"live-route-provider-authorization-v2","provider":"zai","providerControl":{"assertedBy":"<operator>","baseUrl":"https://api.z.ai/api/v1","controlClass":"coding_plan_subscription_quota_no_balance_deduction","evidenceSha256":"sha256:<retained evidence>","expiresAt":"<UTC timestamp>","noBalanceDeduction":true,"observedAt":"<UTC timestamp>","plan":"zai_coding_plan","protocol":"openai_responses","quotaSnapshot":{"fiveHour":{"remainingPercent":80,"resetsAt":"<UTC reset>"},"weekly":{"remainingPercent":60,"resetsAt":"<UTC reset>"}},"scope":"campaign","sourceUrls":{"endpointProtocol":"https://docs.z.ai/devpack/tool/others","providerControl":"https://docs.z.ai/devpack/faq"}},"providerCredentialSha256":"sha256:<exact credential bytes>","schemaVersion":2,"verification":"operator_attested"}
 ```
 
 The resulting probe receipt is a frozen-gate audit record, not independent
@@ -242,7 +251,7 @@ harbor jobs start \
 
 Use `OAL_ZAI_API_KEY_FILE`, `zai`, and the corresponding ZAI paths for GLM.
 Repeat the complete sequence for the separately prepared mirror; receipts and
-cap attestations cannot be reused across runs. Missing, stale, misplaced,
+provider authorizations cannot be reused across runs. Missing, stale, misplaced,
 rewritten, or cross-run receipts fail before the first scored pilot provider
 request. The gate also creates a private, one-shot claim for each planned
 task/arm slot before opening its relay. An interrupted claimed slot stays

@@ -73,6 +73,7 @@ from .experiment_contract import (
     live_route_probe_config,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    provider_control_identity,
     provider_control_window,
     relay_claim_name,
     same_json,
@@ -87,11 +88,11 @@ from .relay_evidence import (
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:7d654cf7dea7a165d087de498159904778a046ab8617bc7c297b6944f738d11b"
+    "sha256:a68061525454cb73a60dfc84ae64ca967ca5c87705570ea27a0387a7a9994ff9"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
-_SUMMARY_SCHEMA_VERSION = 4
+_SUMMARY_SCHEMA_VERSION = 5
 _PAIRED_BOOTSTRAP_RESAMPLES = 10_000
 _PAIRED_BOOTSTRAP_SEED = 20260822
 _RELAY_REQUEST_CAP = 256
@@ -2577,7 +2578,7 @@ def _validated_pilot_receipt(
     claimed_at: datetime,
     pilot_started: datetime,
     pilot_finished: datetime,
-) -> tuple[str, datetime]:
+) -> tuple[str, datetime, dict[str, object]]:
     observed, expires, control = _probe_receipt_payloads(receipt, pilot)
     probe_started = _iso(receipt.get("probeStartedAt"), "probe startedAt")
     probe_finished = _iso(receipt.get("probeFinishedAt"), "probe finishedAt")
@@ -2629,7 +2630,13 @@ def _validated_pilot_receipt(
         )
     ):
         raise IntegrityError("pilot authorization receipt drifted")
-    return str(credential_sha256), probe_started
+    try:
+        identity = provider_control_identity(
+            control, provider, model, credential_sha256
+        )
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("pilot authorization providerControl drifted") from error
+    return str(credential_sha256), probe_started, identity
 
 
 def _validate_pilot_claim(
@@ -2645,7 +2652,7 @@ def _validate_pilot_claim(
     not_before: datetime,
     before: datetime,
     trial_finished: datetime,
-) -> tuple[str, datetime]:
+) -> tuple[str, datetime, dict[str, object]]:
     lock_sha256 = _digest(trial_lock)
     authorization = run_dir / "authorizations" / f"{provider}.json"
     claim = (
@@ -2769,7 +2776,7 @@ def _attempt(
         verifier_started,
         verifier_finished,
     ) = _trial_timing(result)
-    credential_sha256, probe_started = _validate_pilot_claim(
+    credential_sha256, probe_started, control_identity = _validate_pilot_claim(
         run_dir,
         provider,
         job_dir,
@@ -2855,6 +2862,7 @@ def _attempt(
         "model": model,
         "replication": preflight["replicationId"],
         "sourceRevision": preflight["sourceRevision"],
+        "providerControlIdentity": control_identity,
         "probeStartedAt": probe_started,
         "task": task,
         "taskDigest": task_lock["digest"],
@@ -3756,8 +3764,36 @@ def _median(values: list[float | str]) -> float | str | None:
 
 
 def _clean_attempt(item: dict[str, Any]) -> dict[str, Any]:
-    hidden = {"startedAt", "probeStartedAt", "providerResponseIdentities"}
+    hidden = {
+        "startedAt",
+        "probeStartedAt",
+        "providerControlIdentity",
+        "providerResponseIdentities",
+    }
     return {key: value for key, value in item.items() if key not in hidden}
+
+
+def _provider_controls(attempts: list[dict[str, Any]]) -> list[dict[str, object]]:
+    public = []
+    for provider in _PROVIDERS:
+        identities = {
+            _canonical(item["providerControlIdentity"])
+            for item in attempts
+            if item["provider"] == provider
+        }
+        if len(identities) != 1:
+            raise IntegrityError(
+                f"{provider} providerControl stable identity differs across replications"
+            )
+        identity = json.loads(next(iter(identities)))
+        hidden = {"providerCredentialSha256", "evidenceSha256"}
+        public.append(
+            {
+                **{key: value for key, value in identity.items() if key not in hidden},
+                "verification": "operator_attested",
+            }
+        )
+    return public
 
 
 def _exception_counts(attempts: list[dict[str, Any]]) -> dict[str, int]:
@@ -3925,6 +3961,7 @@ def _summary(
     attempts: list[dict[str, Any]], manifest: dict[str, Any], tasks: list[str]
 ) -> dict[str, Any]:
     _validate_global_uniqueness(attempts)
+    provider_controls = _provider_controls(attempts)
     pairs = _build_pairs(attempts, tasks)
     provider_summary = []
     blockers = []
@@ -4014,6 +4051,7 @@ def _summary(
         },
         "attempts": [_clean_attempt(item) for item in attempts],
         "pairs": pairs,
+        "providerControls": provider_controls,
         "providerSummary": provider_summary,
         "promotion": {
             "ok": False,

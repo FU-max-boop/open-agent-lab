@@ -24,6 +24,7 @@ from benchmarks.terminal_bench.experiment_contract import (
     is_strict_int,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    provider_control_identity,
     provider_control_window,
     same_json,
 )
@@ -105,6 +106,30 @@ class ExperimentContractTest(unittest.TestCase):
         }
         self.assertEqual(provider_control_window(deepseek, "deepseek")[0], deepseek)
         self.assertEqual(provider_control_window(zai, "zai")[0], zai)
+        credential = "sha256:" + "c" * 64
+        deepseek_identity = provider_control_identity(
+            deepseek, "deepseek", "deepseek-v4-pro", credential
+        )
+        self.assertEqual(
+            set(deepseek_identity),
+            {
+                "provider",
+                "model",
+                "providerCredentialSha256",
+                "evidenceSha256",
+                "controlClass",
+                "scope",
+                "sourceUrls",
+                "limitUsd",
+            },
+        )
+        dynamic_zai = copy.deepcopy(zai)
+        dynamic_zai["assertedBy"] = "mirror operator"
+        dynamic_zai["quotaSnapshot"]["fiveHour"]["remainingPercent"] = 70
+        self.assertEqual(
+            provider_control_identity(zai, "zai", "glm-5.3", credential),
+            provider_control_identity(dynamic_zai, "zai", "glm-5.3", credential),
+        )
         with self.assertRaises(TypeError):
             provider_control_window([], "deepseek")
         with self.assertRaises(ValueError):

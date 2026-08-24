@@ -275,6 +275,33 @@ def provider_control_window(
     return control, observed, expires
 
 
+def provider_control_identity(
+    value: object, provider: str, model: object, credential_sha256: object
+) -> dict[str, object]:
+    """Extract the stable policy identity, excluding root-local attestations."""
+    control = provider_control_window(value, provider)[0]
+    if not isinstance(model, str) or not model or not is_digest(credential_sha256):
+        raise ValueError("providerControl identity is invalid")
+    identity = {
+        key: control[key]
+        for key in ("controlClass", "scope", "evidenceSha256", "sourceUrls")
+    }
+    identity.update(
+        {
+            "provider": provider,
+            "model": model,
+            "providerCredentialSha256": credential_sha256,
+        }
+    )
+    for key in (
+        ("limitUsd",)
+        if provider == "deepseek"
+        else ("baseUrl", "protocol", "plan", "noBalanceDeduction")
+    ):
+        identity[key] = control[key]
+    return json.loads(canonical_json(identity))
+
+
 def artifact_manifest() -> list[dict[str, str | None]]:
     return [
         dict(zip(_ARTIFACT_FIELDS, entry, strict=True)) for entry in _ARTIFACT_ENTRIES
