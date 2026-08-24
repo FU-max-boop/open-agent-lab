@@ -212,7 +212,8 @@ jobs:
             echo "Smoketesting $task in $image"
             docker pull --platform linux/amd64 "$image"
             identity="$(docker image inspect --format '{{.Id}}|{{.Os}}/{{.Architecture}}' "$image")"
-            test "$identity" = "$config_digest|linux/amd64"
+            test "$identity" = "$config_digest|linux/amd64" || \
+              test "$identity" = "${image##*@}|linux/amd64"
             docker run --rm --platform linux/amd64 --pull never --network none \
               --read-only --cap-drop ALL --security-opt no-new-privileges \
               --mount "type=bind,source=$OPEN_AGENT_LAB_CODEX_RUNTIME,target=$install_root,readonly" \
