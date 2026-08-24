@@ -99,6 +99,12 @@ function safeString(value: unknown): string | null {
     : null;
 }
 
+function codexTurnState(value: unknown): string | null {
+  return typeof value === "string" && /^[\x20-\x7e]{1,512}$/u.test(value)
+    ? value
+    : null;
+}
+
 function containsSecret(values: Iterable<string | null>, secret: string): boolean {
   for (const value of values) {
     if (value?.includes(secret) === true) return true;
@@ -501,13 +507,17 @@ export async function startNativeResponsesRelay(
           const clientRequestId = safeString(rawClientRequestId);
           const turnStateValues = request.headersDistinct[TURN_STATE_HEADER];
           const turnState =
-            turnStateValues?.length === 1 ? safeString(turnStateValues[0]) : null;
+            turnStateValues?.length === 1 ? codexTurnState(turnStateValues[0]) : null;
           const clientRequestIdEcho =
             typeof rawClientRequestId === "string" &&
             rawClientRequestId.includes(options.upstreamBearer);
           const turnStateEcho =
             turnStateValues?.some((value) => value.includes(options.upstreamBearer)) === true;
-          if (turnStateValues !== undefined && turnState === null && !turnStateEcho) {
+          if (
+            turnStateValues !== undefined &&
+            turnState === null &&
+            !(clientRequestIdEcho || turnStateEcho)
+          ) {
             throw new RelayHttpError(400, "invalid_turn_state");
           }
           accepted += 1;
@@ -597,7 +607,8 @@ export async function startNativeResponsesRelay(
             throw new RelayHttpError(502, errorCategory);
           }
           const upstreamTurnState = forwarded[TURN_STATE_HEADER];
-          if (upstreamTurnState !== undefined && safeString(upstreamTurnState) === null) {
+          if (upstreamTurnState !== undefined && codexTurnState(upstreamTurnState) === null) {
+            countRejection("invalid_turn_state");
             await upstreamResponse.body?.cancel().catch(() => undefined);
             throw new RelayHttpError(502, "upstream_failure");
           }

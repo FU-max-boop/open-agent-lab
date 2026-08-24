@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type RequestListener,
 } from "node:http";
-import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -83,46 +83,36 @@ async function relayRequest(
   });
 }
 
-async function rawRelayRequest(
+async function turnStateRequest(
   relay: NativeResponsesRelay,
-  extraHeaders: string[],
-): Promise<{ body: string; status: number }> {
-  const endpoint = new URL(relay.baseUrl);
+  turnStates: string[],
+  clientRequestId?: string,
+): Promise<Response> {
   const payload = requestBody();
-  const path = `${endpoint.pathname.replace(/\/$/u, "")}/responses`;
-  const request = [
-    `POST ${path} HTTP/1.1`,
-    `Host: ${endpoint.host}`,
-    `Authorization: Bearer ${CLIENT_BEARER}`,
-    "Content-Type: application/json",
-    `Content-Length: ${Buffer.byteLength(payload)}`,
-    "Connection: close",
-    ...extraHeaders,
-    "",
-    payload,
-  ].join("\r\n");
-
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const socket = createConnection({
-      host: endpoint.hostname,
-      port: Number(endpoint.port),
-    });
-    socket.on("connect", () => socket.write(request));
-    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
-    socket.on("error", reject);
-    socket.on("end", () => {
-      const response = Buffer.concat(chunks).toString("utf8");
-      const status = /^HTTP\/1\.1 (\d{3})/u.exec(response)?.[1];
-      if (status === undefined) {
-        reject(new Error("Relay returned a malformed HTTP response."));
-        return;
-      }
-      resolve({
-        body: response.slice(response.indexOf("\r\n\r\n") + 4),
-        status: Number(status),
-      });
-    });
+    const request = httpRequest(
+      `${relay.baseUrl}/responses`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${CLIENT_BEARER}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+          [TURN_STATE_HEADER]: turnStates,
+          ...(clientRequestId === undefined
+            ? {}
+            : { "x-client-request-id": clientRequestId }),
+        },
+      },
+      (response) => {
+        void body(response).then((value) => {
+          assert.ok(response.statusCode !== undefined);
+          resolve(new Response(value, { status: response.statusCode }));
+        }, reject);
+      },
+    );
+    request.on("error", reject);
+    request.end(payload);
   });
 }
 
@@ -246,7 +236,6 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
   assert.equal(observedHeaders["accept-encoding"], "identity");
   assert.equal(observedHeaders["content-type"], "application/json");
   assert.equal(observedHeaders["x-client-request-id"], "codex-turn-1");
-  assert.equal(observedHeaders[TURN_STATE_HEADER], undefined);
   for (const name of ["cookie", "proxy-authorization", "x-api-key", "x-forwarded-host"]) {
     assert.equal(observedHeaders[name], undefined);
   }
@@ -380,105 +369,91 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
   );
 });
 
-test("relay replays Codex turn state only when the client returns it", async (t) => {
+test("relay forwards, queues, and omits absent per-request Codex turn state", async (t) => {
   const turnState = "s".repeat(512);
+  const contenderStates = ["contender-a", "contender-b"];
   const observedTurnStates: Array<string | string[] | undefined> = [];
-  const observedUnlistedHeaders: Array<string | string[] | undefined> = [];
-  let requestCount = 0;
-  const upstream = await listen((request, response) => {
-    const ordinal = requestCount + 1;
-    requestCount = ordinal;
-    observedTurnStates.push(request.headers[TURN_STATE_HEADER]);
-    observedUnlistedHeaders.push(request.headers["x-unlisted-client-header"]);
-    const responseId = `resp-turn-${ordinal}`;
-    response.writeHead(200, {
-      "content-type": "text/event-stream",
-      "openai-model": MODEL,
-      "x-request-id": `provider-turn-${ordinal}`,
-      ...(ordinal === 1 ? { [TURN_STATE_HEADER]: turnState } : {}),
-    });
-    response.end(
-      [
-        `event: response.created\ndata: {"type":"response.created","response":{"id":"${responseId}","model":"${MODEL}"}}\n\n`,
-        `event: response.completed\ndata: {"type":"response.completed","response":{"id":"${responseId}","model":"${MODEL}","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`,
-      ].join(""),
-    );
+  let releaseActive!: () => void;
+  const activeMayFinish = new Promise<void>((resolve) => {
+    releaseActive = resolve;
   });
-  const { relay, sidecarPath } = await fixture(t, upstream);
-
-  const first = await relayRequest(relay);
-  assert.equal(first.status, 200);
-  assert.equal(first.headers.get(TURN_STATE_HEADER), turnState);
-  await first.arrayBuffer();
-
-  const second = await relayRequest(relay, {
-    headers: {
-      [TURN_STATE_HEADER]: turnState,
-      "x-unlisted-client-header": "must-not-cross",
-    },
-  });
-  assert.equal(second.status, 200);
-  await second.arrayBuffer();
-
-  const third = await relayRequest(relay);
-  assert.equal(third.status, 200);
-  await third.arrayBuffer();
-
-  assert.deepEqual(observedTurnStates, [undefined, turnState, undefined]);
-  assert.deepEqual(observedUnlistedHeaders, [undefined, undefined, undefined]);
-  await relay.close();
-  assert.ok(!(await readFile(sidecarPath, "utf8")).includes(turnState));
-  assert.ok(!(await readFile(relay.sealPath, "utf8")).includes(turnState));
-});
-
-test("queued requests keep their own Codex turn state", async (t) => {
-  const firstTurnState = "first-turn-state";
-  const secondTurnState = "second-turn-state";
-  const observedTurnStates: Array<string | string[] | undefined> = [];
-  let releaseFirst!: () => void;
-  const firstMayFinish = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
-  let firstStarted!: () => void;
-  const firstDidStart = new Promise<void>((resolve) => {
-    firstStarted = resolve;
+  let activeStarted!: () => void;
+  const activeDidStart = new Promise<void>((resolve) => {
+    activeStarted = resolve;
   });
   const upstream = await listen((request, response) => {
     const ordinal = observedTurnStates.length + 1;
     observedTurnStates.push(request.headers[TURN_STATE_HEADER]);
     void (async () => {
-      if (ordinal === 1) {
-        firstStarted();
-        await firstMayFinish;
+      if (ordinal === 2) {
+        activeStarted();
+        await activeMayFinish;
       }
       response.writeHead(200, {
         "content-type": "text/event-stream",
         "openai-model": MODEL,
-        "x-request-id": `provider-queued-turn-${ordinal}`,
+        ...(ordinal === 1 ? { [TURN_STATE_HEADER]: turnState } : {}),
+        "x-request-id": `provider-turn-${ordinal}`,
       });
       response.end(
-        `data: {"type":"response.completed","response":{"id":"resp-queued-${ordinal}","model":"${MODEL}"}}\n\n`,
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: { id: `resp-turn-${ordinal}`, model: MODEL },
+        })}\n\n`,
       );
     })().catch((error: unknown) =>
       response.destroy(error instanceof Error ? error : undefined),
     );
   });
-  const { relay } = await fixture(t, upstream);
+  const { relay, sidecarPath } = await fixture(t, upstream);
+  t.after(() => releaseActive());
 
-  const first = relayRequest(relay, {
-    headers: { [TURN_STATE_HEADER]: firstTurnState },
-  });
-  await firstDidStart;
-  const second = relayRequest(relay, {
-    headers: { [TURN_STATE_HEADER]: secondTurnState },
-  });
-  releaseFirst();
+  const bootstrap = await relayRequest(relay);
+  assert.equal(bootstrap.headers.get(TURN_STATE_HEADER), turnState);
+  await bootstrap.arrayBuffer();
 
-  const [firstResponse, secondResponse] = await Promise.all([first, second]);
-  assert.equal(firstResponse.status, 200);
-  assert.equal(secondResponse.status, 200);
-  await Promise.all([firstResponse.arrayBuffer(), secondResponse.arrayBuffer()]);
-  assert.deepEqual(observedTurnStates, [firstTurnState, secondTurnState]);
+  const active = relayRequest(relay, {
+    headers: { [TURN_STATE_HEADER]: turnState },
+  });
+  await activeDidStart;
+  const contenders = contenderStates.map((state) =>
+    relayRequest(relay, { headers: { [TURN_STATE_HEADER]: state } }),
+  );
+  const rejected = await Promise.race(
+    contenders.map((candidate, index) =>
+      candidate.then(async (response) =>
+        response.status === 429
+          ? { index, response }
+          : await new Promise<never>(() => undefined),
+      ),
+    ),
+  );
+  await assertRelayError(rejected.response, 429, "concurrency_exceeded");
+  const queuedIndex = 1 - rejected.index;
+  const queued = contenders[queuedIndex];
+  assert.ok(queued !== undefined);
+  releaseActive();
+
+  for (const response of await Promise.all([active, queued])) {
+    assert.equal(response.status, 200);
+    await response.arrayBuffer();
+  }
+  const reset = await relayRequest(relay);
+  assert.equal(reset.status, 200);
+  await reset.arrayBuffer();
+
+  assert.deepEqual(observedTurnStates, [
+    undefined,
+    turnState,
+    contenderStates[queuedIndex],
+    undefined,
+  ]);
+  await relay.close();
+  const evidence = `${await readFile(sidecarPath, "utf8")}\n${await readFile(
+    relay.sealPath,
+    "utf8",
+  )}`;
+  for (const state of [turnState, ...contenderStates]) assert.ok(!evidence.includes(state));
 });
 
 test("relay rejects malformed client turn state instead of treating it as absent", async (t) => {
@@ -488,41 +463,31 @@ test("relay rejects malformed client turn state instead of treating it as absent
   const upstream = await listen((request, response) => {
     upstreamRequests += 1;
     observedTurnState = request.headers[TURN_STATE_HEADER];
-    response.writeHead(200, {
-      "content-type": "text/event-stream",
-      "openai-model": MODEL,
-      "x-request-id": "provider-turn-boundary",
-    });
-    response.end(
-      `data: {"type":"response.completed","response":{"id":"resp-boundary","model":"${MODEL}"}}\n\n`,
-    );
+    response.end();
   });
   const { relay, sidecarPath } = await fixture(t, upstream, { maxRequests: 1 });
 
   const malformed = [
-    { name: "empty", headers: [`${TURN_STATE_HEADER}:`] },
-    {
-      name: "duplicate",
-      headers: [`${TURN_STATE_HEADER}: first`, `${TURN_STATE_HEADER}: second`],
-    },
-    { name: "htab", headers: [`${TURN_STATE_HEADER}: bad\tstate`] },
-    { name: "oversized", headers: [`${TURN_STATE_HEADER}: ${"x".repeat(513)}`] },
+    { name: "empty", values: [""] },
+    { name: "duplicate", values: ["first", "second"] },
+    { name: "htab", values: ["bad\tstate"] },
+    { name: "non-ascii", values: ["é"] },
+    { name: "oversized", values: ["x".repeat(513)] },
   ];
-  for (const { name, headers } of malformed) {
-    const response = await rawRelayRequest(relay, headers);
+  for (const { name, values } of malformed) {
+    const response = await turnStateRequest(relay, values);
     assert.equal(response.status, 400, name);
-    assert.match(response.body, /invalid_turn_state/u, name);
+    assert.deepEqual(await response.json(), { error: { code: "invalid_turn_state" } }, name);
   }
   assert.equal(upstreamRequests, 0);
 
-  const boundary = await rawRelayRequest(relay, [
-    `${TURN_STATE_HEADER}: ${validTurnState}`,
-  ]);
+  const boundary = await turnStateRequest(relay, [validTurnState]);
   assert.equal(boundary.status, 200);
+  await boundary.arrayBuffer();
   assert.equal(upstreamRequests, 1);
   assert.equal(observedTurnState, validTurnState);
   const summary = await relay.close();
-  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 4 });
+  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 5 });
   assert.deepEqual(
     verifyRelaySeal(
       await readFile(sidecarPath, "utf8"),
@@ -533,7 +498,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
 });
 
 test("relay rejects malformed upstream turn state before writing client headers", async (t) => {
-  const invalidTurnStates = ["", "bad\tstate", "x".repeat(513)];
+  const invalidTurnStates = ["", "bad\tstate", "é", "x".repeat(513)];
   let responseIndex = 0;
   const upstream = await listen((_request, response) => response.end());
   const { relay, sidecarPath } = await fixture(t, upstream, {
@@ -542,18 +507,10 @@ test("relay rejects malformed upstream turn state before writing client headers"
       const turnState = invalidTurnStates[responseIndex];
       responseIndex += 1;
       assert.ok(turnState !== undefined);
-      return new Response(
-        `data: {"type":"response.completed","response":{"id":"resp-invalid-turn","model":"${MODEL}"}}\n\n`,
-        {
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream",
-            "openai-model": MODEL,
-            [TURN_STATE_HEADER]: turnState,
-            "x-request-id": `provider-invalid-turn-${responseIndex}`,
-          },
-        },
-      );
+      return new Response(null, {
+        status: 200,
+        headers: { [TURN_STATE_HEADER]: turnState },
+      });
     },
   });
 
@@ -564,7 +521,10 @@ test("relay rejects malformed upstream turn state before writing client headers"
   }
   assert.equal(responseIndex, invalidTurnStates.length);
 
-  await relay.close();
+  const summary = await relay.close();
+  assert.deepEqual(summary.rejectedRequests, {
+    invalid_turn_state: invalidTurnStates.length,
+  });
   const entries = records(await readFile(sidecarPath, "utf8"));
   for (let offset = 0; offset < entries.length; offset += 3) {
     const headers = entries[offset + 1];
@@ -617,7 +577,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
       error: "upstream_failure",
       headers: {
         "openai-model": MODEL,
-        [TURN_STATE_HEADER]: `prefix-${PROVIDER_BEARER}-suffix`,
+        [TURN_STATE_HEADER]: `${"x".repeat(513)}${PROVIDER_BEARER}`,
         "x-request-id": "provider-request-safe",
       },
     },
@@ -748,13 +708,22 @@ test("relay redacts a provider credential from client metadata", async (t) => {
   });
   const { relay, sidecarPath } = await fixture(t, upstream);
 
-  for (const header of ["x-client-request-id", TURN_STATE_HEADER]) {
+  for (const headers of [
+    { "x-client-request-id": `turn-${PROVIDER_BEARER}-suffix` },
+    { [TURN_STATE_HEADER]: `é-${PROVIDER_BEARER}` },
+  ]) {
     const response = await relayRequest(relay, {
-      headers: { [header]: `turn-${PROVIDER_BEARER}-suffix` },
+      headers,
     });
     assert.equal(response.status, 502);
     assert.deepEqual(await response.json(), { error: { code: "upstream_failure" } });
   }
+  const precedence = await turnStateRequest(
+    relay,
+    ["first", "second"],
+    `turn-${PROVIDER_BEARER}-suffix`,
+  );
+  await assertRelayError(precedence, 502, "upstream_failure");
   assert.equal(upstreamRequests, 0);
 
   const summary = await relay.close();
@@ -762,10 +731,10 @@ test("relay redacts a provider credential from client metadata", async (t) => {
   const seal = await readFile(relay.sealPath, "utf8");
   assert.ok(!journal.includes(PROVIDER_BEARER));
   assert.ok(!seal.includes(PROVIDER_BEARER));
-  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 2 });
+  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 3 });
   assert.deepEqual(verifyRelaySeal(journal, seal), summary);
   const entries = records(journal);
-  assert.equal(entries.length, 6);
+  assert.equal(entries.length, 9);
   for (let offset = 0; offset < entries.length; offset += 3) {
     const [request, headers, closed] = entries.slice(offset, offset + 3);
     assert.equal(request?.clientRequestId, null);

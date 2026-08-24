@@ -202,9 +202,7 @@ export async function startResponsesFixture(
   }
   if (
     options.turnState !== undefined &&
-    (options.turnState.length === 0 ||
-      options.turnState.length > 512 ||
-      /[\u0000-\u001f]/u.test(options.turnState))
+    !/^[\x20-\x7e]{1,512}$/u.test(options.turnState)
   ) {
     throw new Error("Fixture turn state is invalid.");
   }

@@ -4,8 +4,8 @@ import unittest
 
 from benchmarks.terminal_bench import paired_results
 from benchmarks.terminal_bench.relay_evidence import (
+    _REJECTION_CODES,
     _publication_reasons,
-    _validate_marker,
 )
 
 _BUILD_ID = f"sha256:{'0' * 64}"
@@ -22,7 +22,9 @@ class PublicationReasonsTest(unittest.TestCase):
         cases = (
             ({"model_mismatch": 1}, "requested_model_mismatch"),
             ({"upstream_secret_echo": 1}, "upstream_secret_echo"),
+            ({"invalid_turn_state": 1}, "invalid_turn_state"),
         )
+        self.assertIn("invalid_turn_state", _REJECTION_CODES)
         for rejected_requests, unwaivable_reason in cases:
             with self.subTest(rejected_requests=rejected_requests):
                 reasons = self._reasons(rejected_requests)
@@ -57,35 +59,6 @@ class PublicationReasonsTest(unittest.TestCase):
         for rejected_requests, expected in cases:
             with self.subTest(rejected_requests=rejected_requests):
                 self.assertEqual(self._reasons(rejected_requests), expected)
-
-    def test_turn_state_rejection_is_a_valid_seal_reason(self) -> None:
-        marker = {
-            "schemaVersion": 1,
-            "state": "sealed",
-            "relayVersion": "native-responses-relay-v1",
-            "runId": "run",
-            "relayInstanceId": "instance",
-            "providerId": "deepseek",
-            "buildId": _BUILD_ID,
-            "expectedModel": _MODEL,
-            "sealedAt": "2026-08-24T00:00:00.000Z",
-            "rejectedRequests": {"invalid_turn_state": 1},
-            "eventCount": 0,
-            "chainHead": None,
-        }
-        marker_hash = f"sha256:{'1' * 64}"
-        self.assertEqual(
-            _validate_marker(
-                marker,
-                marker_hash,
-                marker_hash,
-                ("run", "instance", "deepseek", _BUILD_ID),
-                _MODEL,
-                0,
-                None,
-            ),
-            {"invalid_turn_state": 1},
-        )
 
 
 if __name__ == "__main__":

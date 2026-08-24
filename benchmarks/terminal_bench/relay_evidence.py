@@ -856,6 +856,8 @@ def _publication_reasons(
         reasons.add("requested_model_mismatch")
     if rejected_requests.get("upstream_secret_echo", 0) > 0:
         reasons.add("upstream_secret_echo")
+    if rejected_requests.get("invalid_turn_state", 0) > 0:
+        reasons.add("invalid_turn_state")
     # Clients may close after terminal SSE instead of waiting for EOF.
     if any(
         count

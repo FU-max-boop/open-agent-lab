@@ -567,7 +567,7 @@ test(
 );
 
 test(
-  "installed Codex completes the same tool round through the isolated relay",
+  "installed Codex replays fixture turn state on the second request of one tool turn through relay",
   { skip: process.env.OPEN_AGENT_LAB_CODEX_BIN === undefined },
   async () => {
     const result = await runCodexProbe(process.env.OPEN_AGENT_LAB_CODEX_BIN, true);
