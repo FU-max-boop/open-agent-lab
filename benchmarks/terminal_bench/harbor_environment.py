@@ -1750,6 +1750,10 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             )
         immutable = authority["immutableImage"]
         platform = authority["platform"]
+        expected_image_ids = {
+            authority["imageConfigDigest"],
+            immutable.rsplit("@", 1)[-1],
+        }
         cached = set(
             (
                 await self._capture(
@@ -1767,7 +1771,7 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             .decode(errors="replace")
             .split()
         )
-        if authority["imageConfigDigest"] not in cached:
+        if cached.isdisjoint(expected_image_ids):
             await self._capture(
                 ["docker", "pull", "--quiet", "--platform", platform, immutable],
                 timeout=900,
@@ -1789,7 +1793,9 @@ class PinnedRelayDockerEnvironment(DockerEnvironment):
             .strip()
         )
         os_name, architecture = platform.split("/", 1)
-        if identity != (f"{authority['imageConfigDigest']}|{os_name}|{architecture}"):
+        if identity not in {
+            f"{image_id}|{os_name}|{architecture}" for image_id in expected_image_ids
+        }:
             raise RuntimeError("The immutable task image has the wrong identity.")
         main["image"] = immutable
         main["platform"] = platform

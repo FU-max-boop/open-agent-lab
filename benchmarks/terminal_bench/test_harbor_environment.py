@@ -320,47 +320,57 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 authority["immutableImage"],
             ]
             identity = f"{authority['imageConfigDigest']}|linux|amd64\n".encode()
-            wrong_config = "sha256:" + "5" * 64
-            pinned._capture = AsyncMock(
-                side_effect=[
-                    b"",
-                    b"pulled\n",
-                    identity,
-                ]
-            )
-            graph = {
-                "services": {
-                    "main": {"image": authority["declaredImage"]},
-                    "open-agent-lab-relay": {},
-                }
+            manifest_digest = authority["immutableImage"].rsplit("@", 1)[-1]
+            manifest_identity = f"{manifest_digest}|linux|amd64\n".encode()
+            wrong_id = "sha256:" + "5" * 64
+            expected_main = {
+                "image": authority["immutableImage"],
+                "platform": "linux/amd64",
+                "pull_policy": "never",
             }
-            asyncio.run(pinned._pin_task_runtime(graph))
-            self.assertEqual(
-                graph["services"]["main"],
-                {
-                    "image": authority["immutableImage"],
-                    "platform": "linux/amd64",
-                    "pull_policy": "never",
-                },
-            )
-            self.assertEqual(
-                pinned._capture.await_args_list,
-                [call(cache_probe), call(pull, timeout=900), call(inspect)],
-            )
+            for store, observed_identity in (
+                ("classic", identity),
+                ("containerd", manifest_identity),
+            ):
+                with self.subTest(cold_cache=store):
+                    pinned._capture = AsyncMock(
+                        side_effect=[b"", b"pulled\n", observed_identity]
+                    )
+                    graph = {
+                        "services": {
+                            "main": {"image": authority["declaredImage"]},
+                            "open-agent-lab-relay": {},
+                        }
+                    }
+                    asyncio.run(pinned._pin_task_runtime(graph))
+                    self.assertEqual(
+                        graph["services"]["main"],
+                        expected_main,
+                    )
+                    self.assertEqual(
+                        pinned._capture.await_args_list,
+                        [call(cache_probe), call(pull, timeout=900), call(inspect)],
+                    )
+
+            for store, image_id, observed_identity in (
+                ("classic", authority["imageConfigDigest"], identity),
+                ("containerd", manifest_digest, manifest_identity),
+            ):
+                with self.subTest(cache_hit=store):
+                    graph["services"]["main"] = {"image": authority["declaredImage"]}
+                    pinned._capture = AsyncMock(
+                        side_effect=[f"{image_id}\n".encode(), observed_identity]
+                    )
+                    asyncio.run(pinned._pin_task_runtime(graph))
+                    self.assertEqual(graph["services"]["main"], expected_main)
+                    self.assertEqual(
+                        pinned._capture.await_args_list,
+                        [call(cache_probe), call(inspect)],
+                    )
 
             graph["services"]["main"] = {"image": authority["declaredImage"]}
             pinned._capture = AsyncMock(
-                side_effect=[f"{authority['imageConfigDigest']}\n".encode(), identity]
-            )
-            asyncio.run(pinned._pin_task_runtime(graph))
-            self.assertEqual(
-                pinned._capture.await_args_list,
-                [call(cache_probe), call(inspect)],
-            )
-
-            graph["services"]["main"] = {"image": authority["declaredImage"]}
-            pinned._capture = AsyncMock(
-                side_effect=[f"{wrong_config}\n".encode(), b"pulled\n", identity]
+                side_effect=[f"{wrong_id}\n".encode(), b"pulled\n", identity]
             )
             asyncio.run(pinned._pin_task_runtime(graph))
             self.assertEqual(
@@ -375,11 +385,24 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             for name, commands, message in (
                 ("list", [RuntimeError("daemon unavailable")], "daemon unavailable"),
                 (
+                    "pull",
+                    [b"", RuntimeError("pull unavailable")],
+                    "pull unavailable",
+                ),
+                (
+                    "inspect",
+                    [
+                        f"{authority['imageConfigDigest']}\n".encode(),
+                        RuntimeError("inspect unavailable"),
+                    ],
+                    "inspect unavailable",
+                ),
+                (
                     "identity",
                     [
-                        b"",
+                        f"{wrong_id}\n".encode(),
                         b"pulled\n",
-                        f"{wrong_config}|linux|arm64\n".encode(),
+                        f"{wrong_id}|linux|amd64\n".encode(),
                     ],
                     "wrong identity",
                 ),
@@ -393,6 +416,28 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                         graph["services"]["main"],
                         {"image": authority["declaredImage"]},
                     )
+
+            for store, image_id in (
+                ("classic", authority["imageConfigDigest"]),
+                ("containerd", manifest_digest),
+            ):
+                for observed_platform in ("windows|amd64", "linux|arm64"):
+                    with self.subTest(platform_mismatch=(store, observed_platform)):
+                        graph["services"]["main"] = {
+                            "image": authority["declaredImage"]
+                        }
+                        pinned._capture = AsyncMock(
+                            side_effect=[
+                                f"{image_id}\n".encode(),
+                                f"{image_id}|{observed_platform}\n".encode(),
+                            ]
+                        )
+                        with self.assertRaisesRegex(RuntimeError, "wrong identity"):
+                            asyncio.run(pinned._pin_task_runtime(graph))
+                        self.assertEqual(
+                            graph["services"]["main"],
+                            {"image": authority["declaredImage"]},
+                        )
 
             graph["services"]["main"]["image"] = "alexgshaw/example:latest"
             pinned._capture.reset_mock()
