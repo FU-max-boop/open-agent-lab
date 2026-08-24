@@ -1371,6 +1371,35 @@ class RunFixture:
         )
 
 
+def _rewrite_provider_authorization(
+    fixture: RunFixture, provider: str, updates: dict[str, object]
+) -> None:
+    authorization = fixture.root / "authorizations" / f"{provider}.json"
+    receipt = json.loads(authorization.read_text())
+    for path, replacement in updates.items():
+        target = receipt
+        keys = path.split(".")
+        for key in keys[:-1]:
+            target = target[key]
+        target[keys[-1]] = replacement
+    _write_private(authorization, receipt)
+    policy_sha256 = paired._digest_bytes(authorization.read_bytes())
+    for claim_path in (fixture.root / "authorizations").glob(
+        f"{provider}.pilot.*.claim.json"
+    ):
+        claim = json.loads(claim_path.read_text())
+        claim["policySha256"] = policy_sha256
+        _write_private(claim_path, claim)
+    credential = updates.get("providerCredentialSha256")
+    if credential is not None:
+        for (trial_provider, _task, _variant), trial in fixture.trials.items():
+            if trial_provider == provider:
+                cleanup_path = trial / "environment-cleanup.json"
+                cleanup = json.loads(cleanup_path.read_text())
+                cleanup["providerCredentialSha256"] = credential
+                _write(cleanup_path, cleanup)
+
+
 class StrictInputTest(unittest.TestCase):
     def test_invalid_cli_summary_uses_the_current_schema(self) -> None:
         with (
@@ -1386,7 +1415,7 @@ class StrictInputTest(unittest.TestCase):
         self.assertEqual(
             invalid,
             {
-                "schemaVersion": 4,
+                "schemaVersion": 5,
                 "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
@@ -2074,7 +2103,7 @@ class PairedResultsTest(unittest.TestCase):
         second = paired.summarize([screen.root])
         self.assertEqual(first, second)
         self.assertTrue(first["integrityOk"])
-        self.assertEqual(first["schemaVersion"], 4)
+        self.assertEqual(first["schemaVersion"], 5)
         self.assertFalse(first["analysisComplete"])
         self.assertEqual(first["analysisStatus"], "valid_incomplete")
         self.assertEqual(
@@ -2091,6 +2120,40 @@ class PairedResultsTest(unittest.TestCase):
             "mirrored_within_provider_replication_missing",
             first["promotion"]["blockingReasons"],
         )
+        controls = {item["provider"]: item for item in first["providerControls"]}
+        self.assertEqual(
+            set(controls["deepseek"]),
+            {
+                "provider",
+                "model",
+                "controlClass",
+                "scope",
+                "sourceUrls",
+                "limitUsd",
+                "verification",
+            },
+        )
+        self.assertEqual(
+            set(controls["zai"]),
+            {
+                "provider",
+                "model",
+                "controlClass",
+                "scope",
+                "sourceUrls",
+                "baseUrl",
+                "protocol",
+                "plan",
+                "noBalanceDeduction",
+                "verification",
+            },
+        )
+        for provider, control in controls.items():
+            self.assertEqual(control["model"], paired._PROVIDERS[provider]["model"])
+            self.assertEqual(control["verification"], "operator_attested")
+        self.assertEqual(controls["deepseek"]["limitUsd"], 2)
+        self.assertEqual(controls["zai"]["plan"], "zai_coding_plan")
+        self.assertTrue(controls["zai"]["noBalanceDeduction"])
         for provider in first["providerSummary"]:
             bootstrap = provider["pairedRewardBootstrap"]
             self.assertEqual(bootstrap["taskCount"], 5)
@@ -2309,6 +2372,7 @@ class PairedResultsTest(unittest.TestCase):
                 with (
                     patch.object(paired, "_validate_global_uniqueness"),
                     patch.object(paired, "_build_pairs", return_value=pairs),
+                    patch.object(paired, "_provider_controls", return_value=[]),
                 ):
                     summary = paired._summary(attempts, manifest, tasks)
 
@@ -3680,6 +3744,11 @@ class PairedResultsTest(unittest.TestCase):
                 "relayInstanceId": f"instance-{index}",
                 "chainHead": f"chain-{index}",
                 "relayRequestIds": [f"relay-request-{index}"],
+                "providerControlIdentity": {
+                    "provider": provider,
+                    "providerCredentialSha256": "sha256:" + "a" * 64,
+                    "evidenceSha256": "sha256:" + "b" * 64,
+                },
                 "providerResponseIdentities": [
                     ("shared-provider-request", "shared-response")
                 ],
@@ -3689,6 +3758,7 @@ class PairedResultsTest(unittest.TestCase):
 
         paired._validate_global_uniqueness(attempts)
         cleaned = paired._clean_attempt(attempts[0])
+        self.assertNotIn("providerControlIdentity", cleaned)
         self.assertNotIn("providerResponseIdentities", cleaned)
 
     def test_task_bytes_must_match_across_providers(self) -> None:
@@ -3757,6 +3827,41 @@ class PairedResultsTest(unittest.TestCase):
         mirror = RunFixture(self.root, "mirror-v1", source="f" * 40)
         with self.assertRaisesRegex(paired.IntegrityError, "different source"):
             paired.summarize([screen.root, mirror.root])
+
+    def test_provider_control_stable_identity_matches_across_replications(self) -> None:
+        screen = RunFixture(self.root, "screen-v1")
+        mirror = RunFixture(self.root, "mirror-v1")
+        _rewrite_provider_authorization(
+            mirror,
+            "zai",
+            {
+                "providerControl.assertedBy": "mirror operator",
+                "providerControl.observedAt": "2026-08-22T00:00:00.050Z",
+                "providerControl.expiresAt": "2026-08-22T03:59:59Z",
+                "providerControl.quotaSnapshot.fiveHour.remainingPercent": 70,
+                "providerControl.quotaSnapshot.fiveHour.resetsAt": "2026-08-22T04:59:59Z",
+                "providerControl.quotaSnapshot.weekly.resetsAt": "2026-08-28T23:59:59Z",
+                "authorizationExpiresAt": "2026-08-22T03:59:59Z",
+            },
+        )
+        self.assertTrue(paired.summarize([screen.root, mirror.root])["integrityOk"])
+
+        cases = (
+            ("evidence", "zai", "providerControl.evidenceSha256", "sha256:" + "d" * 64),
+            ("limit", "deepseek", "providerControl.limitUsd", 1),
+            ("credential", "zai", "providerCredentialSha256", "sha256:" + "e" * 64),
+        )
+        for label, provider, path, replacement in cases:
+            case_root = self.root / label
+            case_root.mkdir()
+            left = RunFixture(case_root, "screen-v1")
+            right = RunFixture(case_root, "mirror-v1")
+            _rewrite_provider_authorization(right, provider, {path: replacement})
+            with (
+                self.subTest(field=label),
+                self.assertRaisesRegex(paired.IntegrityError, "stable identity"),
+            ):
+                paired.summarize([left.root, right.root])
 
     def test_all_replications_must_precede_the_first_live_probe(self) -> None:
         screen = RunFixture(
