@@ -161,6 +161,10 @@ An agent timeout, crash, invalid final artifact, verifier failure, or unhandled
 model error scores according to the official evaluator—normally zero—and remains
 in the denominator. Missing telemetry is marked missing, never replaced with
 zero or silently omitted.
+Unavailable observed Harbor cost is published as `null`/`unavailable`; a
+timestamped formula estimate may be separate, but never replaces it or claims
+provider billing evidence. Missing Harbor cost alone does not block complete
+analysis; every other required telemetry gap does.
 
 An attempt may be declared an infrastructure incident only under a predeclared,
 harness-independent rule such as host loss or confirmed benchmark service
@@ -218,8 +222,9 @@ open models, all providers, or the complete product.
 Alongside official task outcomes, report per task-attempt:
 
 - uncached input, cached input/write, reasoning, and output tokens where exposed;
-- actual API charge when available, otherwise a timestamped price estimate with
-  its formula;
+- the reported Harbor `TrialResult.agent_result.cost_usd` value when available;
+  otherwise `null`/`unavailable`, with any timestamped formula estimate
+  separately labeled;
 - agent-active time and end-to-end wall time as separate measures;
 - model requests, tool invocations, retries, and peak context size;
 - process crashes, checkpoint resumes, ambiguous effects, and recovery outcome;

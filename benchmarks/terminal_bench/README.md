@@ -130,6 +130,10 @@ model or arm drift, invalid token arithmetic, non-serial execution, and corrupt
 or non-redacted relay evidence. Scored exceptions remain in the official
 denominator; unavailable provider-token or trajectory telemetry is emitted as
 `null`, reduces explicit coverage, and blocks a complete directional analysis.
+Unavailable observed Harbor cost is published as `null`/`unavailable`, never
+zero. A timestamped formula estimate may be separate, but must never replace
+observed Harbor cost or claim provider billing evidence. Missing Harbor cost
+alone does not block `analysisComplete`; every other required telemetry gap does.
 Harbor's environment, setup, agent, and verifier phase timings are mandatory
 and must form one ordered lifecycle.
 `screen-v1` and `mirror-v1`

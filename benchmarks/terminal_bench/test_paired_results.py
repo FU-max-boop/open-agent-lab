@@ -1371,6 +1371,30 @@ class RunFixture:
         )
 
 
+def _paired_summary_with_costs(
+    root: Path,
+    costs: list[float | None],
+    replications: tuple[str, ...] = ("screen-v1", "mirror-v1"),
+) -> dict[str, object]:
+    root.mkdir()
+    fixtures = [RunFixture(root, replication) for replication in replications]
+    trials = [
+        trial for fixture in fixtures for _key, trial in sorted(fixture.trials.items())
+    ]
+    if len(costs) != len(trials):
+        raise AssertionError("cost fixture must cover every paired attempt")
+    jobs = set()
+    for trial, cost in zip(trials, costs, strict=True):
+        path = trial / "result.json"
+        result = json.loads(path.read_text())
+        result["agent_result"]["cost_usd"] = cost
+        _write_trial_result(path, result)
+        jobs.add(trial.parent)
+    for job in jobs:
+        _refresh_job_result(job)
+    return paired.summarize([fixture.root for fixture in fixtures])
+
+
 def _rewrite_provider_authorization(
     fixture: RunFixture, provider: str, updates: dict[str, object]
 ) -> None:
@@ -1415,7 +1439,7 @@ class StrictInputTest(unittest.TestCase):
         self.assertEqual(
             invalid,
             {
-                "schemaVersion": 5,
+                "schemaVersion": 6,
                 "experimentId": EXPERIMENT_ID,
                 "integrityOk": False,
                 "analysisComplete": False,
@@ -1431,6 +1455,16 @@ class StrictInputTest(unittest.TestCase):
     def test_manifest_policy_has_one_frozen_authority(self) -> None:
         root = paired._repo_root()
         manifest = json.loads((root / paired._MANIFEST).read_text())
+        self.assertEqual(manifest["schemaVersion"], 3)
+        self.assertEqual(
+            manifest["costTelemetry"],
+            {
+                "provenance": "harbor_trial_result.agent_result.cost_usd",
+                "missingValuePolicy": "preserve_null",
+                "providerBillingProof": False,
+                "requiredForAnalysisComplete": False,
+            },
+        )
         self.assertEqual(paired._digest(manifest), paired._POLICY_SHA256)
         self.assertEqual(
             manifest["fileSha256"]["benchmarks/terminal_bench/paired_results.py"],
@@ -2103,7 +2137,7 @@ class PairedResultsTest(unittest.TestCase):
         second = paired.summarize([screen.root])
         self.assertEqual(first, second)
         self.assertTrue(first["integrityOk"])
-        self.assertEqual(first["schemaVersion"], 5)
+        self.assertEqual(first["schemaVersion"], 6)
         self.assertFalse(first["analysisComplete"])
         self.assertEqual(first["analysisStatus"], "valid_incomplete")
         self.assertEqual(
@@ -2253,7 +2287,19 @@ class PairedResultsTest(unittest.TestCase):
         self.assertEqual(result["denominator"]["attempts"], 40)
         self.assertEqual(
             result["telemetryCoverage"],
-            {"completeAttempts": 40, "costUsdAttempts": 40, "totalAttempts": 40},
+            {"completeAttempts": 40, "totalAttempts": 40},
+        )
+        self.assertEqual(
+            result["costTelemetry"]["coverage"],
+            [
+                {
+                    "provider": provider,
+                    "availability": "complete",
+                    "reportedAttempts": 20,
+                    "totalAttempts": 20,
+                }
+                for provider in paired._PROVIDERS
+            ],
         )
         self.assertTrue(all(item["costUsd"] == 0.01 for item in result["attempts"]))
         self.assertEqual(result["promotion"]["status"], "not_promotable")
@@ -2324,12 +2370,14 @@ class PairedResultsTest(unittest.TestCase):
         smallest = float.fromhex("0x0.0000000000001p-1022")
         attempts = [
             {
+                "provider": provider,
                 "replication": replication,
                 "telemetryComplete": True,
                 "costUsd": 0.0,
                 "topLevelException": None,
                 "failureClass": None,
             }
+            for provider in paired._PROVIDERS
             for replication in ("screen-v1", "mirror-v1")
         ]
         manifest = {
@@ -2396,33 +2444,87 @@ class PairedResultsTest(unittest.TestCase):
                     {(float, public_mean)},
                 )
 
-    def test_missing_cost_is_public_and_blocks_complete_analysis(self) -> None:
-        screen = RunFixture(self.root, "screen-v1")
-        mirror = RunFixture(self.root, "mirror-v1")
-        trial = mirror.trials[("deepseek", mirror.tasks[0], "control-v1")]
-        result_path = trial / "result.json"
-        trial_result = json.loads(result_path.read_text())
-        trial_result["agent_result"]["cost_usd"] = None
-        _write_trial_result(result_path, trial_result)
-        _refresh_job_result(trial.parent)
+    def test_nullable_cost_is_raw_optional_telemetry(self) -> None:
+        cases = {
+            "unavailable": (
+                [None] * 40,
+                (("unavailable", 0), ("unavailable", 0)),
+                0,
+                0,
+            ),
+            "partial": (
+                [None, 0.0, 0.25, None, 0.0] * 8,
+                (("partial", 12), ("partial", 12)),
+                16,
+                8,
+            ),
+            "complete-zero": (
+                [0.0] * 40,
+                (("complete", 20), ("complete", 20)),
+                40,
+                0,
+            ),
+            "provider-skew": (
+                [None] * 10 + [None, 0.0] * 5 + [None] * 10 + [None, 0.25] * 5,
+                (("unavailable", 0), ("partial", 10)),
+                5,
+                5,
+            ),
+        }
+        for name, (costs, coverage, zeros, positives) in cases.items():
+            with self.subTest(name=name):
+                summary = _paired_summary_with_costs(self.root / name, costs)
+                self.assertTrue(summary["analysisComplete"])
+                self.assertEqual(summary["analysisStatus"], "valid")
+                self.assertTrue(summary["promotion"]["directionalCriteriaMet"])
+                self.assertEqual(
+                    summary["telemetryCoverage"],
+                    {"completeAttempts": 40, "totalAttempts": 40},
+                )
+                self.assertEqual(
+                    summary["costTelemetry"],
+                    {
+                        "provenance": "harbor_trial_result.agent_result.cost_usd",
+                        "missingValuePolicy": "preserve_null",
+                        "providerBillingProof": False,
+                        "coverage": [
+                            {
+                                "provider": provider,
+                                "availability": availability,
+                                "reportedAttempts": reported,
+                                "totalAttempts": 20,
+                            }
+                            for provider, (availability, reported) in zip(
+                                paired._PROVIDERS, coverage, strict=True
+                            )
+                        ],
+                    },
+                )
+                values = [item["costUsd"] for item in summary["attempts"]]
+                self.assertEqual(sum(value == 0.0 for value in values), zeros)
+                self.assertEqual(
+                    sum(value is not None and value > 0 for value in values), positives
+                )
+                self.assertTrue(
+                    all(
+                        item["telemetryComplete"]
+                        and "cost_usd" not in item["telemetryMissing"]
+                        for item in summary["attempts"]
+                    )
+                )
+                self.assertNotIn("totalCostUsd", summary)
 
-        summary = paired.summarize([screen.root, mirror.root])
-
-        attempt = next(
-            item
-            for item in summary["attempts"]
-            if item["trialId"] == trial_result["id"]
+        screen = _paired_summary_with_costs(
+            self.root / "screen-only", [None] * 20, ("screen-v1",)
         )
-        self.assertFalse(summary["analysisComplete"])
-        self.assertEqual(summary["analysisStatus"], "valid_incomplete")
+        self.assertFalse(screen["analysisComplete"])
+        self.assertTrue(all(item["telemetryComplete"] for item in screen["attempts"]))
         self.assertEqual(
-            summary["telemetryCoverage"],
-            {"completeAttempts": 39, "costUsdAttempts": 39, "totalAttempts": 40},
-        )
-        self.assertIsNone(attempt["costUsd"])
-        self.assertEqual(attempt["telemetryMissing"], ["cost_usd"])
-        self.assertIn(
-            "attempt_telemetry_missing", summary["promotion"]["blockingReasons"]
+            set(screen["promotion"]["blockingReasons"]),
+            {
+                "mirrored_within_provider_replication_missing",
+                "development_experiment_never_promotable",
+            },
         )
 
     def test_missing_duplicate_and_symlink_trials_fail_closed(self) -> None:
@@ -2857,7 +2959,7 @@ class PairedResultsTest(unittest.TestCase):
     def test_trial_result_requires_exact_harbor_provenance_and_shape(self) -> None:
         for mutation in (
             "missing-field",
-            "nested-default",
+            "missing-cost",
             "source",
             "task-id",
             "full-config",
@@ -2872,7 +2974,7 @@ class PairedResultsTest(unittest.TestCase):
                 result = json.loads(result_path.read_text())
                 if mutation == "missing-field":
                     result.pop("trial_uri")
-                elif mutation == "nested-default":
+                elif mutation == "missing-cost":
                     result["agent_result"].pop("cost_usd")
                 elif mutation == "source":
                     result["source"] = "terminal-bench/other"
@@ -2886,10 +2988,24 @@ class PairedResultsTest(unittest.TestCase):
                 with self.assertRaises(paired.IntegrityError):
                     paired.summarize([screen.root])
 
+    def test_present_cost_is_nonnegative_finite_and_non_boolean(self) -> None:
+        totals = {
+            "n_input_tokens": 1,
+            "n_cache_tokens": 0,
+            "n_output_tokens": 1,
+        }
+        for value in (-1.0, True, "0.01", math.nan, math.inf, -math.inf):
+            with self.subTest(value=value), self.assertRaises(paired.IntegrityError):
+                paired._job_agent_totals({**totals, "cost_usd": value})
+        self.assertEqual(
+            paired._job_agent_totals({**totals, "cost_usd": 0.0})["cost_usd"],
+            0.0,
+        )
+
     def test_job_aggregates_crosscheck_children_but_metrics_are_non_authoritative(
         self,
     ) -> None:
-        for mutation in ("tokens", "eval-reward"):
+        for mutation in ("tokens", "cost", "eval-reward"):
             with self.subTest(mutation=mutation):
                 case_root = self.root / mutation
                 case_root.mkdir()
@@ -2899,6 +3015,8 @@ class PairedResultsTest(unittest.TestCase):
                 result = json.loads(result_path.read_text())
                 if mutation == "tokens":
                     result["stats"]["n_input_tokens"] += 1
+                elif mutation == "cost":
+                    result["stats"]["cost_usd"] += 1
                 else:
                     entry = next(iter(result["stats"]["evals"].values()))
                     reward_key = next(iter(entry["reward_stats"]["reward"]))
@@ -3160,7 +3278,6 @@ class PairedResultsTest(unittest.TestCase):
             summary["telemetryCoverage"],
             {
                 "completeAttempts": 19,
-                "costUsdAttempts": 20,
                 "totalAttempts": 20,
             },
         )

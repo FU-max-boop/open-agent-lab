@@ -1351,7 +1351,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 }
             }
             manifest = {
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "experimentId": EXPERIMENT_ID,
                 "relayBuildIds": {
                     "production": build,
@@ -1513,6 +1513,20 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 ),
             ):
                 _validate_prepared_source(binding, root)
+                manifest_path.write_bytes(
+                    canonical_json({**manifest, "schemaVersion": 2})
+                )
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    _validate_prepared_source(
+                        {
+                            **binding,
+                            "experiment_manifest_sha256": digest_bytes(
+                                manifest_path.read_bytes()
+                            ),
+                        },
+                        root,
+                    )
+                manifest_path.write_bytes(canonical_json(manifest))
                 fixture_preflight = {
                     **preflight,
                     "relayBuildSha256": manifest["relayBuildIds"][
