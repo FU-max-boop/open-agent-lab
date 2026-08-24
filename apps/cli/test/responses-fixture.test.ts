@@ -12,6 +12,18 @@ const TOOLS = [
   },
 ];
 
+test("Responses fixture rejects ambiguous turn state configuration", async () => {
+  await assert.rejects(
+    startResponsesFixture({
+      bearer: "fixture-secret",
+      model: "fixture-model",
+      command: "printf fixture",
+      turnState: "first,second",
+    }),
+    /Fixture turn state is invalid/u,
+  );
+});
+
 test("Responses fixture detects an empty apply_patch grammar", async (t) => {
   const fixture = await startResponsesFixture({
     bearer: "fixture-secret",

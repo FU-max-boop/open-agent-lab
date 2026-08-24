@@ -21,6 +21,7 @@ interface ResponsesFixtureBaseOptions {
   readonly finalMessage?: string;
   readonly callId?: string;
   readonly instructionMarker?: string;
+  readonly turnState?: string;
   readonly host?: string;
   readonly port?: number;
 }
@@ -199,6 +200,12 @@ export async function startResponsesFixture(
   if (options.instructionMarker !== undefined && options.instructionMarker.trim() === "") {
     throw new Error("Fixture instruction marker must be non-empty.");
   }
+  if (
+    options.turnState !== undefined &&
+    (options.turnState.includes(",") || !/^[\x20-\x7e]{1,512}$/u.test(options.turnState))
+  ) {
+    throw new Error("Fixture turn state is invalid.");
+  }
 
   const callId = options.callId ?? DEFAULT_CALL_ID;
   const requests: ResponsesFixtureRequest[] = [];
@@ -232,6 +239,12 @@ export async function startResponsesFixture(
         instructionMarkerPresent = present;
       }
       if (completed) throw new Error("Codex sent a request after fixture completion.");
+      if (options.turnState !== undefined) {
+        const expectedTurnState = requests.length === 0 ? undefined : options.turnState;
+        if (request.headers["x-codex-turn-state"] !== expectedTurnState) {
+          throw new Error("Codex turn-state replay drifted.");
+        }
+      }
       requests.push({ method: request.method, url: request.url, body });
 
       response.writeHead(200, {
@@ -239,6 +252,9 @@ export async function startResponsesFixture(
         "cache-control": "no-cache",
         connection: "close",
         "openai-model": options.model,
+        ...(options.turnState !== undefined && requests.length === 1
+          ? { "x-codex-turn-state": options.turnState }
+          : {}),
         "x-request-id": `provider-fixture-${requests.length}`,
       });
       const idPrefix = instructionMarkerPresent

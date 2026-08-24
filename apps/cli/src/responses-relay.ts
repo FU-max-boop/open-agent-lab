@@ -24,11 +24,12 @@ export { verifyRelayJournal, verifyRelaySeal } from "./relay-evidence.js";
 export type { RelaySealSummary } from "./relay-evidence.js";
 
 const RESPONSES_PATH = "/v1/responses";
+const TURN_STATE_HEADER = "x-codex-turn-state";
 const FORWARDED_HEADERS = [
   "cache-control",
   "content-type",
   "openai-model",
-  "x-codex-turn-state",
+  TURN_STATE_HEADER,
   "x-models-etag",
   "x-reasoning-included",
   "x-request-id",
@@ -94,6 +95,14 @@ function safeString(value: unknown): string | null {
     value.length > 0 &&
     value.length <= 512 &&
     !/[\u0000-\u001f]/u.test(value)
+    ? value
+    : null;
+}
+
+function codexTurnState(value: unknown): string | null {
+  return typeof value === "string" &&
+    !value.includes(",") &&
+    /^[\x20-\x7e]{1,512}$/u.test(value)
     ? value
     : null;
 }
@@ -496,13 +505,25 @@ export async function startNativeResponsesRelay(
           if (body.length > limits.maxRequestBytes) {
             throw new RelayHttpError(413, "request_too_large");
           }
-          accepted += 1;
-          ordinal = accepted;
           const rawClientRequestId = request.headers["x-client-request-id"];
           const clientRequestId = safeString(rawClientRequestId);
+          const turnStateValues = request.headersDistinct[TURN_STATE_HEADER];
+          const turnState =
+            turnStateValues?.length === 1 ? codexTurnState(turnStateValues[0]) : null;
           const clientRequestIdEcho =
             typeof rawClientRequestId === "string" &&
             rawClientRequestId.includes(options.upstreamBearer);
+          const turnStateEcho =
+            turnStateValues?.some((value) => value.includes(options.upstreamBearer)) === true;
+          if (
+            turnStateValues !== undefined &&
+            turnState === null &&
+            !(clientRequestIdEcho || turnStateEcho)
+          ) {
+            throw new RelayHttpError(400, "invalid_turn_state");
+          }
+          accepted += 1;
+          ordinal = accepted;
           await journal.append({
             ...identity,
             event: "transport.responses.request",
@@ -515,7 +536,7 @@ export async function startNativeResponsesRelay(
             clientRequestId: clientRequestIdEcho ? null : clientRequestId,
             stream: true,
           });
-          if (clientRequestIdEcho) {
+          if (clientRequestIdEcho || turnStateEcho) {
             countRejection("upstream_secret_echo");
             throw new RelayHttpError(502, "upstream_failure");
           }
@@ -530,6 +551,9 @@ export async function startNativeResponsesRelay(
           };
           if (clientRequestId !== null) {
             upstreamHeaders["x-client-request-id"] = clientRequestId;
+          }
+          if (turnState !== null) {
+            upstreamHeaders[TURN_STATE_HEADER] = turnState;
           }
           const upstreamResponse = await Promise.race([
             fetchImpl(upstream, {
@@ -583,6 +607,12 @@ export async function startNativeResponsesRelay(
                   ? "upstream_body_missing"
                   : "upstream_failure";
             throw new RelayHttpError(502, errorCategory);
+          }
+          const upstreamTurnState = forwarded[TURN_STATE_HEADER];
+          if (upstreamTurnState !== undefined && codexTurnState(upstreamTurnState) === null) {
+            countRejection("invalid_turn_state");
+            await upstreamResponse.body?.cancel().catch(() => undefined);
+            throw new RelayHttpError(502, "upstream_failure");
           }
           providerRequestId = safeString(upstreamProviderRequestId);
           const modelHeader = safeString(upstreamModelHeader);

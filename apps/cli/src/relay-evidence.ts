@@ -92,6 +92,7 @@ const REJECTION_CODES = new Set([
   "concurrency_exceeded",
   "expired",
   "invalid_json",
+  "invalid_turn_state",
   "model_mismatch",
   "not_found",
   "relay_sealed",
