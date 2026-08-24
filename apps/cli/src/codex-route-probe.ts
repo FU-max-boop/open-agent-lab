@@ -184,8 +184,14 @@ async function fileSha256(path: string): Promise<string> {
 }
 
 export async function cleanRepositoryRevision(root = REPOSITORY_ROOT): Promise<string> {
+  const gitEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("GIT_")),
+  );
   const topLevel = (
-    await executeFile("git", ["-C", root, "rev-parse", "--show-toplevel"], { encoding: "utf8" })
+    await executeFile("git", ["-C", root, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      env: gitEnvironment,
+    })
   ).stdout.trim();
   if ((await realpath(topLevel)) !== (await realpath(root))) {
     throw new Error("Route probes require the current clean repository revision.");
@@ -202,7 +208,7 @@ export async function cleanRepositoryRevision(root = REPOSITORY_ROOT): Promise<s
       "--no-ahead-behind",
       "--ignore-submodules=none",
     ],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: gitEnvironment },
   );
   const lines = snapshot.stdout.split("\n");
   const revisions = lines

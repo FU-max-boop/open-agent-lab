@@ -216,7 +216,7 @@
   "fileSha256": {
     ".dockerignore": "sha256:92f7b031b96a1eb4b9898ec77be2638a66f626a720ed64db94919892ee87918c",
     "apps/cli/src/codex-probe.ts": "sha256:ecd28a1d3fc4dbfa942cce87c0562296ffd0ba21ef7051c3e4c3c2e0d91c5296",
-    "apps/cli/src/codex-route-probe.ts": "sha256:d516592d2e862ef8e082dbc783479f0c5c2c2e9c86a7ac314cf4ce2dc872fbf9",
+    "apps/cli/src/codex-route-probe.ts": "sha256:61d3cb85bf96ac9160da1502ae68e9b4a400c1345b5302df6768f7891f51f650",
     "apps/cli/src/codex-runner.ts": "sha256:0dce996eb670dd3e8ac780ad8b8b0ba06ab6785a8dd778d76fbca7e59e70013f",
     "apps/cli/src/relay-command.ts": "sha256:29ca5cd72acc6905e615c1974a535414ea60d465b6059d106962007e9f20ae72",
     "apps/cli/src/relay-fixture-entry.ts": "sha256:d3ba67816ebcaf0a9c42f9f5dca9bd445e5383a355e37b4fbc96bfa432802d53",
