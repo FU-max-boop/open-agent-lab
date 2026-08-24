@@ -24,11 +24,12 @@ export { verifyRelayJournal, verifyRelaySeal } from "./relay-evidence.js";
 export type { RelaySealSummary } from "./relay-evidence.js";
 
 const RESPONSES_PATH = "/v1/responses";
+const TURN_STATE_HEADER = "x-codex-turn-state";
 const FORWARDED_HEADERS = [
   "cache-control",
   "content-type",
   "openai-model",
-  "x-codex-turn-state",
+  TURN_STATE_HEADER,
   "x-models-etag",
   "x-reasoning-included",
   "x-request-id",
@@ -500,9 +501,14 @@ export async function startNativeResponsesRelay(
           ordinal = accepted;
           const rawClientRequestId = request.headers["x-client-request-id"];
           const clientRequestId = safeString(rawClientRequestId);
+          const turnStateValues = request.headersDistinct[TURN_STATE_HEADER];
+          const turnState =
+            turnStateValues?.length === 1 ? safeString(turnStateValues[0]) : null;
           const clientRequestIdEcho =
             typeof rawClientRequestId === "string" &&
             rawClientRequestId.includes(options.upstreamBearer);
+          const turnStateEcho =
+            turnStateValues?.some((value) => value.includes(options.upstreamBearer)) === true;
           await journal.append({
             ...identity,
             event: "transport.responses.request",
@@ -515,7 +521,7 @@ export async function startNativeResponsesRelay(
             clientRequestId: clientRequestIdEcho ? null : clientRequestId,
             stream: true,
           });
-          if (clientRequestIdEcho) {
+          if (clientRequestIdEcho || turnStateEcho) {
             countRejection("upstream_secret_echo");
             throw new RelayHttpError(502, "upstream_failure");
           }
@@ -530,6 +536,9 @@ export async function startNativeResponsesRelay(
           };
           if (clientRequestId !== null) {
             upstreamHeaders["x-client-request-id"] = clientRequestId;
+          }
+          if (turnState !== null) {
+            upstreamHeaders[TURN_STATE_HEADER] = turnState;
           }
           const upstreamResponse = await Promise.race([
             fetchImpl(upstream, {

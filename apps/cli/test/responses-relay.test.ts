@@ -23,6 +23,7 @@ import {
 const MODEL = "glm-5.3";
 const CLIENT_BEARER = "relay-client-token-0000000000000001";
 const PROVIDER_BEARER = "provider-secret-1234567890abcdef";
+const TURN_STATE_HEADER = "x-codex-turn-state";
 
 interface TestServer {
   url: string;
@@ -185,6 +186,7 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
       "proxy-authorization": "Basic attacker",
       "x-api-key": "attacker-key",
       "x-client-request-id": "codex-turn-1",
+      [TURN_STATE_HEADER]: "x".repeat(513),
       "x-forwarded-host": "attacker.invalid",
     },
   });
@@ -201,6 +203,7 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
   assert.equal(observedHeaders["accept-encoding"], "identity");
   assert.equal(observedHeaders["content-type"], "application/json");
   assert.equal(observedHeaders["x-client-request-id"], "codex-turn-1");
+  assert.equal(observedHeaders[TURN_STATE_HEADER], undefined);
   for (const name of ["cookie", "proxy-authorization", "x-api-key", "x-forwarded-host"]) {
     assert.equal(observedHeaders[name], undefined);
   }
@@ -332,6 +335,49 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
     () => verifyRelayJournal(`${tampered.map((entry) => JSON.stringify(entry)).join("\n")}\n`),
     /chain mismatch at line 3/,
   );
+});
+
+test("relay replays Codex turn state only when the client returns it", async (t) => {
+  const observedTurnStates: Array<string | string[] | undefined> = [];
+  const observedUnlistedHeaders: Array<string | string[] | undefined> = [];
+  let requestCount = 0;
+  const upstream = await listen((request, response) => {
+    const ordinal = requestCount + 1;
+    requestCount = ordinal;
+    observedTurnStates.push(request.headers[TURN_STATE_HEADER]);
+    observedUnlistedHeaders.push(request.headers["x-unlisted-client-header"]);
+    const responseId = `resp-turn-${ordinal}`;
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "openai-model": MODEL,
+      "x-request-id": `provider-turn-${ordinal}`,
+      ...(ordinal === 1 ? { [TURN_STATE_HEADER]: "ts-1" } : {}),
+    });
+    response.end(
+      [
+        `event: response.created\ndata: {"type":"response.created","response":{"id":"${responseId}","model":"${MODEL}"}}\n\n`,
+        `event: response.completed\ndata: {"type":"response.completed","response":{"id":"${responseId}","model":"${MODEL}","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`,
+      ].join(""),
+    );
+  });
+  const { relay } = await fixture(t, upstream);
+
+  const first = await relayRequest(relay);
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get(TURN_STATE_HEADER), "ts-1");
+  await first.arrayBuffer();
+
+  const second = await relayRequest(relay, {
+    headers: {
+      [TURN_STATE_HEADER]: "ts-1",
+      "x-unlisted-client-header": "must-not-cross",
+    },
+  });
+  assert.equal(second.status, 200);
+  await second.arrayBuffer();
+
+  assert.deepEqual(observedTurnStates, [undefined, "ts-1"]);
+  assert.deepEqual(observedUnlistedHeaders, [undefined, undefined]);
 });
 
 test("relay rejects upstream metadata that echoes its provider credential", async (t) => {
@@ -488,7 +534,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
   }
 });
 
-test("relay redacts a provider credential from client request identity", async (t) => {
+test("relay redacts a provider credential from client metadata", async (t) => {
   let upstreamRequests = 0;
   const upstream = await listen((_request, response) => {
     upstreamRequests += 1;
@@ -497,11 +543,13 @@ test("relay redacts a provider credential from client request identity", async (
   });
   const { relay, sidecarPath } = await fixture(t, upstream);
 
-  const response = await relayRequest(relay, {
-    headers: { "x-client-request-id": `turn-${PROVIDER_BEARER}-suffix` },
-  });
-  assert.equal(response.status, 502);
-  assert.deepEqual(await response.json(), { error: { code: "upstream_failure" } });
+  for (const header of ["x-client-request-id", TURN_STATE_HEADER]) {
+    const response = await relayRequest(relay, {
+      headers: { [header]: `turn-${PROVIDER_BEARER}-suffix` },
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: { code: "upstream_failure" } });
+  }
   assert.equal(upstreamRequests, 0);
 
   const summary = await relay.close();
@@ -509,23 +557,25 @@ test("relay redacts a provider credential from client request identity", async (
   const seal = await readFile(relay.sealPath, "utf8");
   assert.ok(!journal.includes(PROVIDER_BEARER));
   assert.ok(!seal.includes(PROVIDER_BEARER));
-  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 2 });
   assert.deepEqual(verifyRelaySeal(journal, seal), summary);
   const entries = records(journal);
-  assert.equal(entries.length, 3);
-  const [request, headers, closed] = entries;
-  assert.equal(request?.clientRequestId, null);
-  assert.deepEqual(
-    [headers?.status, headers?.providerRequestId, headers?.modelHeader],
-    [null, null, null],
-  );
-  assert.deepEqual(
-    [closed?.status, closed?.providerRequestId, closed?.responseId],
-    [null, null, null],
-  );
-  assert.equal(closed?.transportState, "failed");
-  assert.equal(closed?.errorCategory, "upstream_failure");
-  assert.equal(closed?.responseBytes, 0);
+  assert.equal(entries.length, 6);
+  for (let offset = 0; offset < entries.length; offset += 3) {
+    const [request, headers, closed] = entries.slice(offset, offset + 3);
+    assert.equal(request?.clientRequestId, null);
+    assert.deepEqual(
+      [headers?.status, headers?.providerRequestId, headers?.modelHeader],
+      [null, null, null],
+    );
+    assert.deepEqual(
+      [closed?.status, closed?.providerRequestId, closed?.responseId],
+      [null, null, null],
+    );
+    assert.equal(closed?.transportState, "failed");
+    assert.equal(closed?.errorCategory, "upstream_failure");
+    assert.equal(closed?.responseBytes, 0);
+  }
 });
 
 test("relay rejects short or non-visible provider credentials before listening", async (t) => {
