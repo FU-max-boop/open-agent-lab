@@ -52,15 +52,22 @@ Current gate: **Gate 2 — native Codex/open-model benchmark pilot**.
 - Design clean-boundary native resume separately using relay capability epochs;
   do not wrap or duplicate Codex's internal tool loop.
 
-## Next slice — Terminal-Bench 2.1 pilot
+## Deferred slice — Terminal-Bench 3.0 migration
 
-- Pin Harbor `v0.22.0` and the official Terminal-Bench 2.1 dataset digest.
-- Run the predeclared five-task control/treatment pilot once per provider, then
-  expand to roughly 15 tasks x 3 attempts only after trajectory integrity and a
-  positive directional signal are proven.
-- Run the same tasks and resource envelope on exact GLM and DeepSeek routes.
-- Publish every attempt and denominator as a reproducible pilot, not an official
-  leaderboard score while community submissions remain closed.
+- Preserve the current slice's frozen Terminal-Bench 2.1 five-task experiment as
+  the attributable infrastructure pilot; do not relabel it as 3.0.
+- Until that pilot has intact trajectories and a positive directional signal,
+  keep Terminal-Bench 3.0 work to documentation calibration and read-only
+  compatibility auditing. Do not implement a full 3.0 adapter or manifest, run
+  all-task oracle or install-only campaigns, or start the 370-trial evaluation.
+- After that gate, open a separate implementation slot that pins the exact
+  `v3.0.0` tag commit, resolved Harbor Hub dataset digest, all 74 task versions,
+  and resource requirements, including the four H100 tasks.
+- The eventual complete candidate is predeclared as five attempts per task for
+  one agent/model candidate (74 × 5 = 370 planned trials), matching an inspected
+  published row. Publish the complete Hub job before seeking official leaderboard
+  listing through the maintainer admission path confirmed at that time; upload
+  alone is not proof of leaderboard admission.
 
 ## Exit gate
 

@@ -50,8 +50,9 @@ completion.
   browser debugging signals, and optional human takeover.
 - Independent completion verification and portable, redacted evidence bundles.
 - CLI-first benchmark integration, followed by a desktop workspace and CI mode.
-- Reproducible evaluation on Terminal-Bench 2.1 and WebArena-Verified Hard,
-  followed by Online-Mind2Web and later OSWorld 2.0.
+- A Terminal-Bench 2.1 infrastructure pilot followed by reproducible evaluation
+  on Terminal-Bench 3.0 and WebArena-Verified Hard, then Online-Mind2Web and
+  later OSWorld 2.0.
 - Security controls for credentials, untrusted content, prompt injection, and
   consequential external actions.
 
@@ -89,8 +90,8 @@ Project-level success requires all of the following:
 
 - a publicly usable, OSI-licensed release;
 - first-class documented runs with at least two open-model families;
-- a reproducible paired Terminal-Bench 2.1 evaluation and an accepted,
-  team-verified official leaderboard row;
+- a reproducible paired Terminal-Bench 2.1 infrastructure experiment and a row
+  listed on the official Terminal-Bench 3.0 leaderboard;
 - a reproducible WebArena-Verified Hard evaluation and an accepted or verified
   Online-Mind2Web leaderboard row;
 - a browser/desktop workflow evaluated on a pinned OSWorld release; and
@@ -144,8 +145,8 @@ leaderboard results.
 
 Required before saying the harness has an advantage:
 
-- complete, predeclared benchmark suites are evaluated with three attempts per
-  task unless the official protocol requires otherwise;
+- complete, predeclared benchmark suites use three attempts per task unless a
+  benchmark-specific project contract or official protocol requires otherwise;
 - the official evaluator is used without agent access to evaluator-only state;
 - paired point estimates, 95% uncertainty intervals, task denominators, and
   exclusions are published;
@@ -162,8 +163,9 @@ efficiency metric. The statistical and disclosure rules still apply.
 
 Required before requesting independent evaluation:
 
-- adapters support the Terminal-Bench 2.1 and Online-Mind2Web submission formats
-  current at submission time;
+- adapters support the current Terminal-Bench 3.0 evaluation and Harbor Hub
+  upload formats, the maintainer admission path confirmed at that time, and the
+  current Online-Mind2Web submission format;
 - the evaluated agent variant, defaults, model route, and telemetry can be
   reproduced from a release tag;
 - default behavior does not inspect benchmark identity or evaluator state;

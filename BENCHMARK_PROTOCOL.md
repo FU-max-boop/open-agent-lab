@@ -1,8 +1,8 @@
 # Benchmark Protocol
 
-**Protocol version:** 0.1
+**Protocol version:** 0.2
 
-**Effective date:** 2026-08-17
+**Effective date:** 2026-08-24
 
 This protocol governs internal decisions and public claims. It is intentionally
 stricter than running a benchmark command once: the object under evaluation is a
@@ -13,21 +13,29 @@ and budget—not a brand name or a model name alone.
 
 ### Engineering tracks
 
-1. **Terminal-Bench 2.1:** the first terminal and systems-workflow suite. The
-   official release describes 2.1 as a revision that fixes 28 of the 89
-   Terminal-Bench 2.0 tasks and adds continuous validation.
-2. **WebArena-Verified Hard:** the browser-runtime engineering suite. Development
+1. **Terminal-Bench 2.1 infrastructure experiment:** the first frozen
+   terminal-workflow pilot. It remains useful for validating the existing
+   paired-run and evidence path, but it is not the current headline benchmark.
+2. **Terminal-Bench 3.0:** the current terminal headline suite. The official
+   [`v3.0.0` release](https://github.com/harbor-framework/terminal-bench/releases/tag/v3.0.0)
+   contains 74 tasks, including four that require one H100 GPU. An
+   [inspected published row](https://hub.harborframework.com/datasets/terminal-bench/terminal-bench/3.0.0/leaderboards/3-0-0/rows/b26434fb-f08b-4f95-bcc5-ce0c7310e047)
+   uses five trials per task; that is our target row shape, not a claim that
+   Harbor defaults to five or that every future row must do so.
+3. **WebArena-Verified Hard:** the browser-runtime engineering suite. Development
    uses disclosed samples from a pinned Hard manifest; only a complete eligible
    run is described as a Hard result.
 
 ### External headline target
 
-The first headline target is an independently run, team-verified Terminal-Bench
-2.1 result. The official repository currently states that community submissions
-are closed and that only maintainer-run agents are accepted, so local Harbor
-runs are labeled reproducible pilots rather than official leaderboard results.
-This status must be rechecked before any submission or publicity claim. See the
-[official submission rules](https://github.com/harbor-framework/terminal-bench-2-1/blob/main/leaderboard/SUBMIT.md).
+The first headline target is a complete public Terminal-Bench 3.0 job on a pinned
+release and eventual listing on the official leaderboard. Current instructions
+document running the suite and uploading jobs to Harbor Hub, but a public upload
+alone does not establish leaderboard admission, and no public self-service
+Terminal-Bench 3.0 submission contract has been identified. The current
+maintainer admission path must be confirmed before any submission or publicity
+claim. The frozen Terminal-Bench 2.1 five-task pilot remains a development result
+and is not rewritten as a 3.0 result.
 The browser headline target is a v2 trajectory submission to
 [Online-Mind2Web](https://github.com/OSU-NLP-Group/Online-Mind2Web), with its
 automatic or human evaluation status disclosed. We do not compute an unofficial
@@ -144,10 +152,10 @@ variant being tested.
 
 ## Attempts, failures, and reruns
 
-Release evaluations use three independent attempts per task by default. If an
-official protocol requires another count, the official count wins and is
-recorded. Each attempt starts from the same clean task state and receives a
-unique run ID.
+Release evaluations use three independent attempts per task by default. A
+benchmark-specific project contract or official protocol may require another
+count; the applicable count and authority are recorded. Each attempt starts from
+the same clean task state and receives a unique run ID.
 
 An agent timeout, crash, invalid final artifact, verifier failure, or unhandled
 model error scores according to the official evaluator—normally zero—and remains
@@ -261,12 +269,19 @@ The report must show:
 
 ## Benchmark-specific version rules
 
-- **Terminal-Bench 2.1:** pin the official dataset repository revision, task
-  manifest, Harbor/framework version, container digests, and evaluator. Preserve
-  all 89 task outcomes unless the official selected track defines a different
-  set; name any selected set exactly. Do not change official timeout or resource
-  settings for a leaderboard run; only a team-verified, published row is called
-  an official result.
+- **Terminal-Bench 3.0:** before implementation, pin the exact official release
+  tag commit and resolved Harbor Hub dataset digest rather than `@latest`, plus
+  the exact 74-task manifest, task versions, container digests, Harbor version,
+  evaluator, and per-task resource requirements. Open Agent Lab predeclares five
+  attempts per task for one agent/model candidate (74 × 5 = 370 planned trials),
+  matching an inspected published row. That is a project contract, not a claim
+  about Harbor's default or a universal admission rule. Only a row listed on the
+  official leaderboard after the current maintainer admission path is confirmed
+  is called an official leaderboard result.
+- **Terminal-Bench 2.1:** retain the original dataset revision, 89-task manifest,
+  Harbor version, container digests, evaluator, and submission status with every
+  historical result. Selected development subsets must be named exactly and are
+  never promoted into 2.1 or 3.0 full-suite claims.
 - **WebArena-Verified Hard:** pin the benchmark release or commit, Hard task
   manifest, site-state and container-image digests, evaluator version, and
   captured network traces. A selected development sample is not a Hard result.
