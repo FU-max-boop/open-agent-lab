@@ -56,6 +56,13 @@ LIVE_ROUTE_PROBE_LIMITS = MappingProxyType(
         "codexTimeoutSeconds": 480,
     }
 )
+CODEX_PROVIDER_RETRY_POLICY = MappingProxyType(
+    {
+        "request_max_retries": 0,
+        "stream_max_retries": 0,
+        "unbounded_connection_retries": False,
+    }
+)
 LIVE_ROUTE_PROBE_COMMAND = """test -z "${DEEPSEEK_API_KEY+x}" && \\
 test -z "${ZAI_API_KEY+x}" && \\
 test -z "${OAL_RELAY_TOKEN:-}" && \\

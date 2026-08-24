@@ -30,6 +30,7 @@ from .codex_runtime import (
     validate_codex_runtime_spec,
 )
 from .experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_CAP_ENV,
     LIVE_ROUTE_PROBE_COMMAND_SHA256,
@@ -417,6 +418,9 @@ def _provider_config(
         "features": {
             "shell_zsh_fork": False,
             "unified_exec_zsh_fork": False,
+            "unbounded_connection_retries": CODEX_PROVIDER_RETRY_POLICY[
+                "unbounded_connection_retries"
+            ],
         },
         "shell_environment_policy": {
             "ignore_default_excludes": False,
@@ -428,8 +432,10 @@ def _provider_config(
                 "base_url": relay_url,
                 "env_key": _RELAY_TOKEN_ENV,
                 "wire_api": "responses",
-                "request_max_retries": 0 if live_route_probe else 4,
-                "stream_max_retries": 0 if live_route_probe else 5,
+                "request_max_retries": CODEX_PROVIDER_RETRY_POLICY[
+                    "request_max_retries"
+                ],
+                "stream_max_retries": CODEX_PROVIDER_RETRY_POLICY["stream_max_retries"],
                 "stream_idle_timeout_ms": (
                     LIVE_ROUTE_PROBE_LIMITS["idleTimeoutMs"]
                     if live_route_probe
@@ -504,8 +510,7 @@ def _variant(enable_verification: bool, *, live_route_probe: bool) -> dict[str, 
             "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
             "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
             "effect_verified": False,
-            "request_max_retries": 0,
-            "stream_max_retries": 0,
+            **CODEX_PROVIDER_RETRY_POLICY,
             "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
         }
     return {
@@ -517,6 +522,7 @@ def _variant(enable_verification: bool, *, live_route_probe: bool) -> dict[str, 
         "requested_developer_instructions_sha256": (
             _VERIFY_INSTRUCTION_SHA256 if enable_verification else None
         ),
+        **CODEX_PROVIDER_RETRY_POLICY,
     }
 
 
@@ -601,6 +607,33 @@ class OpenAgentLabCodex(Codex):
     ) -> None:
         if config.get("model_catalog_json") != _CODEX_MODEL_CATALOG_PATH:
             raise RuntimeError("The effective Codex model catalog path drifted.")
+        providers = config.get("model_providers")
+        provider = (
+            providers.get("open-agent-lab") if isinstance(providers, dict) else None
+        )
+        features = config.get("features")
+        observed = {
+            "request_max_retries": (
+                provider.get("request_max_retries")
+                if isinstance(provider, dict)
+                else None
+            ),
+            "stream_max_retries": (
+                provider.get("stream_max_retries")
+                if isinstance(provider, dict)
+                else None
+            ),
+            "unbounded_connection_retries": (
+                features.get("unbounded_connection_retries")
+                if isinstance(features, dict)
+                else None
+            ),
+        }
+        if config.get("model_provider") != "open-agent-lab" or any(
+            type(observed[key]) is not type(expected) or observed[key] != expected
+            for key, expected in CODEX_PROVIDER_RETRY_POLICY.items()
+        ):
+            raise RuntimeError("The effective Codex retry policy drifted.")
         await self._upload_config_text(
             environment,
             content=self._codex_model_catalog,

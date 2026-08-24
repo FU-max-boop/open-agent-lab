@@ -1,6 +1,7 @@
 import unittest
 
 from benchmarks.terminal_bench.experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_EGRESS_NETWORK,
@@ -22,6 +23,7 @@ from benchmarks.terminal_bench.experiment_contract import (
     is_strict_int,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    same_json,
 )
 
 _PILOT_RELAY_COMMAND = [
@@ -121,6 +123,16 @@ class ExperimentContractTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             RELAY_ARTIFACT_LIMITS[RELAY_JOURNAL_PATH] = 0  # type: ignore[index]
+        self.assertEqual(
+            dict(CODEX_PROVIDER_RETRY_POLICY),
+            {
+                "request_max_retries": 0,
+                "stream_max_retries": 0,
+                "unbounded_connection_retries": False,
+            },
+        )
+        with self.assertRaises(TypeError):
+            CODEX_PROVIDER_RETRY_POLICY["request_max_retries"] = 1  # type: ignore[index]
 
     def test_artifact_manifest_is_exact_and_fresh(self) -> None:
         first = artifact_manifest()
@@ -138,6 +150,9 @@ class ExperimentContractTest(unittest.TestCase):
         self.assertEqual(
             canonical_json({"z": [True, None], "a": "雪"}),
             '{"a":"雪","z":[true,null]}'.encode(),
+        )
+        self.assertFalse(
+            same_json({"request_max_retries": 0}, {"request_max_retries": False})
         )
 
     def test_canonical_json_rejects_non_finite_numbers(self) -> None:
