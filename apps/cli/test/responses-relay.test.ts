@@ -505,13 +505,13 @@ test("relay rejects malformed client turn state instead of treating it as absent
       name: "duplicate",
       headers: [`${TURN_STATE_HEADER}: first`, `${TURN_STATE_HEADER}: second`],
     },
-    { name: "control", headers: [`${TURN_STATE_HEADER}: bad\u0001state`] },
+    { name: "htab", headers: [`${TURN_STATE_HEADER}: bad\tstate`] },
     { name: "oversized", headers: [`${TURN_STATE_HEADER}: ${"x".repeat(513)}`] },
   ];
   for (const { name, headers } of malformed) {
     const response = await rawRelayRequest(relay, headers);
     assert.equal(response.status, 400, name);
-    if (name !== "control") assert.match(response.body, /invalid_turn_state/u, name);
+    assert.match(response.body, /invalid_turn_state/u, name);
   }
   assert.equal(upstreamRequests, 0);
 
@@ -522,7 +522,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
   assert.equal(upstreamRequests, 1);
   assert.equal(observedTurnState, validTurnState);
   const summary = await relay.close();
-  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 3 });
+  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 4 });
   assert.deepEqual(
     verifyRelaySeal(
       await readFile(sidecarPath, "utf8"),
@@ -533,7 +533,7 @@ test("relay rejects malformed client turn state instead of treating it as absent
 });
 
 test("relay rejects malformed upstream turn state before writing client headers", async (t) => {
-  const invalidTurnStates = ["", "bad\u0001state", "x".repeat(513)];
+  const invalidTurnStates = ["", "bad\tstate", "x".repeat(513)];
   let responseIndex = 0;
   const upstream = await listen((_request, response) => response.end());
   const { relay, sidecarPath } = await fixture(t, upstream, {
