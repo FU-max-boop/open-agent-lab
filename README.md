@@ -158,9 +158,9 @@ third-party agent harness should become an irreplaceable core dependency.
    disclosed WebArena-Verified Hard development samples run against at least one
    pinned baseline using the paired protocol.
 4. **Release evaluation:** after a positive, attributable 2.1 pilot, a separately
-   pinned Terminal-Bench 3.0 release and the other full, predeclared suites run
-   with complete attempts, uncertainty, cost/time/token telemetry, and public
-   redacted artifacts.
+   pinned Terminal-Bench 3.0 release runs with complete attempts, uncertainty,
+   cost/time/token telemetry, and public redacted artifacts. Other full,
+   predeclared suites follow their own gates and the same disclosure standard.
 5. **External evaluation:** publish a complete Terminal-Bench 3.0 Harbor Hub job
    and seek listing on the official leaderboard after confirming the current
    maintainer admission path; then submit Online-Mind2Web v2 trajectories under

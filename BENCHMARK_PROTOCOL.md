@@ -265,7 +265,7 @@ The report must show:
 - efficiency/reliability metrics;
 - known contamination and judge limitations;
 - commands or documented procedure to reproduce the run;
-- links to the immutable source tag and artifact checksums.
+- links to the pinned source revision and artifact checksums.
 
 ## Benchmark-specific version rules
 
