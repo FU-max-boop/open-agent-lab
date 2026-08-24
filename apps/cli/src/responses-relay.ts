@@ -497,8 +497,6 @@ export async function startNativeResponsesRelay(
           if (body.length > limits.maxRequestBytes) {
             throw new RelayHttpError(413, "request_too_large");
           }
-          accepted += 1;
-          ordinal = accepted;
           const rawClientRequestId = request.headers["x-client-request-id"];
           const clientRequestId = safeString(rawClientRequestId);
           const turnStateValues = request.headersDistinct[TURN_STATE_HEADER];
@@ -509,6 +507,11 @@ export async function startNativeResponsesRelay(
             rawClientRequestId.includes(options.upstreamBearer);
           const turnStateEcho =
             turnStateValues?.some((value) => value.includes(options.upstreamBearer)) === true;
+          if (turnStateValues !== undefined && turnState === null && !turnStateEcho) {
+            throw new RelayHttpError(400, "invalid_turn_state");
+          }
+          accepted += 1;
+          ordinal = accepted;
           await journal.append({
             ...identity,
             event: "transport.responses.request",
@@ -592,6 +595,11 @@ export async function startNativeResponsesRelay(
                   ? "upstream_body_missing"
                   : "upstream_failure";
             throw new RelayHttpError(502, errorCategory);
+          }
+          const upstreamTurnState = forwarded[TURN_STATE_HEADER];
+          if (upstreamTurnState !== undefined && safeString(upstreamTurnState) === null) {
+            await upstreamResponse.body?.cancel().catch(() => undefined);
+            throw new RelayHttpError(502, "upstream_failure");
           }
           providerRequestId = safeString(upstreamProviderRequestId);
           const modelHeader = safeString(upstreamModelHeader);

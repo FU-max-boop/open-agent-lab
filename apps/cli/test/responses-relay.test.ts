@@ -5,6 +5,7 @@ import {
   type IncomingMessage,
   type RequestListener,
 } from "node:http";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -79,6 +80,49 @@ async function relayRequest(
       ...headers,
     },
     body: requestPayload ?? requestBody(),
+  });
+}
+
+async function rawRelayRequest(
+  relay: NativeResponsesRelay,
+  extraHeaders: string[],
+): Promise<{ body: string; status: number }> {
+  const endpoint = new URL(relay.baseUrl);
+  const payload = requestBody();
+  const path = `${endpoint.pathname.replace(/\/$/u, "")}/responses`;
+  const request = [
+    `POST ${path} HTTP/1.1`,
+    `Host: ${endpoint.host}`,
+    `Authorization: Bearer ${CLIENT_BEARER}`,
+    "Content-Type: application/json",
+    `Content-Length: ${Buffer.byteLength(payload)}`,
+    "Connection: close",
+    ...extraHeaders,
+    "",
+    payload,
+  ].join("\r\n");
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const socket = createConnection({
+      host: endpoint.hostname,
+      port: Number(endpoint.port),
+    });
+    socket.on("connect", () => socket.write(request));
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    socket.on("error", reject);
+    socket.on("end", () => {
+      const response = Buffer.concat(chunks).toString("utf8");
+      const status = /^HTTP\/1\.1 (\d{3})/u.exec(response)?.[1];
+      if (status === undefined) {
+        reject(new Error("Relay returned a malformed HTTP response."));
+        return;
+      }
+      resolve({
+        body: response.slice(response.indexOf("\r\n\r\n") + 4),
+        status: Number(status),
+      });
+    });
   });
 }
 
@@ -186,7 +230,6 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
       "proxy-authorization": "Basic attacker",
       "x-api-key": "attacker-key",
       "x-client-request-id": "codex-turn-1",
-      [TURN_STATE_HEADER]: "x".repeat(513),
       "x-forwarded-host": "attacker.invalid",
     },
   });
@@ -338,6 +381,7 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
 });
 
 test("relay replays Codex turn state only when the client returns it", async (t) => {
+  const turnState = "s".repeat(512);
   const observedTurnStates: Array<string | string[] | undefined> = [];
   const observedUnlistedHeaders: Array<string | string[] | undefined> = [];
   let requestCount = 0;
@@ -351,7 +395,7 @@ test("relay replays Codex turn state only when the client returns it", async (t)
       "content-type": "text/event-stream",
       "openai-model": MODEL,
       "x-request-id": `provider-turn-${ordinal}`,
-      ...(ordinal === 1 ? { [TURN_STATE_HEADER]: "ts-1" } : {}),
+      ...(ordinal === 1 ? { [TURN_STATE_HEADER]: turnState } : {}),
     });
     response.end(
       [
@@ -360,24 +404,176 @@ test("relay replays Codex turn state only when the client returns it", async (t)
       ].join(""),
     );
   });
-  const { relay } = await fixture(t, upstream);
+  const { relay, sidecarPath } = await fixture(t, upstream);
 
   const first = await relayRequest(relay);
   assert.equal(first.status, 200);
-  assert.equal(first.headers.get(TURN_STATE_HEADER), "ts-1");
+  assert.equal(first.headers.get(TURN_STATE_HEADER), turnState);
   await first.arrayBuffer();
 
   const second = await relayRequest(relay, {
     headers: {
-      [TURN_STATE_HEADER]: "ts-1",
+      [TURN_STATE_HEADER]: turnState,
       "x-unlisted-client-header": "must-not-cross",
     },
   });
   assert.equal(second.status, 200);
   await second.arrayBuffer();
 
-  assert.deepEqual(observedTurnStates, [undefined, "ts-1"]);
-  assert.deepEqual(observedUnlistedHeaders, [undefined, undefined]);
+  const third = await relayRequest(relay);
+  assert.equal(third.status, 200);
+  await third.arrayBuffer();
+
+  assert.deepEqual(observedTurnStates, [undefined, turnState, undefined]);
+  assert.deepEqual(observedUnlistedHeaders, [undefined, undefined, undefined]);
+  await relay.close();
+  assert.ok(!(await readFile(sidecarPath, "utf8")).includes(turnState));
+  assert.ok(!(await readFile(relay.sealPath, "utf8")).includes(turnState));
+});
+
+test("queued requests keep their own Codex turn state", async (t) => {
+  const firstTurnState = "first-turn-state";
+  const secondTurnState = "second-turn-state";
+  const observedTurnStates: Array<string | string[] | undefined> = [];
+  let releaseFirst!: () => void;
+  const firstMayFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted!: () => void;
+  const firstDidStart = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const upstream = await listen((request, response) => {
+    const ordinal = observedTurnStates.length + 1;
+    observedTurnStates.push(request.headers[TURN_STATE_HEADER]);
+    void (async () => {
+      if (ordinal === 1) {
+        firstStarted();
+        await firstMayFinish;
+      }
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "openai-model": MODEL,
+        "x-request-id": `provider-queued-turn-${ordinal}`,
+      });
+      response.end(
+        `data: {"type":"response.completed","response":{"id":"resp-queued-${ordinal}","model":"${MODEL}"}}\n\n`,
+      );
+    })().catch((error: unknown) =>
+      response.destroy(error instanceof Error ? error : undefined),
+    );
+  });
+  const { relay } = await fixture(t, upstream);
+
+  const first = relayRequest(relay, {
+    headers: { [TURN_STATE_HEADER]: firstTurnState },
+  });
+  await firstDidStart;
+  const second = relayRequest(relay, {
+    headers: { [TURN_STATE_HEADER]: secondTurnState },
+  });
+  releaseFirst();
+
+  const [firstResponse, secondResponse] = await Promise.all([first, second]);
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  await Promise.all([firstResponse.arrayBuffer(), secondResponse.arrayBuffer()]);
+  assert.deepEqual(observedTurnStates, [firstTurnState, secondTurnState]);
+});
+
+test("relay rejects malformed client turn state instead of treating it as absent", async (t) => {
+  const validTurnState = "s".repeat(512);
+  let upstreamRequests = 0;
+  let observedTurnState: string | string[] | undefined;
+  const upstream = await listen((request, response) => {
+    upstreamRequests += 1;
+    observedTurnState = request.headers[TURN_STATE_HEADER];
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "openai-model": MODEL,
+      "x-request-id": "provider-turn-boundary",
+    });
+    response.end(
+      `data: {"type":"response.completed","response":{"id":"resp-boundary","model":"${MODEL}"}}\n\n`,
+    );
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream, { maxRequests: 1 });
+
+  const malformed = [
+    { name: "empty", headers: [`${TURN_STATE_HEADER}:`] },
+    {
+      name: "duplicate",
+      headers: [`${TURN_STATE_HEADER}: first`, `${TURN_STATE_HEADER}: second`],
+    },
+    { name: "control", headers: [`${TURN_STATE_HEADER}: bad\u0001state`] },
+    { name: "oversized", headers: [`${TURN_STATE_HEADER}: ${"x".repeat(513)}`] },
+  ];
+  for (const { name, headers } of malformed) {
+    const response = await rawRelayRequest(relay, headers);
+    assert.equal(response.status, 400, name);
+    if (name !== "control") assert.match(response.body, /invalid_turn_state/u, name);
+  }
+  assert.equal(upstreamRequests, 0);
+
+  const boundary = await rawRelayRequest(relay, [
+    `${TURN_STATE_HEADER}: ${validTurnState}`,
+  ]);
+  assert.equal(boundary.status, 200);
+  assert.equal(upstreamRequests, 1);
+  assert.equal(observedTurnState, validTurnState);
+  const summary = await relay.close();
+  assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 3 });
+  assert.deepEqual(
+    verifyRelaySeal(
+      await readFile(sidecarPath, "utf8"),
+      await readFile(relay.sealPath, "utf8"),
+    ),
+    summary,
+  );
+});
+
+test("relay rejects malformed upstream turn state before writing client headers", async (t) => {
+  const invalidTurnStates = ["", "bad\u0001state", "x".repeat(513)];
+  let responseIndex = 0;
+  const upstream = await listen((_request, response) => response.end());
+  const { relay, sidecarPath } = await fixture(t, upstream, {
+    maxRequests: invalidTurnStates.length,
+    fetchImpl: async () => {
+      const turnState = invalidTurnStates[responseIndex];
+      responseIndex += 1;
+      assert.ok(turnState !== undefined);
+      return new Response(
+        `data: {"type":"response.completed","response":{"id":"resp-invalid-turn","model":"${MODEL}"}}\n\n`,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "openai-model": MODEL,
+            [TURN_STATE_HEADER]: turnState,
+            "x-request-id": `provider-invalid-turn-${responseIndex}`,
+          },
+        },
+      );
+    },
+  });
+
+  for (const _turnState of invalidTurnStates) {
+    const response = await relayRequest(relay);
+    assert.equal(response.headers.get(TURN_STATE_HEADER), null);
+    await assertRelayError(response, 502, "upstream_failure");
+  }
+  assert.equal(responseIndex, invalidTurnStates.length);
+
+  await relay.close();
+  const entries = records(await readFile(sidecarPath, "utf8"));
+  for (let offset = 0; offset < entries.length; offset += 3) {
+    const headers = entries[offset + 1];
+    const closed = entries[offset + 2];
+    assert.equal(headers?.status, 200);
+    assert.equal(closed?.transportState, "failed");
+    assert.equal(closed?.errorCategory, "upstream_failure");
+    assert.equal(closed?.responseBytes, 0);
+  }
 });
 
 test("relay rejects upstream metadata that echoes its provider credential", async (t) => {
@@ -413,6 +609,15 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
       headers: {
         "cache-control": `${"x".repeat(513)}${PROVIDER_BEARER}`,
         "openai-model": MODEL,
+        "x-request-id": "provider-request-safe",
+      },
+    },
+    {
+      status: 200,
+      error: "upstream_failure",
+      headers: {
+        "openai-model": MODEL,
+        [TURN_STATE_HEADER]: `prefix-${PROVIDER_BEARER}-suffix`,
         "x-request-id": "provider-request-safe",
       },
     },

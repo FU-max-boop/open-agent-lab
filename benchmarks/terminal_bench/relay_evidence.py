@@ -112,6 +112,7 @@ _REJECTION_CODES = {
     "concurrency_exceeded",
     "expired",
     "invalid_json",
+    "invalid_turn_state",
     "model_mismatch",
     "not_found",
     "relay_sealed",
