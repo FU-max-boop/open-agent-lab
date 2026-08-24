@@ -102,6 +102,7 @@ export async function runCodexProbe(
     command: probeToolCommand(),
     finalMessage: "Probe complete.",
     callId: CALL_ID,
+    ...(throughRelay ? { turnState: "codex-probe-turn-state" } : {}),
     ...(developerInstruction === undefined ? {} : { instructionMarker: developerInstruction }),
   });
 
