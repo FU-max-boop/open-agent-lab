@@ -247,6 +247,7 @@ def _claimed_slot(
     provider: str,
     role: str,
     policy_path: Path,
+    expected_policy_sha256: str,
     job_dir: Path,
     job_id: UUID,
     trial_lock_sha256: str,
@@ -273,13 +274,14 @@ def _claimed_slot(
     except (UnicodeError, ValueError) as error:
         raise IntegrityError("authorization claim is invalid") from error
     claimed_at = _iso(claim.get("claimedAt"), "authorization claimedAt")
+    active_policy_sha256 = digest_bytes(
+        _bounded_file(policy_path, f"{role} authorization policy")
+    )
     expected = {
         "schemaVersion": 1,
         "proofClass": f"{role}-relay-slot-claim-v1",
         "provider": provider,
-        "policySha256": digest_bytes(
-            _bounded_file(policy_path, f"{role} authorization policy")
-        ),
+        "policySha256": expected_policy_sha256,
         "jobId": str(job_id),
         "jobDir": str(job_dir),
         "trialLockSha256": trial_lock_sha256,
@@ -289,6 +291,7 @@ def _claimed_slot(
         set(claim) != RELAY_CLAIM_FIELDS
         or raw != canonical_json(claim)
         or not is_strict_int(claim.get("schemaVersion"))
+        or active_policy_sha256 != expected_policy_sha256
         or not same_json(claim, expected)
         or not not_before <= claimed_at <= before
     ):
@@ -801,7 +804,7 @@ def verify_probe(
     )
     if cap_run_dir != run_dir:
         raise IntegrityError("provider authorization belongs to another prepared run")
-    cap, _ = _cap_attestation(
+    cap, cap_sha256 = _cap_attestation(
         cap_path,
         provider,
         run.model,
@@ -825,6 +828,7 @@ def verify_probe(
         provider,
         "probe",
         cap_path,
+        cap_sha256,
         run.probe_job.job_dir,
         completed.result.id,
         canonical_digest(lock),

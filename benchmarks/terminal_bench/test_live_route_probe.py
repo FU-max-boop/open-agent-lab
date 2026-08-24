@@ -825,6 +825,19 @@ class LiveRouteProbeTest(unittest.TestCase):
         with self.assertRaisesRegex(paired.IntegrityError, "claim differs"):
             self.fixture.verify()
 
+        probe_trial = probe._probe_trial
+
+        def restore_before_trial(*args: object) -> object:
+            self.fixture.cap.write_bytes(validated)
+            return probe_trial(*args)
+
+        with (
+            patch.object(probe, "_probe_trial", side_effect=restore_before_trial),
+            self.assertRaisesRegex(paired.IntegrityError, "claim differs"),
+        ):
+            self.fixture.verify(self.fixture.authorization)
+        self.assertFalse(self.fixture.authorization.exists())
+
     def test_pilot_gate_requires_full_window_and_single_trial_slot(self) -> None:
         self.fixture.verify(self.fixture.authorization)
         self.fixture.validate_authorization()
