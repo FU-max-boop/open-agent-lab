@@ -23,6 +23,7 @@ from benchmarks.terminal_bench.experiment_contract import (
     is_strict_int,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    same_json,
 )
 
 _PILOT_RELAY_COMMAND = [
@@ -149,6 +150,9 @@ class ExperimentContractTest(unittest.TestCase):
         self.assertEqual(
             canonical_json({"z": [True, None], "a": "雪"}),
             '{"a":"雪","z":[true,null]}'.encode(),
+        )
+        self.assertFalse(
+            same_json({"request_max_retries": 0}, {"request_max_retries": False})
         )
 
     def test_canonical_json_rejects_non_finite_numbers(self) -> None:

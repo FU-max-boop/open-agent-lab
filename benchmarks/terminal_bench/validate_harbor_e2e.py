@@ -30,6 +30,7 @@ from benchmarks.terminal_bench.experiment_contract import (
     canonical_json,
     is_digest,
     is_revision,
+    same_json,
 )
 from benchmarks.terminal_bench.relay_evidence import relay_metadata
 
@@ -461,18 +462,20 @@ def validate(
     )
     _require(isinstance(provider, dict), "Harbor provider metadata is missing.")
     _require(
-        provider.get("agent_variant")
-        == {
-            "schema_version": 1,
-            "variant_id": variant_id,
-            "developer_instruction_requested": expected_variant[
-                "developer_instruction_requested"
-            ],
-            "requested_developer_instructions_sha256": expected_variant[
-                "requested_developer_instructions_sha256"
-            ],
-            **CODEX_PROVIDER_RETRY_POLICY,
-        },
+        same_json(
+            provider.get("agent_variant"),
+            {
+                "schema_version": 1,
+                "variant_id": variant_id,
+                "developer_instruction_requested": expected_variant[
+                    "developer_instruction_requested"
+                ],
+                "requested_developer_instructions_sha256": expected_variant[
+                    "requested_developer_instructions_sha256"
+                ],
+                **CODEX_PROVIDER_RETRY_POLICY,
+            },
+        ),
         "Agent variant metadata drifted.",
     )
     _require(
