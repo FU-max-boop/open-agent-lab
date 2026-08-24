@@ -1,3 +1,4 @@
+import copy
 import unittest
 
 from benchmarks.terminal_bench.experiment_contract import (
@@ -23,6 +24,7 @@ from benchmarks.terminal_bench.experiment_contract import (
     is_strict_int,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    provider_control_window,
     same_json,
 )
 
@@ -65,6 +67,95 @@ _EXPECTED_MANIFEST = [
 
 
 class ExperimentContractTest(unittest.TestCase):
+    def test_provider_control_is_an_exact_discriminated_union(self) -> None:
+        common = {
+            "scope": "campaign",
+            "observedAt": "2026-08-24T00:00:00Z",
+            "expiresAt": "2026-08-24T04:00:00Z",
+            "evidenceSha256": "sha256:" + "a" * 64,
+            "assertedBy": "fixture operator",
+        }
+        deepseek = {
+            **common,
+            "controlClass": "provider_hard_spend_cap_usd",
+            "limitUsd": 2,
+            "sourceUrls": {"providerControl": "https://platform.deepseek.com/"},
+        }
+        zai = {
+            **common,
+            "controlClass": "coding_plan_subscription_quota_no_balance_deduction",
+            "baseUrl": "https://api.z.ai/api/v1",
+            "protocol": "openai_responses",
+            "plan": "zai_coding_plan",
+            "noBalanceDeduction": True,
+            "quotaSnapshot": {
+                "fiveHour": {
+                    "remainingPercent": 80,
+                    "resetsAt": "2026-08-24T05:00:00Z",
+                },
+                "weekly": {
+                    "remainingPercent": 60,
+                    "resetsAt": "2026-08-31T00:00:00Z",
+                },
+            },
+            "sourceUrls": {
+                "endpointProtocol": "https://docs.z.ai/devpack/tool/others",
+                "providerControl": "https://docs.z.ai/devpack/faq",
+            },
+        }
+        self.assertEqual(provider_control_window(deepseek, "deepseek")[0], deepseek)
+        self.assertEqual(provider_control_window(zai, "zai")[0], zai)
+        with self.assertRaises(TypeError):
+            provider_control_window([], "deepseek")
+        with self.assertRaises(ValueError):
+            provider_control_window({"spendCap": {"limitUsd": 2}}, "deepseek")
+
+        missing = object()
+        cases = (
+            ("deepseek", "controlClass", "wrong"),
+            ("deepseek", "estimatedUsd", 1),
+            ("deepseek", "limitUsd", True),
+            ("deepseek", "limitUsd", 10**1000),
+            (
+                "deepseek",
+                "sourceUrls.providerControl",
+                "https://api-docs.deepseek.com/",
+            ),
+            ("zai", "limitUsd", 1),
+            ("zai", "quotaSnapshot.fiveHour.remainingPercent", 0),
+            ("zai", "quotaSnapshot.weekly.remainingPercent", False),
+            ("zai", "quotaSnapshot.weekly.remainingPercent", 10**1000),
+            (
+                "zai",
+                "quotaSnapshot.fiveHour.resetsAt",
+                common["expiresAt"],
+            ),
+            ("zai", "quotaSnapshot.fiveHour.resetsAt", "2026-08-24T05:00:01Z"),
+            ("zai", "quotaSnapshot.weekly.resetsAt", "2026-08-31T00:00:01Z"),
+            (
+                "zai",
+                "sourceUrls.endpointProtocol",
+                "https://docs.z.ai/devpack/tool/codex",
+            ),
+            ("deepseek", "expiresAt", "2026-08-25T00:00:01Z"),
+            ("zai", "plan", missing),
+        )
+        for provider, path, replacement in cases:
+            candidate = copy.deepcopy(deepseek if provider == "deepseek" else zai)
+            keys = path.split(".")
+            target = candidate
+            for key in keys[:-1]:
+                target = target[key]
+            if replacement is missing:
+                target.pop(keys[-1])
+            else:
+                target[keys[-1]] = replacement
+            with (
+                self.subTest(provider=provider, path=path),
+                self.assertRaises(ValueError),
+            ):
+                provider_control_window(candidate, provider)
+
     def test_wire_literals_are_pinned(self) -> None:
         self.assertEqual(EXPERIMENT_ID, "terminal-bench-2.1-verify-instruction-v1")
         self.assertEqual(

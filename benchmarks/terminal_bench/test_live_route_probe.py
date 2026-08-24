@@ -17,6 +17,7 @@ from harbor.models.trial.result import TrialResult
 from benchmarks.terminal_bench import live_route_probe as probe
 from benchmarks.terminal_bench import paired_results as paired
 from benchmarks.terminal_bench.experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     ENVIRONMENT_IMPORT,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_AGENT,
@@ -453,22 +454,33 @@ class ProbeFixture:
         now = datetime.now(timezone.utc)
         observed = now - (timedelta(hours=2) if expired else timedelta(minutes=10))
         expires = now - timedelta(hours=1) if expired else now + timedelta(hours=5)
+        stamp = lambda value: value.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
         self.cap.write_bytes(
             canonical_json(
                 {
-                    "schemaVersion": 1,
-                    "proofClass": "live-route-probe-spend-cap-v1",
+                    "schemaVersion": 2,
+                    "proofClass": "live-route-provider-authorization-v2",
+                    "experimentId": EXPERIMENT_ID,
                     "provider": self.provider,
                     "model": self.model,
                     "preflightSha256": self.binding["preflight_sha256"],
-                    "limitUsd": 2,
-                    "observedAt": observed.isoformat(),
-                    "expiresAt": expires.isoformat(),
-                    "evidenceSha256": "sha256:" + "6" * 64,
                     "providerCredentialSha256": paired._digest_bytes(
                         self.credential.read_bytes()
                     ),
-                    "assertedBy": "fixture operator",
+                    "providerControl": {
+                        "controlClass": "provider_hard_spend_cap_usd",
+                        "scope": "campaign",
+                        "limitUsd": 2,
+                        "observedAt": stamp(observed),
+                        "expiresAt": stamp(expires),
+                        "evidenceSha256": "sha256:" + "6" * 64,
+                        "sourceUrls": {
+                            "providerControl": "https://platform.deepseek.com/"
+                        },
+                        "assertedBy": "fixture operator",
+                    },
                     "verification": "operator_attested",
                 }
             )
@@ -656,6 +668,11 @@ class LiveRouteProbeTest(unittest.TestCase):
         self.assertFalse(receipt["benchmarkRewardUsed"])
         self.assertEqual(receipt["requestCount"], 2)
         self.assertEqual(receipt["pilotJob"]["config"], "configs/deepseek.yaml")
+        self.assertEqual(receipt["providerControl"]["limitUsd"], 2)
+        self.assertEqual(receipt["harborTrialRetries"], 0)
+        self.assertEqual(
+            receipt["codexProviderRetryPolicy"], dict(CODEX_PROVIDER_RETRY_POLICY)
+        )
         self.assertGreaterEqual(receipt["credentialLeakScan"]["directories"], 1)
         paired._probe_receipt_payloads(receipt, self.fixture.pilot_entry)
         self.assertEqual(output.read_bytes(), canonical_json(receipt))
@@ -675,7 +692,7 @@ class LiveRouteProbeTest(unittest.TestCase):
             self.fixture.verify(with_claim=False)
 
     def test_probe_gate_binds_credential_window_and_single_slot(self) -> None:
-        self.assertEqual(self.fixture.validate_cap()["limitUsd"], 2)
+        self.assertEqual(self.fixture.validate_cap()["providerControl"]["limitUsd"], 2)
         claims = list(self.fixture.authorizations.glob("deepseek.probe.*.claim.json"))
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0].stat().st_mode & 0o777, 0o600)
@@ -696,9 +713,11 @@ class LiveRouteProbeTest(unittest.TestCase):
 
         fixture = self._new_fixture()
         cap = json.loads(fixture.cap.read_text())
-        cap["expiresAt"] = (
-            datetime.now(timezone.utc) + timedelta(minutes=5)
-        ).isoformat()
+        cap["providerControl"]["expiresAt"] = (
+            (datetime.now(timezone.utc) + timedelta(minutes=5))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         fixture.cap.write_bytes(canonical_json(cap))
         with self.assertRaisesRegex(paired.IntegrityError, "relay lifetime"):
             fixture.validate_cap()
@@ -785,7 +804,7 @@ class LiveRouteProbeTest(unittest.TestCase):
 
         def replace_after_validation(*_args: object) -> tuple[UUID, str]:
             replacement = json.loads(validated)
-            replacement["assertedBy"] = "concurrent replacement"
+            replacement["providerControl"]["assertedBy"] = "concurrent replacement"
             self.fixture.cap.write_bytes(canonical_json(replacement))
             return self.fixture.job_id, paired._digest(self.fixture.probe_lock)
 
@@ -806,6 +825,19 @@ class LiveRouteProbeTest(unittest.TestCase):
         with self.assertRaisesRegex(paired.IntegrityError, "claim differs"):
             self.fixture.verify()
 
+        probe_trial = probe._probe_trial
+
+        def restore_before_trial(*args: object) -> object:
+            self.fixture.cap.write_bytes(validated)
+            return probe_trial(*args)
+
+        with (
+            patch.object(probe, "_probe_trial", side_effect=restore_before_trial),
+            self.assertRaisesRegex(paired.IntegrityError, "claim differs"),
+        ):
+            self.fixture.verify(self.fixture.authorization)
+        self.assertFalse(self.fixture.authorization.exists())
+
     def test_pilot_gate_requires_full_window_and_single_trial_slot(self) -> None:
         self.fixture.verify(self.fixture.authorization)
         self.fixture.validate_authorization()
@@ -814,7 +846,11 @@ class LiveRouteProbeTest(unittest.TestCase):
 
         fixture = self._new_fixture()
         cap = json.loads(fixture.cap.read_text())
-        cap["expiresAt"] = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        cap["providerControl"]["expiresAt"] = (
+            (datetime.now(timezone.utc) + timedelta(hours=3))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         fixture.cap.write_bytes(canonical_json(cap))
         fixture.verify(fixture.authorization)
         with self.assertRaisesRegex(paired.IntegrityError, "relay lifetime"):

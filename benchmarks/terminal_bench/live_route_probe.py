@@ -33,6 +33,7 @@ from .experiment_contract import (
     digest_bytes,
     is_digest,
     is_strict_int,
+    provider_control_window,
     relay_claim_name,
     same_json,
 )
@@ -46,15 +47,12 @@ from .paired_results import (
 _CAP_FIELDS = {
     "schemaVersion",
     "proofClass",
+    "experimentId",
     "provider",
     "model",
     "preflightSha256",
-    "limitUsd",
-    "observedAt",
-    "expiresAt",
-    "evidenceSha256",
     "providerCredentialSha256",
-    "assertedBy",
+    "providerControl",
     "verification",
 }
 _MAX_INPUT_BYTES = 64 * 1024
@@ -160,42 +158,37 @@ def _policy_layout(path: Path, provider: str, suffix: str) -> tuple[Path, Path]:
 def _cap_attestation(
     path: Path, provider: str, model: str, preflight_sha256: str
 ) -> tuple[dict[str, Any], str]:
-    raw = _bounded_file(path, "spend-cap attestation")
+    raw = _bounded_file(path, "provider authorization")
     try:
-        value = _loads(raw.decode(), "spend-cap attestation")
+        value = _loads(raw.decode(), "provider authorization")
     except (UnicodeError, ValueError) as error:
-        raise IntegrityError("spend-cap attestation is invalid") from error
-    cap = _mapping(value, "spend-cap attestation")
+        raise IntegrityError("provider authorization is invalid") from error
+    cap = _mapping(value, "provider authorization")
     if raw != canonical_json(cap):
-        raise IntegrityError("spend-cap attestation must be canonical JSON")
-    limit = cap.get("limitUsd")
-    asserted_by = cap.get("assertedBy")
+        raise IntegrityError("provider authorization must be canonical JSON")
     if (
         set(cap) != _CAP_FIELDS
         or not is_strict_int(cap.get("schemaVersion"))
-        or cap["schemaVersion"] != 1
-        or cap.get("proofClass") != "live-route-probe-spend-cap-v1"
+        or cap["schemaVersion"] != 2
+        or cap.get("proofClass") != "live-route-provider-authorization-v2"
+        or cap.get("experimentId") != EXPERIMENT_ID
         or cap.get("provider") != provider
         or cap.get("model") != model
         or cap.get("preflightSha256") != preflight_sha256
-        or not isinstance(limit, (int, float))
-        or isinstance(limit, bool)
-        or not 0 < float(limit) <= 2
-        or not is_digest(cap.get("evidenceSha256"))
         or not is_digest(cap.get("providerCredentialSha256"))
-        or not isinstance(asserted_by, str)
-        or not asserted_by.strip()
-        or len(asserted_by.encode()) > 256
         or cap.get("verification") != "operator_attested"
     ):
-        raise IntegrityError("spend-cap attestation policy drifted")
-    observed = _iso(cap.get("observedAt"), "spend-cap observedAt")
-    expires = _iso(cap.get("expiresAt"), "spend-cap expiresAt")
+        raise IntegrityError("provider authorization policy drifted")
+    try:
+        control, observed, expires = provider_control_window(
+            cap.get("providerControl"), provider
+        )
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("provider authorization policy drifted") from error
     now = datetime.now(timezone.utc)
-    if not observed <= now <= expires or not timedelta(
-        0
-    ) < expires - observed <= timedelta(hours=24):
-        raise IntegrityError("spend-cap attestation is expired or exceeds 24 hours")
+    if not observed <= now <= expires:
+        raise IntegrityError("provider authorization is not currently valid")
+    cap["providerControl"] = control
     return cap, digest_bytes(raw)
 
 
@@ -254,6 +247,7 @@ def _claimed_slot(
     provider: str,
     role: str,
     policy_path: Path,
+    expected_policy_sha256: str,
     job_dir: Path,
     job_id: UUID,
     trial_lock_sha256: str,
@@ -280,13 +274,14 @@ def _claimed_slot(
     except (UnicodeError, ValueError) as error:
         raise IntegrityError("authorization claim is invalid") from error
     claimed_at = _iso(claim.get("claimedAt"), "authorization claimedAt")
+    active_policy_sha256 = digest_bytes(
+        _bounded_file(policy_path, f"{role} authorization policy")
+    )
     expected = {
         "schemaVersion": 1,
         "proofClass": f"{role}-relay-slot-claim-v1",
         "provider": provider,
-        "policySha256": digest_bytes(
-            _bounded_file(policy_path, f"{role} authorization policy")
-        ),
+        "policySha256": expected_policy_sha256,
         "jobId": str(job_id),
         "jobDir": str(job_dir),
         "trialLockSha256": trial_lock_sha256,
@@ -296,6 +291,7 @@ def _claimed_slot(
         set(claim) != RELAY_CLAIM_FIELDS
         or raw != canonical_json(claim)
         or not is_strict_int(claim.get("schemaVersion"))
+        or active_policy_sha256 != expected_policy_sha256
         or not same_json(claim, expected)
         or not not_before <= claimed_at <= before
     ):
@@ -311,14 +307,14 @@ def validate_probe_cap(
     credential_file: Path,
     active_trial_dir: Path,
 ) -> dict[str, Any]:
-    """Validate the fixed cap immediately before the probe relay is opened."""
+    """Validate provider control immediately before the probe relay is opened."""
     cap_path, run_dir = _policy_layout(path, provider, ".cap.json")
     if (
         (run := LiveRouteRun.open(run_dir, provider)).model != model
         or binding != run.binding
         or run.probe.get("relayImageSha256") != binding.get("relay_image_sha256")
     ):
-        raise IntegrityError("spend-cap run binding drifted")
+        raise IntegrityError("provider authorization run binding drifted")
     cap, cap_sha256 = _cap_attestation(
         cap_path, provider, model, binding["preflight_sha256"]
     )
@@ -326,8 +322,10 @@ def validate_probe_cap(
         _credential_bytes(credential_file, "provider credential")
     )
     if cap.get("providerCredentialSha256") != credential_sha256:
-        raise IntegrityError("spend cap belongs to another provider credential")
-    _relay_window(cap["expiresAt"], LIVE_ROUTE_PROBE_LIMITS["ttlSeconds"])
+        raise IntegrityError("authorization belongs to another provider credential")
+    _relay_window(
+        cap["providerControl"]["expiresAt"], LIVE_ROUTE_PROBE_LIMITS["ttlSeconds"]
+    )
     job_id, trial_lock_sha256 = run.probe_job.claim_active_trial(active_trial_dir)
     _claim_slot(
         run_dir,
@@ -805,8 +803,8 @@ def verify_probe(
         Path(cap_attestation_file), provider, ".cap.json"
     )
     if cap_run_dir != run_dir:
-        raise IntegrityError("spend-cap attestation belongs to another prepared run")
-    cap, _ = _cap_attestation(
+        raise IntegrityError("provider authorization belongs to another prepared run")
+    cap, cap_sha256 = _cap_attestation(
         cap_path,
         provider,
         run.model,
@@ -816,19 +814,21 @@ def verify_probe(
     trial_dir, result, lock, agent_started, agent_finished, trial_finished = (
         _probe_trial(run, completed)
     )
-    cap_observed = _iso(cap["observedAt"], "spend-cap observedAt")
-    cap_expires = _iso(cap["expiresAt"], "spend-cap expiresAt")
+    control = _mapping(cap["providerControl"], "provider control")
+    cap_observed = _iso(control["observedAt"], "provider control observedAt")
+    cap_expires = _iso(control["expiresAt"], "provider control expiresAt")
     verified_at = datetime.now(timezone.utc)
     if not (
         cap_observed <= agent_started < agent_finished <= trial_finished <= cap_expires
         and verified_at <= cap_expires
     ):
-        raise IntegrityError("spend-cap attestation does not cover the probe window")
+        raise IntegrityError("provider authorization does not cover the probe window")
     claim_sha256 = _claimed_slot(
         run_dir,
         provider,
         "probe",
         cap_path,
+        cap_sha256,
         run.probe_job.job_dir,
         completed.result.id,
         canonical_digest(lock),
@@ -847,7 +847,7 @@ def verify_probe(
     )
     credential_sha256 = digest_bytes(credentials)
     if cap.get("providerCredentialSha256") != credential_sha256:
-        raise IntegrityError("spend cap belongs to another provider credential")
+        raise IntegrityError("authorization belongs to another provider credential")
     cleanup = _cleanup(
         run, completed, trial_dir, result, agent_finished, credential_sha256
     )
@@ -863,8 +863,8 @@ def verify_probe(
         if output_run_dir != run_dir:
             raise IntegrityError("authorization output belongs to another prepared run")
     receipt = {
-        "schemaVersion": 1,
-        "proofClass": "live-route-probe-v1",
+        "schemaVersion": 2,
+        "proofClass": "live-route-probe-v2",
         "provider": provider,
         "model": run.model,
         "sourceRevision": run.preflight["sourceRevision"],
@@ -884,16 +884,9 @@ def verify_probe(
         "requestCount": 2,
         "usage": totals,
         "credentialLeakScan": {"ok": True, **scan},
-        "spendCap": {
-            key: cap[key]
-            for key in (
-                "limitUsd",
-                "observedAt",
-                "expiresAt",
-                "evidenceSha256",
-                "assertedBy",
-            )
-        },
+        "providerControl": control,
+        "codexProviderRetryPolicy": dict(CODEX_PROVIDER_RETRY_POLICY),
+        "harborTrialRetries": completed.config.retry.max_retries,
         "pilotJob": {
             key: run.pilot[key]
             for key in (
@@ -911,12 +904,12 @@ def verify_probe(
         "probeFinishedAt": trial_finished.isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
         ),
-        "authorizationExpiresAt": cap["expiresAt"],
+        "authorizationExpiresAt": control["expiresAt"],
         "liveProviderRouteObserved": True,
         "liveProviderConformance": False,
         "benchmarkTaskInstructionUsed": False,
         "benchmarkRewardUsed": False,
-        "spendCapVerification": "operator_attested",
+        "providerControlVerification": cap["verification"],
         "benchmarkStartAuthorized": output_path is not None,
         "verifiedAt": verified_at.isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"

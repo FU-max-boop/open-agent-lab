@@ -20,7 +20,7 @@ import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
@@ -73,6 +73,7 @@ from .experiment_contract import (
     live_route_probe_config,
     live_route_probe_networks,
     live_route_probe_relay_command,
+    provider_control_window,
     relay_claim_name,
     same_json,
 )
@@ -86,7 +87,7 @@ from .relay_evidence import (
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:48bc9b7412e5f3e113faa80fd09e2309032d1f0415330a9520a84a8657a0969f"
+    "sha256:7d654cf7dea7a165d087de498159904778a046ab8617bc7c297b6944f738d11b"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -150,7 +151,9 @@ _PROBE_RECEIPT_FIELDS = frozenset(
         "requestCount",
         "usage",
         "credentialLeakScan",
-        "spendCap",
+        "providerControl",
+        "codexProviderRetryPolicy",
+        "harborTrialRetries",
         "pilotJob",
         "probeStartedAt",
         "probeFinishedAt",
@@ -159,7 +162,7 @@ _PROBE_RECEIPT_FIELDS = frozenset(
         "liveProviderConformance",
         "benchmarkTaskInstructionUsed",
         "benchmarkRewardUsed",
-        "spendCapVerification",
+        "providerControlVerification",
         "benchmarkStartAuthorized",
         "verifiedAt",
     }
@@ -2500,10 +2503,9 @@ def _job_agent_totals(agent_result: dict[str, Any]) -> dict[str, int | float | N
 
 def _probe_receipt_payloads(
     receipt: dict[str, Any], pilot: dict[str, Any]
-) -> tuple[datetime, datetime]:
+) -> tuple[datetime, datetime, dict[str, object]]:
     usage = _mapping(receipt.get("usage"), "probe receipt usage")
     scan = _mapping(receipt.get("credentialLeakScan"), "credential leak scan")
-    spend = _mapping(receipt.get("spendCap"), "probe spend cap")
     pilot_job = _mapping(receipt.get("pilotJob"), "probe pilot job")
     input_tokens = _integer(usage.get("input_tokens"), "probe input_tokens")
     output_tokens = _integer(usage.get("output_tokens"), "probe output_tokens")
@@ -2520,7 +2522,12 @@ def _probe_receipt_payloads(
         _integer(scan.get(field), f"credentialLeakScan.{field}")
         for field in ("files", "bytes", "directories")
     ]
-    limit = _number(spend.get("limitUsd"), "probe spend cap limit")
+    try:
+        control, observed, expires = provider_control_window(
+            receipt.get("providerControl"), str(receipt.get("provider"))
+        )
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("pilot authorization providerControl drifted") from error
     expected_pilot = {
         key: pilot[key]
         for key in (
@@ -2547,20 +2554,16 @@ def _probe_receipt_payloads(
         or set(scan) != {"ok", "files", "bytes", "directories"}
         or scan.get("ok") is not True
         or any(value > _MAX_SAFE_INTEGER for value in scan_counts)
-        or set(spend)
-        != {"limitUsd", "observedAt", "expiresAt", "evidenceSha256", "assertedBy"}
-        or not 0 < limit <= 2
-        or not is_digest(spend.get("evidenceSha256"))
-        or not isinstance(spend.get("assertedBy"), str)
-        or not spend["assertedBy"].strip()
+        or not _same_json(
+            receipt.get("codexProviderRetryPolicy"),
+            dict(CODEX_PROVIDER_RETRY_POLICY),
+        )
+        or not is_strict_int(receipt.get("harborTrialRetries"))
+        or receipt.get("harborTrialRetries") != 0
         or not _same_json(pilot_job, expected_pilot)
     ):
         raise IntegrityError("pilot authorization receipt payload drifted")
-    observed = _iso(spend.get("observedAt"), "probe spend cap observedAt")
-    expires = _iso(spend.get("expiresAt"), "probe spend cap expiresAt")
-    if not timedelta(0) < expires - observed <= timedelta(hours=24):
-        raise IntegrityError("pilot authorization receipt window drifted")
-    return observed, expires
+    return observed, expires, control
 
 
 def _validated_pilot_receipt(
@@ -2575,7 +2578,7 @@ def _validated_pilot_receipt(
     pilot_started: datetime,
     pilot_finished: datetime,
 ) -> tuple[str, datetime]:
-    observed, expires = _probe_receipt_payloads(receipt, pilot)
+    observed, expires, control = _probe_receipt_payloads(receipt, pilot)
     probe_started = _iso(receipt.get("probeStartedAt"), "probe startedAt")
     probe_finished = _iso(receipt.get("probeFinishedAt"), "probe finishedAt")
     verified = _iso(receipt.get("verifiedAt"), "probe verifiedAt")
@@ -2594,8 +2597,8 @@ def _validated_pilot_receipt(
     if (
         set(receipt) != _PROBE_RECEIPT_FIELDS
         or not is_strict_int(receipt.get("schemaVersion"))
-        or receipt.get("schemaVersion") != 1
-        or receipt.get("proofClass") != "live-route-probe-v1"
+        or receipt.get("schemaVersion") != 2
+        or receipt.get("proofClass") != "live-route-probe-v2"
         or receipt.get("provider") != provider
         or receipt.get("model") != model
         or receipt.get("sourceRevision") != binding["source_revision"]
@@ -2606,12 +2609,12 @@ def _validated_pilot_receipt(
         or any(not is_digest(receipt.get(field)) for field in digest_fields)
         or not is_strict_int(receipt.get("requestCount"))
         or receipt.get("requestCount") != 2
-        or receipt.get("authorizationExpiresAt") != receipt["spendCap"]["expiresAt"]
+        or receipt.get("authorizationExpiresAt") != control["expiresAt"]
         or receipt.get("liveProviderRouteObserved") is not True
         or receipt.get("liveProviderConformance") is not False
         or receipt.get("benchmarkTaskInstructionUsed") is not False
         or receipt.get("benchmarkRewardUsed") is not False
-        or receipt.get("spendCapVerification") != "operator_attested"
+        or receipt.get("providerControlVerification") != "operator_attested"
         or receipt.get("benchmarkStartAuthorized") is not True
         or not (
             not_before
