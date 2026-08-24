@@ -23,6 +23,7 @@ from benchmarks.terminal_bench.codex_runtime import (
     verify_tree,
 )
 from benchmarks.terminal_bench.experiment_contract import (
+    CODEX_PROVIDER_RETRY_POLICY,
     ENVIRONMENT_IMPORT,
     RUN_BINDING_KEYS,
     artifact_manifest,
@@ -470,6 +471,7 @@ def validate(
             "requested_developer_instructions_sha256": expected_variant[
                 "requested_developer_instructions_sha256"
             ],
+            **CODEX_PROVIDER_RETRY_POLICY,
         },
         "Agent variant metadata drifted.",
     )
