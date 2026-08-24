@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import shutil
 import tempfile
 import unittest
@@ -1472,6 +1473,43 @@ class PairedBootstrapTest(unittest.TestCase):
         self.assertGreater(positive["meanDeltaPercentagePoints"], 0.0)
         self.assertLess(negative["meanDeltaPercentagePoints"], 0.0)
 
+    def test_diluted_min_subnormal_is_scaled_before_public_conversion(self) -> None:
+        smallest = float.fromhex("0x0.0000000000001p-1022")
+        tasks = [f"task-{index}" for index in range(5)]
+
+        def bootstrap(control: float, treatment: float) -> dict[str, object]:
+            pairs = [
+                self.pair(task, pair_control, pair_treatment)
+                for task in tasks
+                for pair_control, pair_treatment in (
+                    (control, treatment),
+                    (0.0, 0.0),
+                )
+            ]
+            deltas = paired._task_reward_deltas(pairs, tasks)
+            self.assertEqual(float(sum(deltas) / len(deltas)), 0.0)
+            return paired._paired_reward_bootstrap(deltas)
+
+        positive = bootstrap(0.0, smallest)
+        negative = bootstrap(smallest, 0.0)
+        for result in (positive, negative):
+            self.assertIs(type(result["meanDeltaPercentagePoints"]), float)
+            self.assertTrue(
+                all(
+                    type(value) is float
+                    for value in result["confidenceIntervalPercentagePoints"]
+                )
+            )
+        expected = smallest * 50
+        self.assertEqual(positive["meanDeltaPercentagePoints"], expected)
+        self.assertEqual(
+            positive["confidenceIntervalPercentagePoints"], [expected, expected]
+        )
+        self.assertEqual(negative["meanDeltaPercentagePoints"], -expected)
+        self.assertEqual(
+            negative["confidenceIntervalPercentagePoints"], [-expected, -expected]
+        )
+
 
 class PrepareTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -2181,6 +2219,83 @@ class PairedResultsTest(unittest.TestCase):
                 summary["promotion"]["blockingReasons"],
             )
         self.assertFalse(summary["promotion"]["directionalCriteriaMet"])
+
+    def test_exact_reward_thresholds_control_promotion_gate(self) -> None:
+        tasks = [f"task-{index}" for index in range(5)]
+        threshold = 0.2
+        smallest = float.fromhex("0x0.0000000000001p-1022")
+        attempts = [
+            {
+                "replication": replication,
+                "telemetryComplete": True,
+                "costUsd": 0.0,
+                "topLevelException": None,
+                "failureClass": None,
+            }
+            for replication in ("screen-v1", "mirror-v1")
+        ]
+        manifest = {
+            "replications": [{"id": item["replication"]} for item in attempts],
+            "promotionRule": {
+                "meanPairedRewardDeltaMustExceed": 0,
+                "maximumMedianTokenOrWallTimeIncrease": 0.5,
+                "minimumRewardGainIfOverheadLimitExceeded": threshold,
+            },
+        }
+        overhead_blockers = {
+            f"{provider}_overhead_not_justified" for provider in paired._PROVIDERS
+        }
+        for deltas, overhead, public_mean, expected in (
+            ([threshold] * 10, 1.0, threshold, set()),
+            (
+                [threshold] * 9 + [math.nextafter(threshold, 0.0)],
+                1.0,
+                threshold,
+                overhead_blockers,
+            ),
+            ([smallest, 0.0] * 5, 0.0, 0.0, set()),
+        ):
+            with self.subTest(deltas=deltas):
+                pairs = [
+                    {
+                        "provider": provider,
+                        "task": tasks[index // 2],
+                        "reward": {
+                            "control": 0.0,
+                            "treatment": delta,
+                            "delta": delta,
+                        },
+                        "primaryTokenIncrease": overhead,
+                        "wallTimeIncrease": overhead,
+                    }
+                    for provider in paired._PROVIDERS
+                    for index, delta in enumerate(deltas)
+                ]
+                with (
+                    patch.object(paired, "_validate_global_uniqueness"),
+                    patch.object(paired, "_build_pairs", return_value=pairs),
+                ):
+                    summary = paired._summary(attempts, manifest, tasks)
+
+                observed = {
+                    reason
+                    for reason in summary["promotion"]["blockingReasons"]
+                    if reason != "development_experiment_never_promotable"
+                }
+                self.assertEqual(observed, expected)
+                self.assertEqual(
+                    summary["promotion"]["directionalCriteriaMet"], not expected
+                )
+                self.assertEqual(
+                    {
+                        (
+                            type(item["meanPairedRewardDelta"]),
+                            item["meanPairedRewardDelta"],
+                        )
+                        for item in summary["providerSummary"]
+                    },
+                    {(float, public_mean)},
+                )
 
     def test_missing_cost_is_public_and_blocks_complete_analysis(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
