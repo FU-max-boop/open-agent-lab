@@ -242,7 +242,7 @@
     "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:c14985b64285f3dc943592e1380e8ec36bbef438412ad72d4ef442405264f0fb",
     "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:1cfd1ecb7932515c46799bcece7b751682c17e611cd07e6e7a3b8ad0e4c55b3a",
     "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:e9fed1077a5f80323a65c087db59ce091ccec54eedf992bc0dcbb1b75f16b78e",
-    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:90614d275d905f91582e628e00f08ecba51d12754bcbfc381b1807ef673b9901",
+    "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:f69581c8a011838eaf57dbcb13f20e7d4d895a131534d39e8cfc6f74e25ac4a6",
     "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:6cb5fc5bd6922504e1d50b7c81ffd8018b479c6eb095af798fbf296ad6b079d0",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
   },
