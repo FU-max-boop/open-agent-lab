@@ -21,6 +21,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -84,7 +85,7 @@ from .relay_evidence import (
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:af9432d90262de6f8a63ebea0658915368f83ded9ebb35e7d132eb262012c02e"
+    "sha256:eb89cd7a94ec5194943feff1dc3ec34a9b2243e558f14486c476c91b03761cf8"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -3872,28 +3873,36 @@ def _build_pairs(
     return pairs
 
 
-def _task_reward_deltas(pairs: list[dict[str, Any]], tasks: list[str]) -> list[float]:
+def _task_reward_deltas(
+    pairs: list[dict[str, Any]], tasks: list[str]
+) -> list[Fraction]:
     deltas = []
     for task in tasks:
         task_pairs = [pair for pair in pairs if pair["task"] == task]
-        control = statistics.fmean(pair["reward"]["control"] for pair in task_pairs)
-        treatment = statistics.fmean(pair["reward"]["treatment"] for pair in task_pairs)
+        # Delay float rounding until the public task-normalized result boundary.
+        control = statistics.mean(
+            Fraction.from_float(pair["reward"]["control"]) for pair in task_pairs
+        )
+        treatment = statistics.mean(
+            Fraction.from_float(pair["reward"]["treatment"]) for pair in task_pairs
+        )
         deltas.append(treatment - control)
     return deltas
 
 
-def _paired_reward_bootstrap(task_deltas: list[float]) -> dict[str, Any]:
+def _paired_reward_bootstrap(task_deltas: list[Fraction]) -> dict[str, Any]:
     if not task_deltas:
         raise ValueError("paired bootstrap requires at least one task")
     rng = random.Random(_PAIRED_BOOTSTRAP_SEED)
     means = sorted(
-        statistics.fmean(
+        statistics.mean(
             task_deltas[rng.randrange(len(task_deltas))] for _ in task_deltas
         )
         for _ in range(_PAIRED_BOOTSTRAP_RESAMPLES)
     )
     lower = means[math.ceil(0.025 * len(means)) - 1]
     upper = means[math.ceil(0.975 * len(means)) - 1]
+    mean_delta = statistics.mean(task_deltas)
     return {
         "resamplingUnit": "task",
         "taskCount": len(task_deltas),
@@ -3902,8 +3911,8 @@ def _paired_reward_bootstrap(task_deltas: list[float]) -> dict[str, Any]:
         "sidedness": "two-sided",
         "resamples": _PAIRED_BOOTSTRAP_RESAMPLES,
         "seed": _PAIRED_BOOTSTRAP_SEED,
-        "meanDeltaPercentagePoints": 100 * statistics.fmean(task_deltas),
-        "confidenceIntervalPercentagePoints": [100 * lower, 100 * upper],
+        "meanDeltaPercentagePoints": float(100 * mean_delta),
+        "confidenceIntervalPercentagePoints": [float(100 * lower), float(100 * upper)],
     }
 
 
@@ -3925,6 +3934,12 @@ def _summary(
         blockers.append("mirrored_within_provider_replication_missing")
     if not telemetry_complete:
         blockers.append("attempt_telemetry_missing")
+    positive_threshold = Fraction(
+        manifest["promotionRule"]["meanPairedRewardDeltaMustExceed"]
+    )
+    overhead_threshold = Fraction(
+        manifest["promotionRule"]["minimumRewardGainIfOverheadLimitExceeded"]
+    )
     for provider in _PROVIDERS:
         own = [pair for pair in pairs if pair["provider"] == provider]
         deltas = [pair["reward"]["delta"] for pair in own]
@@ -3943,7 +3958,8 @@ def _summary(
             _median(token_values) if len(token_values) == len(own) else None
         )
         wall_overhead = _median(wall_values) if len(wall_values) == len(own) else None
-        mean_delta = statistics.fmean(task_deltas)
+        exact_mean_delta = statistics.mean(task_deltas)
+        mean_delta = float(exact_mean_delta)
         wins = sum(value > 0 for value in deltas)
         ties = sum(value == 0 for value in deltas)
         losses = sum(value < 0 for value in deltas)
@@ -3960,7 +3976,7 @@ def _summary(
                 "wallTimeCoveragePairs": len(wall_values),
             }
         )
-        if mean_delta <= manifest["promotionRule"]["meanPairedRewardDeltaMustExceed"]:
+        if exact_mean_delta <= positive_threshold:
             blockers.append(f"{provider}_mean_reward_delta_not_positive")
         limit = manifest["promotionRule"]["maximumMedianTokenOrWallTimeIncrease"]
         over_limit = any(
@@ -3968,11 +3984,7 @@ def _summary(
             for value in (token_overhead, wall_overhead)
             if value is not None
         )
-        if (
-            over_limit
-            and mean_delta
-            < manifest["promotionRule"]["minimumRewardGainIfOverheadLimitExceeded"]
-        ):
+        if over_limit and exact_mean_delta < overhead_threshold:
             blockers.append(f"{provider}_overhead_not_justified")
     directional_criteria_met = not blockers
     blockers.append("development_experiment_never_promotable")
