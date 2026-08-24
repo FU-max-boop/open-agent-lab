@@ -146,10 +146,12 @@ test("synthetic route probes reject an unbound source revision before inspecting
   );
 });
 
-test("repository revision rejects inherited Git metadata and dirty roots", async (t) => {
+test("repository revision isolates inherited Git metadata and rejects dirty roots", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "open-agent-lab-parent-repository-"));
+  const external = await mkdtemp(join(tmpdir(), "open-agent-lab-external-repository-"));
   const submodule = await mkdtemp(join(tmpdir(), "open-agent-lab-submodule-"));
   t.after(async () => rm(parent, { force: true, recursive: true }));
+  t.after(async () => rm(external, { force: true, recursive: true }));
   t.after(async () => rm(submodule, { force: true, recursive: true }));
   execFileSync("git", ["init", "--quiet"], { cwd: parent });
   await assert.rejects(cleanRepositoryRevision(parent), /current clean repository/u);
@@ -172,6 +174,50 @@ test("repository revision rejects inherited Git metadata and dirty roots", async
     cwd: parent,
     encoding: "utf8",
   }).trim();
+  await writeFile(join(external, ".gitignore"), "ignored/\n", "utf8");
+  execFileSync("git", ["init", "--quiet"], { cwd: external });
+  execFileSync("git", ["add", ".gitignore"], { cwd: external });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Open Agent Lab",
+      "-c",
+      "user.email=open-agent-lab@example.invalid",
+      "commit",
+      "--quiet",
+      "--message=external-fixture",
+    ],
+    { cwd: external },
+  );
+  const externalRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: external,
+    encoding: "utf8",
+  }).trim();
+  assert.notEqual(externalRevision, revision);
+  const poisonedEnvironment = {
+    ...process.env,
+    GIT_DIR: join(external, ".git"),
+    GIT_WORK_TREE: parent,
+  };
+  const poisonedSnapshot = execFileSync(
+    "git",
+    ["-C", parent, "status", "--porcelain=v2", "--branch", "--no-ahead-behind"],
+    { encoding: "utf8", env: poisonedEnvironment },
+  );
+  assert.ok(poisonedSnapshot.includes(`# branch.oid ${externalRevision}\n`));
+  const originalGitDir = process.env.GIT_DIR;
+  const originalGitWorkTree = process.env.GIT_WORK_TREE;
+  process.env.GIT_DIR = join(external, ".git");
+  process.env.GIT_WORK_TREE = parent;
+  try {
+    assert.equal(await cleanRepositoryRevision(parent), revision);
+  } finally {
+    if (originalGitDir === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = originalGitDir;
+    if (originalGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+    else process.env.GIT_WORK_TREE = originalGitWorkTree;
+  }
   const inherited = join(parent, "ignored", "source");
   await mkdir(inherited, { recursive: true });
 
