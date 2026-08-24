@@ -92,7 +92,7 @@ _POLICY_SHA256 = (
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
-_SUMMARY_SCHEMA_VERSION = 5
+_SUMMARY_SCHEMA_VERSION = 6
 _PAIRED_BOOTSTRAP_RESAMPLES = 10_000
 _PAIRED_BOOTSTRAP_SEED = 20260822
 _RELAY_REQUEST_CAP = 256
@@ -1017,7 +1017,7 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     arms = _sequence(manifest.get("arms"), "arms")
     if (
         _digest(manifest) != _POLICY_SHA256
-        or manifest.get("schemaVersion") != 2
+        or manifest.get("schemaVersion") != 3
         or manifest.get("experimentId") != EXPERIMENT_ID
         or manifest.get("runClass") != "development"
         or runtime.get("harborVersion") != _HARBOR_VERSION
@@ -1064,8 +1064,20 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
         != {
             "missingOfficialReward": "invalidates_analysis",
             "exceptionOrTimeout": ("scores_official_reward_and_remains_in_denominator"),
-            "missingTelemetry": ("preserved_as_null_and_blocks_complete_analysis"),
+            "missingRequiredTelemetry": (
+                "preserved_as_null_and_blocks_complete_analysis"
+            ),
+            "missingCostUsdTelemetry": (
+                "preserved_as_null_and_does_not_block_complete_analysis"
+            ),
             "rerunPolicy": "new_predeclared_experiment_only",
+        }
+        or manifest.get("costTelemetry")
+        != {
+            "provenance": "harbor_trial_result.agent_result.cost_usd",
+            "missingValuePolicy": "preserve_null",
+            "providerBillingProof": False,
+            "requiredForAnalysisComplete": False,
         }
     ):
         raise IntegrityError("experiment manifest policy drifted")
@@ -2456,7 +2468,6 @@ def _validate_agent_totals(
 
 def _telemetry_gaps(
     totals: dict[str, int | None] | None,
-    cost_usd: float | None,
     tool_calls: int | None,
     agent_wall: float | None,
     agent_tokens_complete: bool,
@@ -2471,8 +2482,6 @@ def _telemetry_gaps(
             for key in ("cached_input_tokens", "reasoning_output_tokens")
             if totals[key] is None
         )
-    if cost_usd is None:
-        gaps.append("cost_usd")
     if tool_calls is None:
         gaps.append("trajectory")
     elif not trajectory_metrics_complete:
@@ -2851,7 +2860,6 @@ def _attempt(
     )
     telemetry_missing = _telemetry_gaps(
         totals,
-        agent_totals["cost_usd"],
         tool_calls,
         agent_wall,
         agent_tokens_complete,
@@ -3809,6 +3817,23 @@ def _exception_counts(attempts: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _cost_coverage(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    coverage = []
+    for provider in _PROVIDERS:
+        own = [item for item in attempts if item["provider"] == provider]
+        reported = sum(item["costUsd"] is not None for item in own)
+        state = 0 if not reported else 2 if reported == len(own) else 1
+        coverage.append(
+            {
+                "provider": provider,
+                "availability": ("unavailable", "partial", "complete")[state],
+                "reportedAttempts": reported,
+                "totalAttempts": len(own),
+            }
+        )
+    return coverage
+
+
 def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
     for key in ("trialId", "relayRunId", "relayInstanceId"):
         values = [item[key] for item in attempts]
@@ -4046,8 +4071,13 @@ def _summary(
         "exceptionCounts": exception_counts,
         "telemetryCoverage": {
             "completeAttempts": sum(item["telemetryComplete"] for item in attempts),
-            "costUsdAttempts": sum(item["costUsd"] is not None for item in attempts),
             "totalAttempts": len(attempts),
+        },
+        "costTelemetry": {
+            "provenance": "harbor_trial_result.agent_result.cost_usd",
+            "missingValuePolicy": "preserve_null",
+            "providerBillingProof": False,
+            "coverage": _cost_coverage(attempts),
         },
         "attempts": [_clean_attempt(item) for item in attempts],
         "pairs": pairs,

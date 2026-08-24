@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "experimentId": "terminal-bench-2.1-verify-instruction-v1",
   "frozenAt": "2026-08-22",
   "runClass": "development",
@@ -203,8 +203,15 @@
   "failureScoring": {
     "missingOfficialReward": "invalidates_analysis",
     "exceptionOrTimeout": "scores_official_reward_and_remains_in_denominator",
-    "missingTelemetry": "preserved_as_null_and_blocks_complete_analysis",
+    "missingRequiredTelemetry": "preserved_as_null_and_blocks_complete_analysis",
+    "missingCostUsdTelemetry": "preserved_as_null_and_does_not_block_complete_analysis",
     "rerunPolicy": "new_predeclared_experiment_only"
+  },
+  "costTelemetry": {
+    "provenance": "harbor_trial_result.agent_result.cost_usd",
+    "missingValuePolicy": "preserve_null",
+    "providerBillingProof": false,
+    "requiredForAnalysisComplete": false
   },
   "analysis": {
     "path": "benchmarks/terminal_bench/paired_results.py",
@@ -252,7 +259,7 @@
     "task_level_paired_bootstrap_95ci",
     "win_tie_loss",
     "input_cache_output_reasoning_tokens",
-    "api_cost_usd",
+    "optional_harbor_agent_result_cost_usd",
     "responses_requests",
     "tool_calls",
     "wall_time",
