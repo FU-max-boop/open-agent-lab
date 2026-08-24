@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import yaml
 from harbor.environments.docker.docker import DockerEnvironment
@@ -294,10 +294,38 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             self.assertIsNotNone(selected)
             pinned = object.__new__(PinnedRelayDockerEnvironment)
             pinned._task_runtime = selected
+            cache_probe = [
+                "docker",
+                "image",
+                "ls",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                f"reference={authority['immutableImage']}",
+            ]
+            pull = [
+                "docker",
+                "pull",
+                "--quiet",
+                "--platform",
+                "linux/amd64",
+                authority["immutableImage"],
+            ]
+            inspect = [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}|{{.Os}}|{{.Architecture}}",
+                authority["immutableImage"],
+            ]
+            identity = f"{authority['imageConfigDigest']}|linux|amd64\n".encode()
+            wrong_config = "sha256:" + "5" * 64
             pinned._capture = AsyncMock(
                 side_effect=[
+                    b"",
                     b"pulled\n",
-                    f"{authority['imageConfigDigest']}|linux|amd64\n".encode(),
+                    identity,
                 ]
             )
             graph = {
@@ -315,17 +343,56 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                     "pull_policy": "never",
                 },
             )
-            pinned._capture.assert_any_await(
-                [
-                    "docker",
-                    "pull",
-                    "--quiet",
-                    "--platform",
-                    "linux/amd64",
-                    authority["immutableImage"],
-                ],
-                timeout=900,
+            self.assertEqual(
+                pinned._capture.await_args_list,
+                [call(cache_probe), call(pull, timeout=900), call(inspect)],
             )
+
+            graph["services"]["main"] = {"image": authority["declaredImage"]}
+            pinned._capture = AsyncMock(
+                side_effect=[f"{authority['imageConfigDigest']}\n".encode(), identity]
+            )
+            asyncio.run(pinned._pin_task_runtime(graph))
+            self.assertEqual(
+                pinned._capture.await_args_list,
+                [call(cache_probe), call(inspect)],
+            )
+
+            graph["services"]["main"] = {"image": authority["declaredImage"]}
+            pinned._capture = AsyncMock(
+                side_effect=[f"{wrong_config}\n".encode(), b"pulled\n", identity]
+            )
+            asyncio.run(pinned._pin_task_runtime(graph))
+            self.assertEqual(
+                pinned._capture.await_args_list,
+                [
+                    call(cache_probe),
+                    call(pull, timeout=900),
+                    call(inspect),
+                ],
+            )
+
+            for name, commands, message in (
+                ("list", [RuntimeError("daemon unavailable")], "daemon unavailable"),
+                (
+                    "identity",
+                    [
+                        b"",
+                        b"pulled\n",
+                        f"{wrong_config}|linux|arm64\n".encode(),
+                    ],
+                    "wrong identity",
+                ),
+            ):
+                with self.subTest(failure=name):
+                    graph["services"]["main"] = {"image": authority["declaredImage"]}
+                    pinned._capture = AsyncMock(side_effect=commands)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        asyncio.run(pinned._pin_task_runtime(graph))
+                    self.assertEqual(
+                        graph["services"]["main"],
+                        {"image": authority["declaredImage"]},
+                    )
 
             graph["services"]["main"]["image"] = "alexgshaw/example:latest"
             pinned._capture.reset_mock()
