@@ -826,9 +826,45 @@ def _pilot_authorization(
         )
 
     expires = base_start + timedelta(hours=5)
+    control = {
+        "scope": "campaign",
+        "observedAt": stamp(0),
+        "expiresAt": expires.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "evidenceSha256": "sha256:" + "b" * 64,
+        "assertedBy": "fixture operator",
+    }
+    if provider == "deepseek":
+        control.update(
+            {
+                "controlClass": "provider_hard_spend_cap_usd",
+                "limitUsd": 2,
+                "sourceUrls": {"providerControl": "https://platform.deepseek.com/"},
+            }
+        )
+    else:
+        control.update(
+            {
+                "controlClass": "coding_plan_subscription_quota_no_balance_deduction",
+                "baseUrl": "https://api.z.ai/api/v1",
+                "protocol": "openai_responses",
+                "plan": "zai_coding_plan",
+                "noBalanceDeduction": True,
+                "quotaSnapshot": {
+                    period: {"remainingPercent": remaining, "resetsAt": reset}
+                    for period, remaining, reset in (
+                        ("fiveHour", 80, stamp(6 * 60 * 60 * 1000)),
+                        ("weekly", 60, stamp(7 * 24 * 60 * 60 * 1000)),
+                    )
+                },
+                "sourceUrls": {
+                    "endpointProtocol": "https://docs.z.ai/devpack/tool/others",
+                    "providerControl": "https://docs.z.ai/devpack/faq",
+                },
+            }
+        )
     return {
-        "schemaVersion": 1,
-        "proofClass": "live-route-probe-v1",
+        "schemaVersion": 2,
+        "proofClass": "live-route-probe-v2",
         "provider": provider,
         "model": model,
         "sourceRevision": binding["source_revision"],
@@ -857,15 +893,9 @@ def _pilot_authorization(
             "bytes": 100,
             "directories": 1,
         },
-        "spendCap": {
-            "limitUsd": 2,
-            "observedAt": stamp(0),
-            "expiresAt": expires.isoformat(timespec="milliseconds").replace(
-                "+00:00", "Z"
-            ),
-            "evidenceSha256": "sha256:" + "b" * 64,
-            "assertedBy": "fixture operator",
-        },
+        "providerControl": control,
+        "codexProviderRetryPolicy": dict(paired.CODEX_PROVIDER_RETRY_POLICY),
+        "harborTrialRetries": 0,
         "pilotJob": {
             key: pilot[key]
             for key in (
@@ -886,7 +916,7 @@ def _pilot_authorization(
         "liveProviderConformance": False,
         "benchmarkTaskInstructionUsed": False,
         "benchmarkRewardUsed": False,
-        "spendCapVerification": "operator_attested",
+        "providerControlVerification": "operator_attested",
         "benchmarkStartAuthorized": True,
         "verifiedAt": stamp(300),
     }
@@ -2109,7 +2139,7 @@ class PairedResultsTest(unittest.TestCase):
             paired.summarize([screen.root])
 
     def test_pilot_claim_cannot_bless_invalid_probe_receipts(self) -> None:
-        for mutation in ("junk", "expired", "probe-config"):
+        for mutation in ("junk", "expired", "probe-config", "retry-policy"):
             with self.subTest(mutation=mutation):
                 case_root = self.root / mutation
                 case_root.mkdir()
@@ -2118,10 +2148,12 @@ class PairedResultsTest(unittest.TestCase):
                 authorization = screen.root / "authorizations" / f"{provider}.json"
                 receipt = json.loads(authorization.read_text())
                 if mutation == "junk":
-                    receipt.pop("benchmarkStartAuthorized")
+                    receipt.pop("harborTrialRetries")
                 elif mutation == "expired":
-                    receipt["spendCap"]["expiresAt"] = "2026-08-22T00:00:05Z"
+                    receipt["providerControl"]["expiresAt"] = "2026-08-22T00:00:05Z"
                     receipt["authorizationExpiresAt"] = "2026-08-22T00:00:05Z"
+                elif mutation == "retry-policy":
+                    receipt["codexProviderRetryPolicy"]["request_max_retries"] = 1
                 else:
                     receipt["configSha256"] = "sha256:" + "f" * 64
                 _write_private(authorization, receipt)

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
@@ -61,6 +62,26 @@ CODEX_PROVIDER_RETRY_POLICY = MappingProxyType(
         "request_max_retries": 0,
         "stream_max_retries": 0,
         "unbounded_connection_retries": False,
+    }
+)
+DEEPSEEK_PROVIDER_CONTROL_SOURCES = MappingProxyType(
+    {"providerControl": "https://platform.deepseek.com/"}
+)
+ZAI_PROVIDER_CONTROL_SOURCES = MappingProxyType(
+    {
+        "endpointProtocol": "https://docs.z.ai/devpack/tool/others",
+        "providerControl": "https://docs.z.ai/devpack/faq",
+    }
+)
+_PROVIDER_CONTROL_COMMON_FIELDS = frozenset(
+    {
+        "controlClass",
+        "scope",
+        "observedAt",
+        "expiresAt",
+        "evidenceSha256",
+        "sourceUrls",
+        "assertedBy",
     }
 )
 LIVE_ROUTE_PROBE_COMMAND = """test -z "${DEEPSEEK_API_KEY+x}" && \\
@@ -159,6 +180,96 @@ def is_revision(value: object) -> bool:
 
 def is_strict_int(value: object) -> bool:
     return type(value) is int
+
+
+def provider_control(value: object, provider: str) -> dict[str, object]:
+    """Validate and copy the exact provider-specific launch-control union."""
+    if not isinstance(value, dict):
+        raise TypeError("providerControl must be an object")
+    asserted_by = value.get("assertedBy")
+    common_invalid = (
+        value.get("scope") != "campaign"
+        or not is_digest(value.get("evidenceSha256"))
+        or not isinstance(asserted_by, str)
+        or not asserted_by.strip()
+        or len(asserted_by.encode()) > 256
+    )
+    if provider == "deepseek":
+        limit = value.get("limitUsd")
+        invalid = (
+            set(value) != _PROVIDER_CONTROL_COMMON_FIELDS | {"limitUsd"}
+            or value.get("controlClass") != "provider_hard_spend_cap_usd"
+            or value.get("sourceUrls") != dict(DEEPSEEK_PROVIDER_CONTROL_SOURCES)
+            or type(limit) not in (int, float)
+            or not 0 < limit <= 2
+        )
+    elif provider == "zai":
+        quota = value.get("quotaSnapshot")
+        invalid = (
+            set(value)
+            != _PROVIDER_CONTROL_COMMON_FIELDS
+            | {"baseUrl", "protocol", "plan", "noBalanceDeduction", "quotaSnapshot"}
+            or value.get("controlClass")
+            != "coding_plan_subscription_quota_no_balance_deduction"
+            or value.get("baseUrl") != "https://api.z.ai/api/v1"
+            or value.get("protocol") != "openai_responses"
+            or value.get("plan") != "zai_coding_plan"
+            or value.get("noBalanceDeduction") is not True
+            or value.get("sourceUrls") != dict(ZAI_PROVIDER_CONTROL_SOURCES)
+            or not isinstance(quota, dict)
+            or set(quota) != {"fiveHour", "weekly"}
+        )
+        if not invalid:
+            for period in ("fiveHour", "weekly"):
+                snapshot = quota[period]
+                remaining = (
+                    snapshot.get("remainingPercent")
+                    if isinstance(snapshot, dict)
+                    else None
+                )
+                if (
+                    not isinstance(snapshot, dict)
+                    or set(snapshot) != {"remainingPercent", "resetsAt"}
+                    or type(remaining) not in (int, float)
+                    or not 0 < remaining <= 100
+                ):
+                    invalid = True
+                    break
+    else:
+        raise ValueError("unknown providerControl provider")
+    if common_invalid or invalid:
+        raise ValueError("providerControl policy drifted")
+    return json.loads(canonical_json(value))
+
+
+def provider_control_window(
+    value: object, provider: str
+) -> tuple[dict[str, object], datetime, datetime]:
+    """Validate the bounded UTC window, including ZAI quota reset coverage."""
+    control = provider_control(value, provider)
+
+    def utc(field: str, source: dict[str, object] = control) -> datetime:
+        raw = source.get(field)
+        if not isinstance(raw, str) or not raw.endswith("Z"):
+            raise ValueError(f"providerControl {field} must be UTC")
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"providerControl {field} must be UTC") from error
+        if parsed.utcoffset() != timedelta(0):
+            raise ValueError(f"providerControl {field} must be UTC")
+        return parsed
+
+    observed, expires = utc("observedAt"), utc("expiresAt")
+    if not timedelta(0) < expires - observed <= timedelta(hours=24):
+        raise ValueError("providerControl window must be positive and at most 24 hours")
+    if provider == "zai":
+        quota = control["quotaSnapshot"]
+        for period in ("fiveHour", "weekly"):
+            reset = utc("resetsAt", quota[period])
+            if not expires < reset:
+                raise ValueError("providerControl expiresAt must precede quota reset")
+    return control, observed, expires
 
 
 def artifact_manifest() -> list[dict[str, str | None]]:
