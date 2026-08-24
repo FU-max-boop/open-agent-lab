@@ -21,6 +21,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -3872,28 +3873,36 @@ def _build_pairs(
     return pairs
 
 
-def _task_reward_deltas(pairs: list[dict[str, Any]], tasks: list[str]) -> list[float]:
+def _task_reward_deltas(
+    pairs: list[dict[str, Any]], tasks: list[str]
+) -> list[Fraction]:
     deltas = []
     for task in tasks:
         task_pairs = [pair for pair in pairs if pair["task"] == task]
-        control = statistics.fmean(pair["reward"]["control"] for pair in task_pairs)
-        treatment = statistics.fmean(pair["reward"]["treatment"] for pair in task_pairs)
+        # Delay float rounding until the public task-normalized result boundary.
+        control = statistics.mean(
+            Fraction.from_float(pair["reward"]["control"]) for pair in task_pairs
+        )
+        treatment = statistics.mean(
+            Fraction.from_float(pair["reward"]["treatment"]) for pair in task_pairs
+        )
         deltas.append(treatment - control)
     return deltas
 
 
-def _paired_reward_bootstrap(task_deltas: list[float]) -> dict[str, Any]:
+def _paired_reward_bootstrap(task_deltas: list[Fraction]) -> dict[str, Any]:
     if not task_deltas:
         raise ValueError("paired bootstrap requires at least one task")
     rng = random.Random(_PAIRED_BOOTSTRAP_SEED)
     means = sorted(
-        statistics.fmean(
+        statistics.mean(
             task_deltas[rng.randrange(len(task_deltas))] for _ in task_deltas
         )
         for _ in range(_PAIRED_BOOTSTRAP_RESAMPLES)
     )
     lower = means[math.ceil(0.025 * len(means)) - 1]
     upper = means[math.ceil(0.975 * len(means)) - 1]
+    mean_delta = float(statistics.mean(task_deltas))
     return {
         "resamplingUnit": "task",
         "taskCount": len(task_deltas),
@@ -3902,8 +3911,8 @@ def _paired_reward_bootstrap(task_deltas: list[float]) -> dict[str, Any]:
         "sidedness": "two-sided",
         "resamples": _PAIRED_BOOTSTRAP_RESAMPLES,
         "seed": _PAIRED_BOOTSTRAP_SEED,
-        "meanDeltaPercentagePoints": 100 * statistics.fmean(task_deltas),
-        "confidenceIntervalPercentagePoints": [100 * lower, 100 * upper],
+        "meanDeltaPercentagePoints": 100 * mean_delta,
+        "confidenceIntervalPercentagePoints": [float(100 * lower), float(100 * upper)],
     }
 
 
@@ -3943,7 +3952,7 @@ def _summary(
             _median(token_values) if len(token_values) == len(own) else None
         )
         wall_overhead = _median(wall_values) if len(wall_values) == len(own) else None
-        mean_delta = statistics.fmean(task_deltas)
+        mean_delta = float(statistics.mean(task_deltas))
         wins = sum(value > 0 for value in deltas)
         ties = sum(value == 0 for value in deltas)
         losses = sum(value < 0 for value in deltas)

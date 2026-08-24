@@ -1462,6 +1462,16 @@ class PairedBootstrapTest(unittest.TestCase):
         self.assertEqual(zero["meanDeltaPercentagePoints"], 0.0)
         self.assertEqual(zero["confidenceIntervalPercentagePoints"], [0.0, 0.0])
 
+        step = 2**-53
+        positive = paired._paired_reward_bootstrap(
+            paired._task_reward_deltas([self.pair("task", 0.5, 0.5 + step)], ["task"])
+        )
+        negative = paired._paired_reward_bootstrap(
+            paired._task_reward_deltas([self.pair("task", 0.5 + step, 0.5)], ["task"])
+        )
+        self.assertGreater(positive["meanDeltaPercentagePoints"], 0.0)
+        self.assertLess(negative["meanDeltaPercentagePoints"], 0.0)
+
 
 class PrepareTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -2126,6 +2136,51 @@ class PairedResultsTest(unittest.TestCase):
                 ],
                 0,
             )
+
+    def test_exact_zero_task_mean_does_not_pass_directional_gate(self) -> None:
+        rewards = (
+            ((0.2, 0.3), (0.0, 0.4)),
+            ((0.5, 0.0), (0.9, 0.1)),
+            ((0.7, 0.3), (0.3, 1.0)),
+            ((0.2, 0.1), (0.0, 0.3)),
+            ((0.0, 0.1), (0.1, 0.3)),
+        )
+        screen = RunFixture(self.root, "screen-v1")
+        mirror = RunFixture(self.root, "mirror-v1")
+        changed_jobs: set[Path] = set()
+        for task, task_rewards in zip(screen.tasks, rewards):
+            for fixture, (control, treatment) in zip((screen, mirror), task_rewards):
+                for provider in paired._PROVIDERS:
+                    for variant, reward in (
+                        ("control-v1", control),
+                        ("verify-instruction-v1", treatment),
+                    ):
+                        trial = fixture.trials[(provider, task, variant)]
+                        result_path = trial / "result.json"
+                        result = json.loads(result_path.read_text())
+                        result["verifier_result"]["rewards"]["reward"] = reward
+                        _write_trial_result(result_path, result)
+                        changed_jobs.add(trial.parent)
+        for job_dir in changed_jobs:
+            _refresh_job_result(job_dir)
+
+        summary = paired.summarize([screen.root, mirror.root])
+
+        for provider in summary["providerSummary"]:
+            self.assertEqual(provider["meanPairedRewardDelta"], 0.0)
+            self.assertEqual(
+                provider["pairedRewardBootstrap"]["meanDeltaPercentagePoints"],
+                0.0,
+            )
+            self.assertEqual(
+                provider["pairedRewardBootstrap"]["confidenceIntervalPercentagePoints"],
+                [-33.0, 20.0],
+            )
+            self.assertIn(
+                f"{provider['provider']}_mean_reward_delta_not_positive",
+                summary["promotion"]["blockingReasons"],
+            )
+        self.assertFalse(summary["promotion"]["directionalCriteriaMet"])
 
     def test_missing_cost_is_public_and_blocks_complete_analysis(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
