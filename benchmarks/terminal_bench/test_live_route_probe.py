@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -650,13 +651,46 @@ class ProbeFixture:
                 output,
             )
 
-    def validate_authorization(self) -> dict[str, object]:
+    def validate_authorization(self, *, scheduled: bool = True) -> dict[str, object]:
         pilot_job = self.root / self.pilot_entry["jobDir"]
         pilot_compose = self.root / self.pilot_entry["compose"]
+        trial_lock_sha256 = "sha256:" + "a" * 64
+        admission_path = probe.pilot_scheduler_admission_path(
+            self.root, self.provider, trial_lock_sha256
+        )
+        if scheduled:
+            _write(
+                admission_path,
+                {
+                    "schemaVersion": 1,
+                    "proofClass": "sequential-pilot-trial-admission-v1",
+                    "experimentId": EXPERIMENT_ID,
+                    "planSha256": "sha256:" + "b" * 64,
+                    "ordinal": 1,
+                    "replicationId": self.binding["replication_id"],
+                    "provider": self.provider,
+                    "model": self.model,
+                    "preflightSha256": self.binding["preflight_sha256"],
+                    "jobId": str(UUID(int=102)),
+                    "jobDir": str(pilot_job),
+                    "trialLockSha256": trial_lock_sha256,
+                    "previousCheckpointSha256": None,
+                    "admittedAt": datetime.now(timezone.utc)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z"),
+                },
+            )
+            os.chmod(admission_path, 0o600)
+            admission = probe.active_pilot_scheduler_admission(
+                paired._digest_bytes(admission_path.read_bytes())
+            )
+        else:
+            admission = nullcontext()
         probes = json.loads((self.root / "run-record.json").read_text())[
             "liveRouteProbes"
         ]
         with (
+            admission,
             patch.object(
                 paired,
                 "_manifest",
@@ -685,7 +719,7 @@ class ProbeFixture:
             patch.object(
                 paired.PreparedJob,
                 "claim_active_trial",
-                return_value=(UUID(int=102), "sha256:" + "a" * 64),
+                return_value=(UUID(int=102), trial_lock_sha256),
             ),
         ):
             return probe.validate_pilot_authorization(
@@ -1121,6 +1155,16 @@ class LiveRouteProbeTest(unittest.TestCase):
         fixture.verify(fixture.authorization)
         with self.assertRaisesRegex(paired.IntegrityError, "relay lifetime"):
             fixture.validate_authorization()
+
+    def test_direct_harbor_pilot_bypass_lacks_scheduler_admission(self) -> None:
+        self.fixture.verify(self.fixture.authorization)
+        with self.assertRaisesRegex(
+            paired.IntegrityError, "project-owned sequential launcher"
+        ):
+            self.fixture.validate_authorization(scheduled=False)
+        self.assertEqual(
+            list(self.fixture.authorizations.glob("deepseek.pilot.*.claim.json")), []
+        )
 
     def test_unpublished_or_misplaced_receipt_never_authorizes_a_pilot(self) -> None:
         self.assertFalse(self.fixture.verify()["benchmarkStartAuthorized"])

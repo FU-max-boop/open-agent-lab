@@ -228,8 +228,9 @@ independent provider-side proof. Their exact v2 shapes are:
 The resulting probe receipt is a frozen-gate audit record, not independent
 evidence or a proof against a malicious operator.
 
-The only permitted execution order is probe, verification/receipt publication,
-then pilot. For DeepSeek, for example:
+The only permitted execution order is preparation of both roots, all four
+probe/verification receipts, then the project-owned sequential pilot launcher.
+For a DeepSeek probe, for example:
 
 ```bash
 export OAL_DEEPSEEK_API_KEY_FILE="/run/open-agent-lab/deepseek-key"
@@ -248,20 +249,31 @@ python -m benchmarks.terminal_bench.live_route_probe \
   --cap-attestation-file \
     /absolute/path/to/oal-screen/authorizations/deepseek.cap.json \
   --output /absolute/path/to/oal-screen/authorizations/deepseek.json
-harbor jobs start \
-  --config /absolute/path/to/oal-screen/configs/deepseek.yaml \
-  --yes
 ```
 
-Use `OAL_ZAI_API_KEY_FILE`, `zai`, and the corresponding ZAI paths for GLM.
-Repeat the complete sequence for the separately prepared mirror; receipts and
-provider authorizations cannot be reused across runs. Missing, stale, misplaced,
-rewritten, or cross-run receipts fail before the first scored pilot provider
-request. The gate also creates a private, one-shot claim for each planned
-task/arm slot before opening its relay. An interrupted claimed slot stays
-closed; prepare a fresh output root instead of deleting or rewriting a claim.
-The probe observes a bounded live route and model identity only; its receipt
-sets `liveProviderConformance` to `false` and is not a benchmark score.
+Use `OAL_ZAI_API_KEY_FILE`, `zai`, and the corresponding ZAI paths for GLM,
+and publish separate DeepSeek and Z.AI receipts for both screen and mirror.
+Only after all four receipts exist, launch the scored campaign once:
+
+```bash
+python -m benchmarks.terminal_bench.pilot_launcher \
+  /absolute/path/to/oal-screen \
+  /absolute/path/to/oal-mirror
+```
+
+The launcher preserves four logical Harbor jobs of ten trials while admitting
+exactly one trial at a time in ordinals 01 through 40. Before every
+`Trial.create`, it requires the preceding sealed relay checkpoint, and it stops
+without a retry if required usage is unknown or a provider/campaign output-token
+limit is reached. Completed checkpoints resume as one contiguous prefix after a
+host interruption; a claimed slot without a complete checkpoint is never run
+again. Direct `harbor jobs start` of either scored config deliberately fails
+before relay authorization and therefore before a provider fetch. Receipts and
+provider authorizations cannot be reused across roots. Missing, stale,
+misplaced, rewritten, or cross-run receipts fail before the first scored pilot
+provider request. The probe observes a bounded live route and model identity
+only; its receipt sets `liveProviderConformance` to `false` and is not a
+benchmark score.
 
 To inspect the screen alone, produce a deterministic redacted partial diagnostic.
 It exits 0 only when the screen evidence is valid; without the separately

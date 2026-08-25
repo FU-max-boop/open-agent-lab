@@ -1035,7 +1035,7 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     arms = _sequence(manifest.get("arms"), "arms")
     if (
         _digest(manifest) != _POLICY_SHA256
-        or not _same_json(manifest.get("schemaVersion"), 4)
+        or not _same_json(manifest.get("schemaVersion"), 5)
         or manifest.get("experimentId") != EXPERIMENT_ID
         or manifest.get("runClass") != "development"
         or runtime.get("harborVersion") != _HARBOR_VERSION
@@ -1078,6 +1078,23 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
                     "maxRequests": LIVE_ROUTE_PROBE_LIMITS["maxRequests"],
                 },
                 "routeProbeUsageIncludedInScoredBudget": False,
+            },
+        )
+        or not _same_json(
+            runtime.get("scoredLauncher"),
+            {
+                "module": "benchmarks.terminal_bench.pilot_launcher",
+                "logicalJobs": 4,
+                "trialsPerJob": 10,
+                "groupOrder": [
+                    "screen-v1/deepseek",
+                    "screen-v1/zai",
+                    "mirror-v1/deepseek",
+                    "mirror-v1/zai",
+                ],
+                "admissionBarrier": ("previous_sealed_checkpoint_before_trial_create"),
+                "directHarborJobsStartAllowed": False,
+                "resumePolicy": ("contiguous_completed_prefix_no_claimed_slot_rerun"),
             },
         )
         or runtime.get("taskOrder") != list(_TASKS)

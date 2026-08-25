@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "experimentId": "terminal-bench-2.1-verify-instruction-v1",
   "frozenAt": "2026-08-22",
   "runClass": "development",
@@ -104,6 +104,20 @@
         "maxRequests": 2
       },
       "routeProbeUsageIncludedInScoredBudget": false
+    },
+    "scoredLauncher": {
+      "module": "benchmarks.terminal_bench.pilot_launcher",
+      "logicalJobs": 4,
+      "trialsPerJob": 10,
+      "groupOrder": [
+        "screen-v1/deepseek",
+        "screen-v1/zai",
+        "mirror-v1/deepseek",
+        "mirror-v1/zai"
+      ],
+      "admissionBarrier": "previous_sealed_checkpoint_before_trial_create",
+      "directHarborJobsStartAllowed": false,
+      "resumePolicy": "contiguous_completed_prefix_no_claimed_slot_rerun"
     },
     "hermeticCodexRuntimeReady": true,
     "taskOrder": [

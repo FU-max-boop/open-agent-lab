@@ -88,6 +88,7 @@ jobs:
             benchmarks/terminal_bench/harbor_environment.py \
             benchmarks/terminal_bench/live_route_probe.py \
             benchmarks/terminal_bench/paired_results.py \
+            benchmarks/terminal_bench/pilot_launcher.py \
             benchmarks/terminal_bench/relay_evidence.py \
             benchmarks/terminal_bench/test_harbor_agent.py \
             benchmarks/terminal_bench/test_codex_model_catalog.py \
@@ -139,6 +140,7 @@ jobs:
             benchmarks.terminal_bench.test_harbor_environment \
             benchmarks.terminal_bench.test_live_route_probe \
             benchmarks.terminal_bench.test_paired_results \
+            benchmarks.terminal_bench.test_pilot_launcher \
             benchmarks.terminal_bench.test_relay_evidence \
             benchmarks.terminal_bench.test_validate_harbor_install_only
 
