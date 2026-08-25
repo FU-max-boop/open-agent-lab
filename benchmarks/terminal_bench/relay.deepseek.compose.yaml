@@ -27,6 +27,8 @@ services:
       - "14400"
       - --max-requests
       - "256"
+      - --budget-class
+      - scored_slot
       - --build-id-file
       - /app/relay-build-id
     environment:

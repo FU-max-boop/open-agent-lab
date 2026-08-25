@@ -12,7 +12,11 @@ import type {
 import { canonicalJson } from "@open-agent-lab/contracts";
 import { sha256 } from "@open-agent-lab/evidence";
 
-import { SseMetadataObserver, type ResponseMetadata } from "./responses-metadata.js";
+import {
+  SseMetadataObserver,
+  type ResponseMetadata,
+  type ToolOutputContinuationBinding,
+} from "./responses-metadata.js";
 import {
   Codex149SecretGuard,
   ResponsesSseParser,
@@ -25,6 +29,12 @@ import {
   writeRelaySeal,
   type RelaySealSummary,
 } from "./relay-evidence.js";
+import {
+  OutputBudgetInputError,
+  ResponsesOutputBudgetLedger,
+  type OutputBudgetAdmission,
+  type OutputBudgetClass,
+} from "./responses-output-budget.js";
 
 export { verifyRelayJournal, verifyRelaySeal } from "./relay-evidence.js";
 export type { RelaySealSummary } from "./relay-evidence.js";
@@ -46,6 +56,7 @@ export interface NativeResponsesRelayOptions {
   providerId: string;
   buildId: string;
   expectedModel: string;
+  budgetClass: OutputBudgetClass;
   upstreamResponsesUrl: string;
   upstreamBearer: string;
   clientBearer: string;
@@ -128,6 +139,8 @@ function redactedResponseMetadata(parseErrors: number): ResponseMetadata {
     modelSources: {},
     systemFingerprint: null,
     terminalEvent: null,
+    terminalStatus: null,
+    incompleteReason: null,
     usage: null,
     metadataConflicts: [],
     parseErrors,
@@ -163,7 +176,10 @@ async function requestBody(request: IncomingMessage, limit: number): Promise<Buf
   return Buffer.concat(chunks, bytes);
 }
 
-function normalizedRequestBody(body: Buffer, expectedModel: string): Buffer {
+function normalizedRequestBody(
+  body: Buffer,
+  expectedModel: string,
+): { request: Record<string, unknown>; requestedMaxOutputTokens: unknown } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
@@ -177,10 +193,29 @@ function normalizedRequestBody(body: Buffer, expectedModel: string): Buffer {
     throw new RelayHttpError(400, "unsupported_response_mode");
   }
   try {
-    return Buffer.from(canonicalJson(parsed));
+    canonicalJson(parsed);
   } catch {
     throw new RelayHttpError(400, "invalid_json");
   }
+  return {
+    request: parsed,
+    requestedMaxOutputTokens:
+      Object.hasOwn(parsed, "max_output_tokens") ? parsed.max_output_tokens : null,
+  };
+}
+
+function isToolOutputContinuation(
+  request: Record<string, unknown>,
+  expected: ToolOutputContinuationBinding | null,
+): boolean {
+  if (expected === null || !Array.isArray(request.input) || request.input.length !== 1) {
+    return false;
+  }
+  const item = request.input[0];
+  return isObject(item) &&
+    item.type === expected.type &&
+    item.call_id === expected.callId &&
+    typeof item.output === "string";
 }
 
 function writeError(response: ServerResponse, error: RelayHttpError): void {
@@ -338,10 +373,11 @@ export async function startNativeResponsesRelay(
   }
   const fetchImpl = options.fetchImpl ?? fetch;
   const journal = await RelayJournal.create(options.sidecarPath);
+  const outputBudget = new ResponsesOutputBudgetLedger(options.budgetClass);
   const relayInstanceId = randomUUID();
   const sealPath = `${options.sidecarPath}.sealed`;
   const identity = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     relayVersion: RELAY_VERSION,
     runId: options.runId,
     relayInstanceId,
@@ -353,6 +389,7 @@ export async function startNativeResponsesRelay(
   const inFlight = new Set<Promise<void>>();
   const rejectedRequests: Record<string, number> = {};
   let accepted = 0;
+  let expectedToolContinuation: ToolOutputContinuationBinding | null = null;
   let active = 0;
   let queuedFlight: QueuedFlight | undefined;
   let closing = false;
@@ -441,10 +478,6 @@ export async function startNativeResponsesRelay(
         }
 
         await acquireFlight(request, response);
-        if (accepted >= limits.maxRequests) {
-          releaseFlight();
-          throw new RelayHttpError(429, "request_quota_exceeded");
-        }
         requests.add(request);
         const startedAt = clock();
         const relayRequestId = randomUUID();
@@ -485,13 +518,10 @@ export async function startNativeResponsesRelay(
         response.once("close", clientClosed);
 
         try {
-          const body = normalizedRequestBody(
+          const normalized = normalizedRequestBody(
             await requestBody(request, limits.maxRequestBytes),
             options.expectedModel,
           );
-          if (body.length > limits.maxRequestBytes) {
-            throw new RelayHttpError(413, "request_too_large");
-          }
           const rawClientRequestId = request.headers["x-client-request-id"];
           const clientRequestId = safeString(rawClientRequestId);
           const turnStateValues = request.headersDistinct[TURN_STATE_HEADER];
@@ -509,6 +539,47 @@ export async function startNativeResponsesRelay(
           ) {
             throw new RelayHttpError(400, "invalid_turn_state");
           }
+          if (Buffer.byteLength(canonicalJson(normalized.request)) > limits.maxRequestBytes) {
+            throw new RelayHttpError(413, "request_too_large");
+          }
+          let admission: OutputBudgetAdmission;
+          try {
+            admission = outputBudget.admit(
+              accepted + 1,
+              normalized.requestedMaxOutputTokens,
+            );
+          } catch (error) {
+            if (!(error instanceof OutputBudgetInputError)) throw error;
+            if (options.budgetClass !== "unmetered_route_probe") {
+              outputBudget.poison(error.code);
+            }
+            throw new RelayHttpError(400, error.code);
+          }
+          if (admission.kind === "rejected") {
+            if (
+              admission.code !== "slot_output_budget_exhausted" ||
+              !isToolOutputContinuation(normalized.request, expectedToolContinuation)
+            ) {
+              outputBudget.poison("request_quota_exceeded");
+              throw new RelayHttpError(429, "request_quota_exceeded");
+            }
+            throw new RelayHttpError(429, admission.code);
+          }
+          if (accepted >= limits.maxRequests) {
+            outputBudget.poisonBeforeUpstream("request_quota_exceeded");
+            throw new RelayHttpError(429, "request_quota_exceeded");
+          }
+          expectedToolContinuation = null;
+          if (admission.effectiveMaxOutputTokens === null) {
+            delete normalized.request.max_output_tokens;
+          } else {
+            normalized.request.max_output_tokens = admission.effectiveMaxOutputTokens;
+          }
+          const body = Buffer.from(canonicalJson(normalized.request));
+          if (body.length > limits.maxRequestBytes) {
+            outputBudget.poisonBeforeUpstream("request_too_large");
+            throw new RelayHttpError(413, "request_too_large");
+          }
           accepted += 1;
           ordinal = accepted;
           await journal.append({
@@ -522,6 +593,8 @@ export async function startNativeResponsesRelay(
             requestSha256: sha256(body),
             clientRequestId: clientRequestIdEcho ? null : clientRequestId,
             stream: true,
+            requestedMaxOutputTokens: admission.requestedMaxOutputTokens,
+            effectiveMaxOutputTokens: admission.effectiveMaxOutputTokens,
           });
           if (clientRequestIdEcho || turnStateEcho) {
             throw secretFailure();
@@ -711,6 +784,15 @@ export async function startNativeResponsesRelay(
               const endedAt = clock();
               let metadata = observer.finish();
               if (secretEchoConfirmed) metadata = redactedResponseMetadata(metadata.parseErrors);
+              if (transportState === "completed") {
+                const settlement = outputBudget.settle(metadata);
+                expectedToolContinuation = settlement.kind === "settled"
+                  ? observer.toolOutputContinuation()
+                  : null;
+              } else {
+                outputBudget.poison(errorCategory ?? "transport_failed");
+                expectedToolContinuation = null;
+              }
               await journal.append({
                 ...identity,
                 event: "transport.responses.closed",
@@ -728,8 +810,15 @@ export async function startNativeResponsesRelay(
                 ...metadata,
               });
             }
-          } finally {
             releaseFlight();
+          } catch (error) {
+            outputBudget.poison("journal_write_failure");
+            closing = true;
+            const successor = queuedFlight;
+            queuedFlight = undefined;
+            active = 0;
+            successor?.cancel(new RelayHttpError(500, "relay_failure"));
+            throw error;
           }
         }
         if (terminalError !== null) {
@@ -798,6 +887,7 @@ export async function startNativeResponsesRelay(
         expectedModel: options.expectedModel,
         sealedAt: isoTime(clock()),
         rejectedRequests: { ...rejectedRequests },
+        ...outputBudget.seal(),
         ...summary,
       } as const;
       return await writeRelaySeal(sealPath, body);

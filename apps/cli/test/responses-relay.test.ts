@@ -25,6 +25,7 @@ const MODEL = "glm-5.3";
 const CLIENT_BEARER = "relay-client-token-0000000000000001";
 const PROVIDER_BEARER = "provider-secret-1234567890abcdef";
 const TURN_STATE_HEADER = "x-codex-turn-state";
+const COMPLETE_USAGE = { input_tokens: 7, output_tokens: 3, total_tokens: 10 } as const;
 
 interface TestServer {
   url: string;
@@ -154,6 +155,7 @@ async function fixture(
   t: { after: (callback: () => void | Promise<void>) => void },
   upstream: TestServer,
   overrides: Partial<NativeResponsesRelayOptions> = {},
+  closeUpstream = true,
 ): Promise<{ relay: NativeResponsesRelay; sidecarPath: string }> {
   const directory = await mkdtemp(join(tmpdir(), "open-agent-lab-relay-test-"));
   const sidecarPath = join(directory, "relay.jsonl");
@@ -162,6 +164,7 @@ async function fixture(
     providerId: "test",
     buildId: "development",
     expectedModel: MODEL,
+    budgetClass: "unmetered_route_probe",
     upstreamResponsesUrl: `${upstream.url}/responses`,
     upstreamBearer: PROVIDER_BEARER,
     clientBearer: CLIENT_BEARER,
@@ -171,7 +174,7 @@ async function fixture(
   });
   t.after(async () => {
     await relay.close();
-    await upstream.close();
+    if (closeUpstream) await upstream.close();
     await rm(directory, { force: true, recursive: true });
   });
   return { relay, sidecarPath };
@@ -201,6 +204,88 @@ function reseal(marker: Record<string, unknown>): string {
   const body = { ...marker };
   delete body.markerSha256;
   return `${canonicalJson({ ...body, markerSha256: sha256(canonicalJson(body)) })}\n`;
+}
+
+interface BudgetStep {
+  terminal: "completed" | "incomplete";
+  outputTokens: number;
+  toolCall?: boolean;
+}
+
+function budgetResponse(step: BudgetStep, ordinal: number): Response {
+  const item = {
+    type: "function_call",
+    id: `function-${ordinal}`,
+    call_id: `call-${ordinal}`,
+    name: "exec_command",
+    arguments: '{"cmd":"true"}',
+    status: "completed",
+  };
+  const response = {
+    id: `budget-response-${ordinal}`,
+    model: MODEL,
+    status: step.terminal,
+    ...(step.terminal === "incomplete"
+      ? { incomplete_details: { reason: "max_output_tokens" } }
+      : {}),
+    ...(step.toolCall === true ? { output: [item] } : {}),
+    usage: {
+      input_tokens: 1,
+      output_tokens: step.outputTokens,
+      total_tokens: step.outputTokens + 1,
+    },
+  };
+  const frames = step.toolCall === true
+    ? [`data: ${JSON.stringify({ type: "response.output_item.done", item })}\n\n`]
+    : [];
+  frames.push(
+    `data: ${JSON.stringify({ type: `response.${step.terminal}`, response })}\n\n`,
+  );
+  return new Response(frames.join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "openai-model": MODEL },
+  });
+}
+
+async function budgetFixture(
+  t: { after: (callback: () => void | Promise<void>) => void },
+  budgetClass: NativeResponsesRelayOptions["budgetClass"],
+  steps: BudgetStep[],
+  maxRequests = 3,
+  beforeFetch?: (ordinal: number, sidecarPath: string) => void | Promise<void>,
+): Promise<{
+  bodies: Record<string, unknown>[];
+  relay: NativeResponsesRelay;
+  sidecarPath: string;
+}> {
+  const unused = await listen((_request, response) => response.end());
+  const bodies: Record<string, unknown>[] = [];
+  let sidecarPath = "";
+  const result = await fixture(t, unused, {
+    budgetClass,
+    maxRequests,
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      const ordinal = bodies.length + 1;
+      await beforeFetch?.(ordinal, sidecarPath);
+      assert.ok(init?.body instanceof Uint8Array);
+      bodies.push(JSON.parse(Buffer.from(init.body).toString()) as Record<string, unknown>);
+      const step = steps[bodies.length - 1];
+      assert.ok(step !== undefined, "unexpected upstream fetch");
+      return budgetResponse(step, bodies.length);
+    }) as typeof fetch,
+  });
+  sidecarPath = result.sidecarPath;
+  return { ...result, bodies };
+}
+
+async function sealedEvidence(
+  relay: NativeResponsesRelay,
+  sidecarPath: string,
+): Promise<{ journal: string; summary: Awaited<ReturnType<NativeResponsesRelay["seal"]>> }> {
+  const summary = await relay.seal();
+  const journal = await readFile(sidecarPath, "utf8");
+  assert.deepEqual(verifyRelaySeal(journal, await readFile(relay.sealPath, "utf8")), summary);
+  return { journal, summary };
 }
 
 async function assertRelayError(response: Response, status: number, code: string): Promise<void> {
@@ -432,7 +517,7 @@ test("relay forwards, queues, and omits absent per-request Codex turn state", as
       response.end(
         `data: ${JSON.stringify({
           type: "response.completed",
-          response: { id: `resp-turn-${ordinal}`, model: MODEL },
+          response: { id: `resp-turn-${ordinal}`, model: MODEL, usage: COMPLETE_USAGE },
         })}\n\n`,
       );
     })().catch((error: unknown) =>
@@ -534,36 +619,30 @@ test("relay rejects malformed client turn state instead of treating it as absent
 
 test("relay rejects malformed upstream turn state before writing client headers", async (t) => {
   const invalidTurnStates = ["", "first,second", "bad\tstate", "é", "x".repeat(513)];
-  let responseIndex = 0;
   const upstream = await listen((_request, response) => response.end());
-  const { relay, sidecarPath } = await fixture(t, upstream, {
-    maxRequests: invalidTurnStates.length,
-    fetchImpl: async () => {
-      const turnState = invalidTurnStates[responseIndex];
-      responseIndex += 1;
-      assert.ok(turnState !== undefined);
-      return new Response(null, {
-        status: 200,
-        headers: { [TURN_STATE_HEADER]: turnState },
-      });
-    },
-  });
-
-  for (const _turnState of invalidTurnStates) {
+  t.after(upstream.close);
+  for (const turnState of invalidTurnStates) {
+    const { relay, sidecarPath } = await fixture(
+      t,
+      upstream,
+      {
+        maxRequests: 1,
+        fetchImpl: async () =>
+          new Response(null, {
+            status: 200,
+            headers: { [TURN_STATE_HEADER]: turnState },
+          }),
+      },
+      false,
+    );
     const response = await relayRequest(relay);
     assert.equal(response.headers.get(TURN_STATE_HEADER), null);
     await assertRelayError(response, 502, "upstream_failure");
-  }
-  assert.equal(responseIndex, invalidTurnStates.length);
-
-  const summary = await relay.close();
-  assert.deepEqual(summary.rejectedRequests, {
-    invalid_turn_state: invalidTurnStates.length,
-  });
-  const entries = records(await readFile(sidecarPath, "utf8"));
-  for (let offset = 0; offset < entries.length; offset += 3) {
-    const headers = entries[offset + 1];
-    const closed = entries[offset + 2];
+    const summary = await relay.close();
+    assert.deepEqual(summary.rejectedRequests, { invalid_turn_state: 1 });
+    const entries = records(await readFile(sidecarPath, "utf8"));
+    const headers = entries[1];
+    const closed = entries[2];
     assert.equal(headers?.status, 200);
     assert.equal(closed?.transportState, "failed");
     assert.equal(closed?.errorCategory, "upstream_failure");
@@ -664,6 +743,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     id: "safe-response",
     model: MODEL,
     system_fingerprint: "safe-fingerprint",
+    usage: COMPLETE_USAGE,
   };
   const metadataCases = [
     {
@@ -709,54 +789,43 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     };
     response.end(headerCase?.body ?? `data: ${JSON.stringify(event)}\n\n`);
   });
-  const { relay, sidecarPath } = await fixture(t, upstream, {
-    maxRequests: headerCases.length + metadataCases.length,
-  });
-
-  for (const headerCase of headerCases) {
+  t.after(upstream.close);
+  for (let index = 0; index < headerCases.length + metadataCases.length; index += 1) {
+    const { relay, sidecarPath } = await fixture(t, upstream, { maxRequests: 1 }, false);
     const response = await relayRequest(relay);
-    assert.equal(response.status, 502);
-    const errorBody = await response.text();
-    assert.ok(!errorBody.includes(PROVIDER_BEARER));
-    assert.deepEqual(JSON.parse(errorBody), { error: { code: headerCase.error } });
+    const responseBody = await response.arrayBuffer().catch(() => new ArrayBuffer(0));
+    assert.ok(!Buffer.from(responseBody).includes(Buffer.from(PROVIDER_BEARER)));
     assert.equal(response.headers.get("x-request-id"), null);
     assert.ok([...response.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
-  }
-  for (const _case of metadataCases) {
-    const parsedEcho = await relayRequest(relay);
-    await parsedEcho.arrayBuffer().catch(() => new ArrayBuffer(0));
-    assert.ok([...parsedEcho.headers.values()].every((value) => !value.includes(PROVIDER_BEARER)));
-  }
-
-  const summary = await relay.close();
-  const journal = await readFile(sidecarPath, "utf8");
-  const seal = await readFile(relay.sealPath, "utf8");
-  assert.ok(!journal.includes(PROVIDER_BEARER));
-  assert.ok(!seal.includes(PROVIDER_BEARER));
-  assert.deepEqual(summary.rejectedRequests, {
-    upstream_secret_echo: headerCases.length + metadataCases.length,
-  });
-  assert.deepEqual(verifyRelaySeal(journal, seal), summary);
-  const entries = records(journal);
-  for (let index = 0; index < headerCases.length; index += 1) {
-    const headerCase = headerCases[index]!;
-    const headers = entries[index * 3 + 1];
-    assert.equal(headers?.status, headerCase.status);
-    assert.equal(headers?.providerRequestId, headerCase.body === undefined ? null : headerCase.headers["x-request-id"]);
-    assert.equal(headers?.modelHeader, null);
-    const closed = entries[index * 3 + 2];
-    assert.equal(closed?.responseBytes, Buffer.byteLength(headerCase.body ?? ""));
-    if (headerCase.body !== undefined) assert.equal(closed?.responseSha256, sha256(headerCase.body));
-    assert.equal(closed?.errorCategory, headerCase.error);
-  }
-  const expectedErrors = [
-    ...headerCases.map(({ error }) => error),
-    ...metadataCases.map(() => "upstream_failure"),
-  ];
-  for (let index = 0; index < headerCases.length + metadataCases.length; index += 1) {
-    const closed = entries[index * 3 + 2];
+    const summary = await relay.close();
+    const journal = await readFile(sidecarPath, "utf8");
+    const seal = await readFile(relay.sealPath, "utf8");
+    assert.ok(!journal.includes(PROVIDER_BEARER));
+    assert.ok(!seal.includes(PROVIDER_BEARER));
+    assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+    assert.deepEqual(verifyRelaySeal(journal, seal), summary);
+    const entries = records(journal);
+    const headerCase = headerCases[index];
+    const headers = entries[1];
+    const closed = entries[2];
+    if (headerCase !== undefined) {
+      assert.equal(response.status, 502);
+      assert.equal(headers?.status, headerCase.status);
+      assert.equal(
+        headers?.providerRequestId,
+        headerCase.body === undefined ? null : headerCase.headers["x-request-id"],
+      );
+      assert.equal(closed?.responseBytes, Buffer.byteLength(headerCase.body ?? ""));
+      if (headerCase.body !== undefined) {
+        assert.equal(closed?.responseSha256, sha256(headerCase.body));
+      }
+    }
+    assert.equal(
+      headers?.modelHeader,
+      headerCase === undefined ? MODEL : null,
+    );
     assert.equal(closed?.transportState, "failed");
-    assert.equal(closed?.errorCategory, expectedErrors[index]);
+    assert.equal(closed?.errorCategory, "upstream_failure");
     for (const field of [
       "responseId",
       "returnedModel",
@@ -767,6 +836,7 @@ test("relay rejects upstream metadata that echoes its provider credential", asyn
     }
     assert.deepEqual(closed?.modelSources, {});
   }
+  assert.equal(requestCount, headerCases.length + metadataCases.length);
 });
 
 test("relay fails closed on an invalid UTF-8 non-success body", async (t) => {
@@ -924,37 +994,30 @@ test("relay redacts a provider credential from client metadata", async (t) => {
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end();
   });
-  const { relay, sidecarPath } = await fixture(t, upstream);
-
-  for (const headers of [
-    { "x-client-request-id": `turn-${PROVIDER_BEARER}-suffix` },
-    { [TURN_STATE_HEADER]: `é-${PROVIDER_BEARER}` },
-  ]) {
-    const response = await relayRequest(relay, {
-      headers,
-    });
+  t.after(upstream.close);
+  const attempts = [
+    (relay: NativeResponsesRelay) =>
+      relayRequest(relay, {
+        headers: { "x-client-request-id": `turn-${PROVIDER_BEARER}-suffix` },
+      }),
+    (relay: NativeResponsesRelay) =>
+      relayRequest(relay, { headers: { [TURN_STATE_HEADER]: `é-${PROVIDER_BEARER}` } }),
+    (relay: NativeResponsesRelay) =>
+      turnStateRequest(relay, ["first", "second"], `turn-${PROVIDER_BEARER}-suffix`),
+  ];
+  for (const attempt of attempts) {
+    const { relay, sidecarPath } = await fixture(t, upstream, {}, false);
+    const response = await attempt(relay);
     assert.equal(response.status, 502);
     assert.deepEqual(await response.json(), { error: { code: "upstream_failure" } });
-  }
-  const precedence = await turnStateRequest(
-    relay,
-    ["first", "second"],
-    `turn-${PROVIDER_BEARER}-suffix`,
-  );
-  await assertRelayError(precedence, 502, "upstream_failure");
-  assert.equal(upstreamRequests, 0);
-
-  const summary = await relay.close();
-  const journal = await readFile(sidecarPath, "utf8");
-  const seal = await readFile(relay.sealPath, "utf8");
-  assert.ok(!journal.includes(PROVIDER_BEARER));
-  assert.ok(!seal.includes(PROVIDER_BEARER));
-  assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 3 });
-  assert.deepEqual(verifyRelaySeal(journal, seal), summary);
-  const entries = records(journal);
-  assert.equal(entries.length, 9);
-  for (let offset = 0; offset < entries.length; offset += 3) {
-    const [request, headers, closed] = entries.slice(offset, offset + 3);
+    const summary = await relay.close();
+    const journal = await readFile(sidecarPath, "utf8");
+    const seal = await readFile(relay.sealPath, "utf8");
+    assert.ok(!journal.includes(PROVIDER_BEARER));
+    assert.ok(!seal.includes(PROVIDER_BEARER));
+    assert.deepEqual(summary.rejectedRequests, { upstream_secret_echo: 1 });
+    assert.deepEqual(verifyRelaySeal(journal, seal), summary);
+    const [request, headers, closed] = records(journal);
     assert.equal(request?.clientRequestId, null);
     assert.deepEqual(
       [headers?.status, headers?.providerRequestId, headers?.modelHeader],
@@ -968,6 +1031,7 @@ test("relay redacts a provider credential from client metadata", async (t) => {
     assert.equal(closed?.errorCategory, "upstream_failure");
     assert.equal(closed?.responseBytes, 0);
   }
+  assert.equal(upstreamRequests, 0);
 });
 
 test("relay rejects short or non-visible provider credentials before listening", async (t) => {
@@ -989,6 +1053,7 @@ test("relay rejects short or non-visible provider credentials before listening",
         providerId: "test",
         buildId: "development",
         expectedModel: MODEL,
+        budgetClass: "unmetered_route_probe",
         upstreamResponsesUrl: `${upstream.url}/responses`,
         upstreamBearer,
         clientBearer: CLIENT_BEARER,
@@ -1007,7 +1072,7 @@ test("relay normalizes ambiguous request JSON before forwarding", async (t) => {
       observedBody = value;
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(
-        `data: {"type":"response.completed","response":{"id":"normalized","model":"${MODEL}"}}\n\n`,
+        `data: {"type":"response.completed","response":{"id":"normalized","model":"${MODEL}","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}\n\n`,
       );
     });
   });
@@ -1024,6 +1089,301 @@ test("relay normalizes ambiguous request JSON before forwarding", async (t) => {
     stream: true,
   });
   assert.equal(Buffer.from(observedBody).toString().includes("other"), false);
+});
+
+test("scored relay debits 30k and injects exactly 20k on the continuation", async (t) => {
+  const { relay, sidecarPath, bodies } = await budgetFixture(
+    t,
+    "scored_slot",
+    [
+      { terminal: "completed", outputTokens: 30_000 },
+      { terminal: "completed", outputTokens: 1 },
+    ],
+    2,
+    async (ordinal, journalPath) => {
+      const persisted = records(await readFile(journalPath, "utf8"));
+      assert.equal(persisted.length, (ordinal - 1) * 3 + 1);
+      assert.equal(persisted.at(-1)?.event, "transport.responses.request");
+      assert.equal(persisted.at(-1)?.ordinal, ordinal);
+    },
+  );
+  for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+    const response = await relayRequest(relay, {
+      body: requestBody({
+        input: `turn-${ordinal}`,
+        ...(ordinal === 2 ? { max_output_tokens: 30_000 } : {}),
+      }),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+  }
+  assert.deepEqual(bodies.map((value) => value.max_output_tokens), [50_000, 20_000]);
+
+  const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+  const entries = records(journal);
+  assert.deepEqual(
+    [
+      entries[0]?.requestedMaxOutputTokens,
+      entries[0]?.effectiveMaxOutputTokens,
+      entries[3]?.requestedMaxOutputTokens,
+      entries[3]?.effectiveMaxOutputTokens,
+    ],
+    [null, 50_000, 30_000, 20_000],
+  );
+  assert.equal(entries[3]?.requestSha256, sha256(canonicalJson(bodies[1])));
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "complete",
+    reportedOutputTokens: 30_001,
+    conservativeOutputTokenUpperBound: 30_001,
+    unusedOutputTokensBurned: 19_999,
+  });
+});
+
+test("invalid scored maxima are local 400 rejections with no upstream fetch", async (t) => {
+  for (const invalid of [false, 0, -1, 1.5, 2 ** 53]) {
+    const { relay, sidecarPath, bodies } = await budgetFixture(t, "scored_slot", []);
+    await assertRelayError(
+      await relayRequest(relay, { body: requestBody({ max_output_tokens: invalid }) }),
+      400,
+      "invalid_max_output_tokens",
+    );
+    assert.equal(bodies.length, 0);
+    const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+    assert.equal(journal, "");
+    assert.deepEqual(summary.rejectedRequests, { invalid_max_output_tokens: 1 });
+    assert.deepEqual(summary.outputTokenAccounting, {
+      state: "poisoned",
+      reportedOutputTokens: null,
+      conservativeOutputTokenUpperBound: 0,
+      unusedOutputTokensBurned: 50_000,
+    });
+  }
+});
+
+test("post-injection request overflow poisons as known-zero before fetch", async (t) => {
+  const upstream = await listen((_request, response) => response.end());
+  let fetches = 0;
+  const clientBody = requestBody();
+  const { relay, sidecarPath } = await fixture(t, upstream, {
+    budgetClass: "scored_slot",
+    maxRequestBytes: Buffer.byteLength(canonicalJson(JSON.parse(clientBody))),
+    fetchImpl: (async () => {
+      fetches += 1;
+      throw new Error("unexpected upstream fetch");
+    }) as typeof fetch,
+  });
+
+  await assertRelayError(await relayRequest(relay, { body: clientBody }), 413, "request_too_large");
+  assert.equal(fetches, 0);
+  const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+  assert.equal(journal, "");
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "poisoned",
+    reportedOutputTokens: null,
+    conservativeOutputTokenUpperBound: 0,
+    unusedOutputTokensBurned: 50_000,
+  });
+});
+
+test("exact scored exhaustion rejects a real tool-output continuation before fetch", async (t) => {
+  const { relay, sidecarPath, bodies } = await budgetFixture(
+    t,
+    "scored_slot",
+    [{ terminal: "completed", outputTokens: 50_000, toolCall: true }],
+    1,
+  );
+  const first = await relayRequest(relay);
+  assert.equal(first.status, 200);
+  assert.match(await first.text(), /"type":"function_call"/u);
+
+  const continuation = await relayRequest(relay, {
+    body: requestBody({
+      input: [{ type: "function_call_output", call_id: "call-1", output: "ok" }],
+    }),
+  });
+  await assertRelayError(continuation, 429, "slot_output_budget_exhausted");
+  assert.equal(bodies.length, 1);
+
+  const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+  assert.equal(records(journal).length, 3);
+  assert.deepEqual(summary.rejectedRequests, { slot_output_budget_exhausted: 1 });
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "exact_exhaustion",
+    reportedOutputTokens: 50_000,
+    conservativeOutputTokenUpperBound: 50_000,
+    unusedOutputTokensBurned: 0,
+  });
+});
+
+test("request quota clears its unjournaled scored admission before sealing", async (t) => {
+  const { relay, sidecarPath, bodies } = await budgetFixture(
+    t,
+    "scored_slot",
+    [{ terminal: "completed", outputTokens: 3 }],
+    1,
+  );
+  const first = await relayRequest(relay);
+  assert.equal(first.status, 200);
+  await first.text();
+  await assertRelayError(await relayRequest(relay), 429, "request_quota_exceeded");
+  assert.equal(bodies.length, 1);
+
+  const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+  assert.equal(records(journal).length, 3);
+  assert.deepEqual(summary.rejectedRequests, { request_quota_exceeded: 1 });
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "poisoned",
+    reportedOutputTokens: null,
+    conservativeOutputTokenUpperBound: 3,
+    unusedOutputTokensBurned: 49_997,
+  });
+});
+
+test("a non-tool request after exact usage cannot use the exhaustion exception", async (t) => {
+  const { relay, sidecarPath, bodies } = await budgetFixture(
+    t,
+    "scored_slot",
+    [{ terminal: "completed", outputTokens: 50_000 }],
+    2,
+  );
+  const first = await relayRequest(relay);
+  assert.equal(first.status, 200);
+  await first.text();
+  await assertRelayError(await relayRequest(relay), 429, "request_quota_exceeded");
+  assert.equal(bodies.length, 1);
+
+  const { summary } = await sealedEvidence(relay, sidecarPath);
+  assert.deepEqual(summary.rejectedRequests, { request_quota_exceeded: 1 });
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "poisoned",
+    reportedOutputTokens: null,
+    conservativeOutputTokenUpperBound: 50_000,
+    unusedOutputTokensBurned: 0,
+  });
+});
+
+test("exact exhaustion rejects forged, mismatched, or mixed tool continuations", async (t) => {
+  const cases = [
+    {
+      toolCall: false,
+      input: [{ type: "function_call_output", call_id: "call-1", output: "ok" }],
+    },
+    {
+      toolCall: true,
+      input: [{ type: "function_call_output", call_id: "invented", output: "ok" }],
+    },
+    {
+      toolCall: true,
+      input: [
+        { type: "function_call_output", call_id: "call-1", output: "ok" },
+        { role: "user", content: "continue" },
+      ],
+    },
+    {
+      toolCall: true,
+      input: [{ type: "custom_tool_call_output", call_id: "call-1", output: "ok" }],
+    },
+    {
+      toolCall: true,
+      input: [{ type: "function_call_output", call_id: "call-1" }],
+    },
+  ] as const;
+  for (const value of cases) {
+    const { relay, sidecarPath, bodies } = await budgetFixture(
+      t,
+      "scored_slot",
+      [{ terminal: "completed", outputTokens: 50_000, toolCall: value.toolCall }],
+      2,
+    );
+    const first = await relayRequest(relay);
+    assert.equal(first.status, 200);
+    await first.text();
+    await assertRelayError(
+      await relayRequest(relay, { body: requestBody({ input: value.input }) }),
+      429,
+      "request_quota_exceeded",
+    );
+    assert.equal(bodies.length, 1);
+    const { summary } = await sealedEvidence(relay, sidecarPath);
+    assert.deepEqual(summary.rejectedRequests, { request_quota_exceeded: 1 });
+    assert.equal(summary.outputTokenAccounting.state, "poisoned");
+  }
+});
+
+test("scored relay accepts only the sealed max-output incomplete budget terminal", async (t) => {
+  const { relay, sidecarPath, bodies } = await budgetFixture(
+    t,
+    "scored_slot",
+    [{ terminal: "incomplete", outputTokens: 200 }],
+    1,
+  );
+  const response = await relayRequest(relay, {
+    body: requestBody({ max_output_tokens: 256 }),
+  });
+  assert.equal(response.status, 200);
+  await response.text();
+  assert.equal(bodies[0]?.max_output_tokens, 256);
+
+  const { journal, summary } = await sealedEvidence(relay, sidecarPath);
+  const [request, , closed] = records(journal);
+  assert.deepEqual(
+    [request?.requestedMaxOutputTokens, request?.effectiveMaxOutputTokens],
+    [256, 256],
+  );
+  assert.deepEqual(
+    [closed?.terminalEvent, closed?.terminalStatus, closed?.incompleteReason],
+    ["response.incomplete", "incomplete", "max_output_tokens"],
+  );
+  assert.deepEqual(summary.outputTokenAccounting, {
+    state: "budget_terminal",
+    reportedOutputTokens: 200,
+    conservativeOutputTokenUpperBound: 200,
+    unusedOutputTokensBurned: 49_800,
+  });
+});
+
+test("ZAI relay fixes 8192/256 allocations, never transfers round one, and blocks round three", async (t) => {
+  const run = async (sendThird: boolean) => {
+    const harness = await budgetFixture(
+      t,
+      "zai_route_probe",
+      [
+        { terminal: "completed", outputTokens: 1 },
+        { terminal: "incomplete", outputTokens: 200 },
+      ],
+      3,
+    );
+    const first = await relayRequest(harness.relay);
+    assert.equal(first.status, 200);
+    await first.text();
+    const second = await relayRequest(harness.relay, {
+      body: requestBody({ input: "round-two", max_output_tokens: 9_999 }),
+    });
+    assert.equal(second.status, 200);
+    await second.text();
+    assert.deepEqual(harness.bodies.map((value) => value.max_output_tokens), [8_192, 256]);
+    if (sendThird) {
+      await assertRelayError(
+        await relayRequest(harness.relay, { body: requestBody({ input: "round-three" }) }),
+        429,
+        "request_quota_exceeded",
+      );
+      assert.equal(harness.bodies.length, 2);
+    }
+    return { ...(await sealedEvidence(harness.relay, harness.sidecarPath)), bodies: harness.bodies };
+  };
+
+  const conformant = await run(false);
+  assert.deepEqual(conformant.summary.rejectedRequests, {});
+  assert.deepEqual(conformant.summary.outputTokenAccounting, {
+    state: "probe_conformant",
+    reportedOutputTokens: 201,
+    conservativeOutputTokenUpperBound: 201,
+    unusedOutputTokensBurned: 8_247,
+  });
+  const third = await run(true);
+  assert.deepEqual(third.summary.rejectedRequests, { request_quota_exceeded: 1 });
+  assert.equal(third.summary.outputTokenAccounting.state, "poisoned");
 });
 
 test("closed evidence is durable before EOF permits the next Codex turn", async (t) => {
@@ -1077,7 +1437,7 @@ test("invalid requests and exhausted quota never reach the upstream", async (t) 
   const upstream = await listen((_request, response) => {
     upstreamRequests += 1;
     response.writeHead(200, { "content-type": "text/event-stream" });
-    response.end('data: {"type":"response.completed","response":{"model":"glm-5.3"}}\n\n');
+    response.end('data: {"type":"response.completed","response":{"model":"glm-5.3","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}\n\n');
   });
   const { relay } = await fixture(t, upstream, {
     maxRequests: 1,

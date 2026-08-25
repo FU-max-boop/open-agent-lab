@@ -483,6 +483,7 @@ async function runCodexRouteProbe(
       providerId: "synthetic-fixture",
       buildId: spec.contract.relayBuildId,
       expectedModel: spec.contract.model,
+      budgetClass: "unmetered_route_probe",
       upstreamResponsesUrl: spec.upstreamResponsesUrl,
       upstreamBearer: spec.providerKey,
       clientBearer,

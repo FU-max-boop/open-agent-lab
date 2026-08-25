@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "experimentId": "terminal-bench-2.1-verify-instruction-v1",
   "frozenAt": "2026-08-22",
   "runClass": "development",
@@ -82,6 +82,29 @@
     "concurrency": 1,
     "harborRetries": 0,
     "relayRequestCapPerTrial": 256,
+    "outputTokenBudget": {
+      "scored": {
+        "budgetClass": "scored_slot",
+        "accountingMode": "sealed_usage_debit",
+        "slotOutputTokenLimit": 50000,
+        "slotsPerProvider": 20,
+        "providerOutputTokenLimit": 1000000,
+        "campaignOutputTokenLimit": 2000000,
+        "slotTransferable": false
+      },
+      "zaiRouteProbe": {
+        "budgetClass": "zai_route_probe",
+        "accountingMode": "fixed_round_allocations",
+        "slotOutputTokenLimit": 8448,
+        "roundOutputTokenLimits": [8192, 256],
+        "unusedRoundAllocationTransferable": false,
+        "minimumRequestedRound2OutputTokens": 1024,
+        "round2TerminalEvent": "response.incomplete",
+        "round2IncompleteReason": "max_output_tokens",
+        "maxRequests": 2
+      },
+      "routeProbeUsageIncludedInScoredBudget": false
+    },
     "hermeticCodexRuntimeReady": true,
     "taskOrder": [
       "terminal-bench/model-extraction-relu-logits",
@@ -205,7 +228,17 @@
     "exceptionOrTimeout": "scores_official_reward_and_remains_in_denominator",
     "missingRequiredTelemetry": "preserved_as_null_and_blocks_complete_analysis",
     "missingCostUsdTelemetry": "preserved_as_null_and_does_not_block_complete_analysis",
-    "rerunPolicy": "new_predeclared_experiment_only"
+    "rerunPolicy": "new_predeclared_experiment_only",
+    "modelBudget": {
+      "scorableOutcomes": [
+        "provider_incomplete_max_output_tokens_with_complete_sealed_usage",
+        "local_slot_output_budget_exhausted_after_exact_complete_sealed_usage_without_upstream_request"
+      ],
+      "officialReward": "preserved",
+      "pairedDenominator": "preserved",
+      "analysisComplete": "allowed_with_complete_required_telemetry",
+      "allOtherBudgetOutcomes": "block_complete_analysis"
+    }
   },
   "costTelemetry": {
     "provenance": "harbor_trial_result.agent_result.cost_usd",
@@ -265,6 +298,8 @@
     "wall_time",
     "exceptions_timeouts",
     "task_agnostic_failure_classes",
+    "sealed_slot_output_token_accounting",
+    "model_budget_outcomes",
     "publication_integrity_gate"
   ],
   "claimRule": "directional five-task development result only; never a full, significant, official, or leaderboard score",

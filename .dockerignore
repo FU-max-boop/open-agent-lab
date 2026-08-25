@@ -14,6 +14,7 @@
 !apps/cli/src/relay-evidence.ts
 !apps/cli/src/responses-fixture.ts
 !apps/cli/src/responses-metadata.ts
+!apps/cli/src/responses-output-budget.ts
 !apps/cli/src/responses-relay.ts
 !apps/cli/src/responses-sse.ts
 !benchmarks/

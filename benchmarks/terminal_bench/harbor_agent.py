@@ -33,10 +33,6 @@ from .experiment_contract import (
     CODEX_PROVIDER_RETRY_POLICY,
     EXPERIMENT_ID,
     LIVE_ROUTE_PROBE_CAP_ENV,
-    LIVE_ROUTE_PROBE_COMMAND_SHA256,
-    LIVE_ROUTE_PROBE_EFFECT_SHA256,
-    LIVE_ROUTE_PROBE_INSTRUCTION,
-    LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
     LIVE_ROUTE_PROBE_LIMITS,
     PILOT_RECEIPT_ENV,
     RELAY_BUILD_ID_PATH,
@@ -47,6 +43,8 @@ from .experiment_contract import (
     is_digest,
     is_revision,
     is_strict_int,
+    live_route_probe_instruction,
+    live_route_probe_variant,
 )
 from .harbor_environment import (
     PinnedRelayDockerEnvironment as _PinnedRelayDockerEnvironment,
@@ -181,12 +179,21 @@ def _bootstrap_identity(raw: str) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or set(value)
-        != {"schemaVersion", "buildId", "provider", "model", "capabilityId"}
+        != {
+            "schemaVersion",
+            "buildId",
+            "provider",
+            "model",
+            "budgetClass",
+            "capabilityId",
+        }
         or not is_strict_int(value["schemaVersion"])
-        or value["schemaVersion"] != 1
+        or value["schemaVersion"] != 2
         or not is_digest(value["buildId"])
         or not isinstance(value["provider"], str)
         or not isinstance(value["model"], str)
+        or value["budgetClass"]
+        not in {"scored_slot", "zai_route_probe", "unmetered_route_probe"}
         or not isinstance(value["capabilityId"], str)
         or not _CAPABILITY.fullmatch(value["capabilityId"])
     ):
@@ -497,22 +504,11 @@ def _model_catalog(model: str, profile: _Profile) -> str:
     )
 
 
-def _variant(enable_verification: bool, *, live_route_probe: bool) -> dict[str, Any]:
+def _variant(
+    provider: str, enable_verification: bool, *, live_route_probe: bool
+) -> dict[str, Any]:
     if live_route_probe:
-        return {
-            "schema_version": 1,
-            "variant_id": "live-route-probe-v1",
-            "developer_instruction_requested": False,
-            "requested_developer_instructions_sha256": None,
-            "benchmark_task_instruction_used": False,
-            "benchmark_reward_used": False,
-            "instruction_sha256": LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
-            "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
-            "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
-            "effect_verified": False,
-            **CODEX_PROVIDER_RETRY_POLICY,
-            "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
-        }
+        return live_route_probe_variant(provider, effect_verified=False)
     return {
         "schema_version": 1,
         "variant_id": (
@@ -574,6 +570,13 @@ class OpenAgentLabCodex(Codex):
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
         self._open_agent_lab_model = model
+        self._open_agent_lab_budget_class = (
+            "zai_route_probe"
+            if self._LIVE_ROUTE_PROBE and provider == "zai"
+            else "unmetered_route_probe"
+            if self._LIVE_ROUTE_PROBE
+            else "scored_slot"
+        )
         self._codex_model_catalog = _model_catalog(model, profile)
         self._open_agent_lab_run_binding = binding
         self._codex_runtime_spec = codex_runtime_spec()
@@ -581,6 +584,7 @@ class OpenAgentLabCodex(Codex):
         self._codex_launch_task: asyncio.Task[Any] | None = None
         self._codex_run_active = False
         self._open_agent_lab_variant = _variant(
+            provider,
             enable_verify_instruction_v1,
             live_route_probe=self._LIVE_ROUTE_PROBE,
         )
@@ -720,10 +724,11 @@ class OpenAgentLabCodex(Codex):
         if any(
             identity[key] != expected
             for key, expected in {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "buildId": binding["relay_build_sha256"],
                 "provider": self._open_agent_lab_provider,
                 "model": self._open_agent_lab_model,
+                "budgetClass": self._open_agent_lab_budget_class,
             }.items()
         ):
             raise RuntimeError("Relay bootstrap identity does not match this trial.")
@@ -838,8 +843,9 @@ class OpenAgentLabCodex(Codex):
     ) -> None:
         self._validate_request_source()
         if self._LIVE_ROUTE_PROBE:
+            instruction, _ = live_route_probe_instruction(self._open_agent_lab_provider)
             async with asyncio.timeout(LIVE_ROUTE_PROBE_LIMITS["codexTimeoutSeconds"]):
-                await super().run(LIVE_ROUTE_PROBE_INSTRUCTION, environment, context)
+                await super().run(instruction, environment, context)
         else:
             await super().run(instruction, environment, context)
         if self._codex_launches != 1:

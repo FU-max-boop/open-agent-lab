@@ -7,10 +7,25 @@ export interface ResponseMetadata {
   modelSources: Record<string, string>;
   systemFingerprint: string | null;
   terminalEvent: string | null;
+  terminalStatus: "completed" | "failed" | "incomplete" | null;
+  incompleteReason: string | null;
   usage: Record<string, number> | null;
   metadataConflicts: string[];
   parseErrors: number;
 }
+
+export interface ToolOutputContinuationBinding {
+  type: "function_call_output" | "custom_tool_call_output";
+  callId: string;
+}
+
+type TerminalStatus = Exclude<ResponseMetadata["terminalStatus"], null>;
+
+const TERMINAL_STATUS_BY_EVENT = {
+  "response.completed": "completed",
+  "response.failed": "failed",
+  "response.incomplete": "incomplete",
+} as const satisfies Record<string, TerminalStatus>;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -107,6 +122,75 @@ function numericUsage(value: unknown): Record<string, number> | null {
   return Object.keys(fields).length > 0 ? fields : null;
 }
 
+function terminalMetadata(
+  eventType: keyof typeof TERMINAL_STATUS_BY_EVENT,
+  response: Record<string, unknown>,
+): {
+  terminalStatus: TerminalStatus | null;
+  incompleteReason: string | null;
+} {
+  const expectedStatus = TERMINAL_STATUS_BY_EVENT[eventType];
+  if (
+    response.status !== undefined &&
+    response.status !== null &&
+    response.status !== expectedStatus
+  ) {
+    throw new Error("terminal response status mismatch");
+  }
+  const terminalStatus = response.status === expectedStatus ? expectedStatus : null;
+
+  const error = response.error;
+  const incompleteDetails = response.incomplete_details;
+  if (expectedStatus === "completed") {
+    if (
+      (error !== undefined && error !== null) ||
+      (incompleteDetails !== undefined && incompleteDetails !== null)
+    ) {
+      throw new Error("completed response carries terminal error details");
+    }
+    return { terminalStatus, incompleteReason: null };
+  }
+  if (expectedStatus === "failed") {
+    if (
+      (error !== undefined && error !== null && !isObject(error)) ||
+      (incompleteDetails !== undefined && incompleteDetails !== null)
+    ) {
+      throw new Error("failed response carries invalid terminal details");
+    }
+    return { terminalStatus, incompleteReason: null };
+  }
+  if (
+    (error !== undefined && error !== null) ||
+    !isObject(incompleteDetails)
+  ) {
+    throw new Error("incomplete response carries invalid terminal details");
+  }
+  const incompleteReason = safeString(incompleteDetails.reason);
+  if (incompleteReason === null) throw new Error("invalid incomplete response reason");
+  return { terminalStatus, incompleteReason };
+}
+
+function completedToolOutput(
+  response: Record<string, unknown>,
+): ToolOutputContinuationBinding | null {
+  if (!Array.isArray(response.output)) return null;
+  let binding: ToolOutputContinuationBinding | null = null;
+  for (const value of response.output) {
+    if (!isObject(value)) return null;
+    if (value.type === "reasoning") continue;
+    if (value.type !== "function_call" && value.type !== "custom_tool_call") return null;
+    const callId = safeString(value.call_id);
+    if (callId === null || binding !== null) return null;
+    binding = {
+      type: value.type === "function_call"
+        ? "function_call_output"
+        : "custom_tool_call_output",
+      callId,
+    };
+  }
+  return binding;
+}
+
 export class SseMetadataObserver {
   private readonly models = new Map<string, string>();
   private readonly modelValues = new Set<string>();
@@ -116,7 +200,10 @@ export class SseMetadataObserver {
   private readonly usages = new Map<string, Record<string, number>>();
   private terminalModel: string | null = null;
   private terminalResponseId: string | null = null;
+  private terminalStatus: TerminalStatus | null = null;
+  private incompleteReason: string | null = null;
   private terminalUsage: Record<string, number> | null = null;
+  private terminalToolOutput: ToolOutputContinuationBinding | null = null;
   private parseErrors = 0;
   private eventIndex = 0;
   private modelConflict = false;
@@ -151,6 +238,8 @@ export class SseMetadataObserver {
         this.terminalFrames === 1 && this.terminalEvents.size === 1
           ? [...this.terminalEvents][0]!
           : null,
+      terminalStatus: this.terminalFrames === 1 ? this.terminalStatus : null,
+      incompleteReason: this.terminalFrames === 1 ? this.incompleteReason : null,
       usage: this.terminalFrames === 1 ? this.terminalUsage : null,
       metadataConflicts: conflicts,
       parseErrors: this.parseErrors,
@@ -161,6 +250,17 @@ export class SseMetadataObserver {
     this.parseErrors += 1;
   }
 
+  toolOutputContinuation(): ToolOutputContinuationBinding | null {
+    if (
+      this.terminalFrames !== 1 ||
+      this.terminalEvents.size !== 1 ||
+      !this.terminalEvents.has("response.completed")
+    ) {
+      return null;
+    }
+    return this.terminalToolOutput === null ? null : { ...this.terminalToolOutput };
+  }
+
   observe(event: Record<string, unknown>): void {
     try {
       const eventType = safeString(event.type);
@@ -169,17 +269,30 @@ export class SseMetadataObserver {
         return;
       }
       this.eventIndex += 1;
-      const terminal =
-        eventType.startsWith("response.") &&
-        ["response.completed", "response.failed", "response.incomplete"].includes(eventType);
+      const terminal = Object.hasOwn(TERMINAL_STATUS_BY_EVENT, eventType);
       const response = event.response;
       if (!isObject(response)) {
         if (terminal) this.parseErrors += 1;
         return;
       }
+      const terminalTuple = terminal
+        ? terminalMetadata(
+            eventType as keyof typeof TERMINAL_STATUS_BY_EVENT,
+            response,
+          )
+        : null;
+      const validatedTerminalUsage = terminal ? numericUsage(response.usage) : undefined;
+      const validatedTerminalUsageKey = validatedTerminalUsage
+        ? canonicalJson(validatedTerminalUsage)
+        : null;
       if (terminal) {
         this.terminalFrames += 1;
         this.addBounded(this.terminalEvents, eventType);
+        this.terminalStatus = terminalTuple!.terminalStatus;
+        this.incompleteReason = terminalTuple!.incompleteReason;
+        this.terminalToolOutput = eventType === "response.completed"
+          ? completedToolOutput(response)
+          : null;
       }
       const responseId = safeString(response.id);
       if (responseId !== null) {
@@ -204,9 +317,9 @@ export class SseMetadataObserver {
       }
       const fingerprint = safeString(response.system_fingerprint);
       if (fingerprint !== null) this.addBounded(this.fingerprints, fingerprint);
-      const usage = numericUsage(response.usage);
+      const usage = terminal ? validatedTerminalUsage! : numericUsage(response.usage);
       if (usage !== null) {
-        const key = canonicalJson(usage);
+        const key = validatedTerminalUsageKey ?? canonicalJson(usage);
         if (this.usages.size < 2 || this.usages.has(key)) this.usages.set(key, usage);
         if (terminal) this.terminalUsage = usage;
       }

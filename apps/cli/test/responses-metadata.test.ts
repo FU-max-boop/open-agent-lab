@@ -5,8 +5,10 @@ import { SseMetadataObserver } from "../src/responses-metadata.js";
 import { ResponsesSseParser, type ParsedSseFrame } from "../src/responses-sse.js";
 
 const MODEL = "glm-5.3";
+const USAGE = { input_tokens: 1, output_tokens: 1, total_tokens: 2 };
+type TerminalStatus = "completed" | "failed" | "incomplete";
 
-function observe(...frames: Array<string | Uint8Array>) {
+function observedBy(...frames: Array<string | Uint8Array>): SseMetadataObserver {
   const observer = new SseMetadataObserver(null);
   const parser = new ResponsesSseParser();
   const accept = (parsed: ParsedSseFrame[]): void => {
@@ -19,7 +21,45 @@ function observe(...frames: Array<string | Uint8Array>) {
     accept(parser.feed(typeof frame === "string" ? Buffer.from(frame) : frame));
   }
   accept(parser.finish());
-  return observer.finish();
+  return observer;
+}
+
+function observe(...frames: Array<string | Uint8Array>) {
+  return observedBy(...frames).finish();
+}
+
+function terminalFrame(
+  terminalStatus: TerminalStatus,
+  response: Record<string, unknown> = {},
+): string {
+  return `data: ${JSON.stringify({
+    type: `response.${terminalStatus}`,
+    response: { id: "one", model: MODEL, usage: USAGE, ...response },
+  })}\n\n`;
+}
+
+function assertInvalidTerminal(
+  terminalStatus: TerminalStatus,
+  response: Record<string, unknown>,
+): void {
+  const metadata = observe(terminalFrame(terminalStatus, response));
+  assert.deepEqual(
+    metadata,
+    {
+      responseId: null,
+      returnedModel: null,
+      modelConsistency: "missing",
+      modelSources: {},
+      systemFingerprint: null,
+      terminalEvent: null,
+      terminalStatus: null,
+      incompleteReason: null,
+      usage: null,
+      metadataConflicts: [],
+      parseErrors: 1,
+    },
+    `${terminalStatus}/${JSON.stringify(response)}`,
+  );
 }
 
 test("metadata parsing fails closed on invalid UTF-8 and duplicate JSON keys", () => {
@@ -46,7 +86,154 @@ test("an identical terminal frame repeated twice remains a conflict", () => {
 
   assert.equal(metadata.parseErrors, 0);
   assert.equal(metadata.terminalEvent, null);
+  assert.equal(metadata.terminalStatus, null);
+  assert.equal(metadata.incompleteReason, null);
   assert.deepEqual(metadata.metadataConflicts, ["terminal_event"]);
+});
+
+test("completed metadata binds exactly one terminal tool call for its continuation", () => {
+  const observer = observedBy(terminalFrame("completed", {
+    output: [
+      { type: "reasoning", id: "reasoning-1" },
+      { type: "function_call", call_id: "call-1", name: "exec_command" },
+    ],
+  }));
+  assert.deepEqual(observer.toolOutputContinuation(), {
+    type: "function_call_output",
+    callId: "call-1",
+  });
+
+  const custom = observedBy(terminalFrame("completed", {
+    output: [{ type: "custom_tool_call", call_id: "call-2", name: "apply_patch" }],
+  }));
+  assert.deepEqual(custom.toolOutputContinuation(), {
+    type: "custom_tool_call_output",
+    callId: "call-2",
+  });
+
+  for (const output of [
+    undefined,
+    [],
+    [{ type: "message", content: [] }, { type: "function_call", call_id: "call-1" }],
+    [
+      { type: "function_call", call_id: "call-1" },
+      { type: "function_call", call_id: "call-2" },
+    ],
+    [{ type: "function_call", call_id: "" }],
+  ]) {
+    const invalid = observedBy(terminalFrame("completed", { output }));
+    assert.equal(invalid.toolOutputContinuation(), null);
+  }
+});
+
+test("terminal event, status, error, and incomplete reason bind exactly", () => {
+  const valid = [
+    ["completed", {}],
+    ["completed", { status: null, error: null, incomplete_details: null }],
+    ["completed", { status: "completed" }],
+    ["failed", {}],
+    ["failed", { status: null, error: null, incomplete_details: null }],
+    ["failed", { status: "failed", error: { code: "server_error" } }],
+    ["incomplete", { incomplete_details: { reason: "max_output_tokens" } }],
+    [
+      "incomplete",
+      { status: null, error: null, incomplete_details: { reason: "content_filter" } },
+    ],
+    [
+      "incomplete",
+      { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } },
+    ],
+  ] as const satisfies ReadonlyArray<readonly [TerminalStatus, Record<string, unknown>]>;
+
+  for (const [eventStatus, response] of valid) {
+    const metadata = observe(terminalFrame(eventStatus, response));
+    assert.equal(metadata.parseErrors, 0);
+    assert.equal(metadata.terminalEvent, `response.${eventStatus}`);
+    assert.equal(
+      metadata.terminalStatus,
+      "status" in response && response.status === eventStatus ? eventStatus : null,
+    );
+    assert.equal(
+      metadata.incompleteReason,
+      eventStatus === "incomplete"
+        ? (response.incomplete_details as { reason: string }).reason
+        : null,
+    );
+    assert.deepEqual(metadata.usage, USAGE);
+  }
+});
+
+test("contradictory or malformed terminal tuples fail before recording metadata", () => {
+  const invalid = [
+    ["completed", { status: "failed" }],
+    ["failed", { status: "incomplete" }],
+    [
+      "incomplete",
+      { status: "completed", incomplete_details: { reason: "max_output_tokens" } },
+    ],
+    ["completed", { status: false }],
+    [
+      "completed",
+      { status: "completed", error: { code: "server_error" } },
+    ],
+    ["completed", { incomplete_details: { reason: "max_output_tokens" } }],
+    ["failed", { error: "server_error" }],
+    ["failed", { error: [] }],
+    [
+      "failed",
+      { incomplete_details: { reason: "max_output_tokens" } },
+    ],
+    ["incomplete", {}],
+    ["incomplete", { incomplete_details: null }],
+    ["incomplete", { incomplete_details: [] }],
+    [
+      "incomplete",
+      {
+        status: "incomplete",
+        error: { code: "server_error" },
+        incomplete_details: { reason: "max_output_tokens" },
+      },
+    ],
+    ["incomplete", { incomplete_details: { reason: "" } }],
+    [
+      "incomplete",
+      { incomplete_details: { reason: `x${"a".repeat(512)}` } },
+    ],
+    [
+      "incomplete",
+      { incomplete_details: { reason: "max_output_tokens\n" } },
+    ],
+    [
+      "incomplete",
+      { incomplete_details: { reason: { value: "max_output_tokens" } } },
+    ],
+  ] as const satisfies ReadonlyArray<readonly [TerminalStatus, Record<string, unknown>]>;
+
+  for (const [terminalStatus, response] of invalid) {
+    assertInvalidTerminal(terminalStatus, response);
+  }
+});
+
+test("non-terminal response fields remain outside the terminal tuple contract", () => {
+  const metadata = observe(
+    `data: ${JSON.stringify({
+      type: "response.created",
+      response: {
+        id: "created",
+        model: MODEL,
+        status: { arbitrary: true },
+        error: "not-terminal",
+        incomplete_details: ["not-terminal"],
+      },
+    })}\n\n`,
+  );
+
+  assert.equal(metadata.parseErrors, 0);
+  assert.equal(metadata.modelConsistency, "consistent");
+  assert.equal(metadata.modelSources["event.response.created.response.model.1"], MODEL);
+  assert.equal(metadata.terminalEvent, null);
+  assert.equal(metadata.terminalStatus, null);
+  assert.equal(metadata.incompleteReason, null);
 });
 
 test("valid escaped strings and nested objects do not confuse duplicate-key scanning", () => {
@@ -57,6 +244,8 @@ test("valid escaped strings and nested objects do not confuse duplicate-key scan
   assert.equal(metadata.parseErrors, 0);
   assert.equal(metadata.returnedModel, MODEL);
   assert.equal(metadata.terminalEvent, "response.completed");
+  assert.equal(metadata.terminalStatus, null);
+  assert.equal(metadata.incompleteReason, null);
 });
 
 test("non-canonical ignored fields and terminal frames without response fail closed", () => {
@@ -79,15 +268,22 @@ test("non-canonical ignored fields and terminal frames without response fail clo
   assert.equal(missingTerminalResponse.responseId, null);
   assert.equal(missingTerminalResponse.returnedModel, null);
   assert.equal(missingTerminalResponse.terminalEvent, null);
+  assert.equal(missingTerminalResponse.terminalStatus, null);
+  assert.equal(missingTerminalResponse.incompleteReason, null);
   assert.equal(missingTerminalResponse.usage, null);
 });
 
 test("conflicting flat and nested token aliases fail closed", () => {
   const metadata = observe(
-    `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_input_tokens":9,"reasoning_output_tokens":4,"input_tokens_details":{"cached_tokens":1},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n`,
+    `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"cached_input_tokens":9,"reasoning_output_tokens":4,"input_tokens_details":{"cached_tokens":1},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n`,
   );
 
   assert.equal(metadata.parseErrors, 1);
+  assert.equal(metadata.responseId, null);
+  assert.equal(metadata.returnedModel, null);
+  assert.equal(metadata.terminalEvent, null);
+  assert.equal(metadata.terminalStatus, null);
+  assert.equal(metadata.incompleteReason, null);
   assert.equal(metadata.usage, null);
 });
 
@@ -102,6 +298,8 @@ test("nullable and omitted token detail objects normalize identically", () => {
     );
     assert.equal(metadata.parseErrors, 0);
     assert.equal(metadata.terminalEvent, "response.completed");
+    assert.equal(metadata.terminalStatus, null);
+    assert.equal(metadata.incompleteReason, null);
     assert.deepEqual(metadata.usage, expected);
   }
 });
@@ -148,4 +346,6 @@ test("model source saturation always reserves a terminal source", () => {
   );
   assert.equal(metadata.returnedModel, MODEL);
   assert.equal(metadata.terminalEvent, "response.completed");
+  assert.equal(metadata.terminalStatus, null);
+  assert.equal(metadata.incompleteReason, null);
 });

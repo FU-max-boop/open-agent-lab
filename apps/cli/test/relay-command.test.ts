@@ -78,6 +78,8 @@ test("relay limit flags reach the native relay and retain established defaults",
       "test",
       "--model",
       "test-model",
+      "--budget-class",
+      "unmetered_route_probe",
       "--build-id-file",
       buildFile,
       "--output",
@@ -97,6 +99,7 @@ test("relay limit flags reach the native relay and retain established defaults",
       readyPath: `${sidecar}.bootstrap-ready`,
       provider: "test",
       model: "test-model",
+      budgetClass: "unmetered_route_probe",
       capabilityId: "e".repeat(64),
     } as const;
     await writeFile(buildFile, `${buildId}\n`);
@@ -183,6 +186,8 @@ test("relay authorization gates all secret-dependent startup", async () => {
       "deepseek",
       "--model",
       "deepseek-v4-pro",
+      "--budget-class",
+      "unmetered_route_probe",
       "--build-id-file",
       buildFile,
       "--output",
@@ -193,22 +198,28 @@ test("relay authorization gates all secret-dependent startup", async () => {
     const pending = awaitRelayAuthorization(
       args,
       { OAL_EXPECTED_RELAY_BUILD_ID: buildId },
-      { provider: "deepseek", model: "deepseek-v4-pro" },
+      {
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        budgetClass: "unmetered_route_probe",
+      },
     );
     const bootstrap = JSON.parse(
       await waitForFile(`${sidecar}.bootstrap-ready`),
     ) as Record<string, unknown>;
     assert.deepEqual(Object.keys(bootstrap).sort(), [
+      "budgetClass",
       "buildId",
       "capabilityId",
       "model",
       "provider",
       "schemaVersion",
     ]);
-    assert.equal(bootstrap.schemaVersion, 1);
+    assert.equal(bootstrap.schemaVersion, 2);
     assert.equal(bootstrap.buildId, buildId);
     assert.equal(bootstrap.provider, "deepseek");
     assert.equal(bootstrap.model, "deepseek-v4-pro");
+    assert.equal(bootstrap.budgetClass, "unmetered_route_probe");
     assert.match(String(bootstrap.capabilityId), /^[a-f0-9]{64}$/u);
     assert.equal((await stat(`${sidecar}.bootstrap-ready`)).mode & 0o777, 0o444);
     process.emit("SIGUSR1", "SIGUSR1");
@@ -217,17 +228,31 @@ test("relay authorization gates all secret-dependent startup", async () => {
       readyPath: `${sidecar}.bootstrap-ready`,
       provider: "deepseek",
       model: "deepseek-v4-pro",
+      budgetClass: "unmetered_route_probe",
       capabilityId: bootstrap.capabilityId,
     });
 
-    await assert.rejects(
-      awaitRelayAuthorization(
-        args,
-        { OAL_EXPECTED_RELAY_BUILD_ID: buildId },
-        { provider: "zai", model: "glm-5.3" },
-      ),
-      /expected provider and model/u,
-    );
+    for (const expected of [
+      {
+        provider: "zai",
+        model: "glm-5.3",
+        budgetClass: "zai_route_probe" as const,
+      },
+      {
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        budgetClass: "scored_slot" as const,
+      },
+    ]) {
+      await assert.rejects(
+        awaitRelayAuthorization(
+          args,
+          { OAL_EXPECTED_RELAY_BUILD_ID: buildId },
+          expected,
+        ),
+        /expected provider, model, and budget class/u,
+      );
+    }
   } finally {
     await rm(directory, { recursive: true });
   }
@@ -246,6 +271,8 @@ test("relay authorization keeps an otherwise idle process alive", async () => {
       "deepseek",
       "--model",
       "deepseek-v4-pro",
+      "--budget-class",
+      "unmetered_route_probe",
       "--build-id-file",
       buildFile,
       "--output",
@@ -254,7 +281,7 @@ test("relay authorization keeps an otherwise idle process alive", async () => {
     await awaitRelayAuthorization(
       args,
       { OAL_EXPECTED_RELAY_BUILD_ID: ${JSON.stringify(buildId)} },
-      { provider: "deepseek", model: "deepseek-v4-pro" },
+      { provider: "deepseek", model: "deepseek-v4-pro", budgetClass: "unmetered_route_probe" },
     ).catch((error) => {
       if (!(error instanceof Error) || !error.message.includes("was interrupted")) throw error;
     });
@@ -294,6 +321,8 @@ test("token publication is non-overwriting and failed publication closes the rel
       "test",
       "--model",
       "test-model",
+      "--budget-class",
+      "unmetered_route_probe",
       "--build-id-file",
       buildFile,
       "--output",
@@ -324,6 +353,7 @@ test("token publication is non-overwriting and failed publication closes the rel
           readyPath,
           provider: "test",
           model: "test-model",
+          budgetClass: "unmetered_route_probe",
           capabilityId: "e".repeat(64),
         },
       ),

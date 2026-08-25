@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   const authorization = await awaitRelayAuthorization(
     process.argv.slice(2),
     process.env,
-    { provider: "deepseek", model: MODEL },
+    { provider: "deepseek", model: MODEL, budgetClass: "scored_slot" },
   );
   const path = process.env.DEEPSEEK_API_KEY_FILE;
   if (path === undefined || process.env.DEEPSEEK_API_KEY !== undefined) {

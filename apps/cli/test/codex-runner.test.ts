@@ -594,7 +594,7 @@ test(
     });
     const relay = await startNativeResponsesRelay({
       runId: "codex-secret-probe", providerId: "probe", buildId: "development",
-      expectedModel: "open-agent-lab-probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
+      expectedModel: "open-agent-lab-probe", budgetClass: "unmetered_route_probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
       upstreamBearer, clientBearer, sidecarPath: join(workspace, "provider-metadata.ndjson"), expiresAtMs: Date.now() + 60_000,
     });
     t.after(async () => { await relay.close(); await fixture.close(); await rm(workspace, { force: true, recursive: true }); });
@@ -637,7 +637,7 @@ test(
     });
     const relay = await startNativeResponsesRelay({
       runId: "codex-secret-message", providerId: "probe", buildId: "development",
-      expectedModel: "open-agent-lab-probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
+      expectedModel: "open-agent-lab-probe", budgetClass: "unmetered_route_probe", upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
       upstreamBearer, clientBearer, sidecarPath: join(workspace, "provider-metadata.ndjson"), expiresAtMs: Date.now() + 60_000,
     });
     t.after(async () => { await relay.close(); await fixture.close(); await rm(workspace, { force: true, recursive: true }); });

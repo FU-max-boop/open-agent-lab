@@ -707,7 +707,7 @@ def _validate_prepared_source(
         if (
             configured != root
             or not is_strict_int(manifest.get("schemaVersion"))
-            or manifest.get("schemaVersion") != 3
+            or manifest.get("schemaVersion") != 4
             or manifest.get("experimentId") != binding["experiment_id"]
             or digest_bytes(manifest_bytes) != binding["experiment_manifest_sha256"]
             or not isinstance(file_hashes, dict)
@@ -845,7 +845,9 @@ def _expected_overlay(
     relay["image"] = image
     relay["pull_policy"] = "never"
     if live_route_probe:
-        relay["command"] = live_route_probe_relay_command(relay.get("command"))
+        relay["command"] = live_route_probe_relay_command(
+            relay.get("command"), provider
+        )
         document = live_route_probe_networks(document)
     return document
 
