@@ -289,7 +289,7 @@
     "benchmarks/terminal_bench/live-route-probe-task/tests/test.sh": "sha256:ca91b28c4d53dd5f916e0fc9fad20fcbbf04e8f1fa0dcef97b0884d0bd68caf2",
     "benchmarks/terminal_bench/live_route_probe.py": "sha256:e9f33fc931753986aa9ac99a9c28e35e2c377362f77c10474ffce66ad3e54cfc",
     "benchmarks/terminal_bench/paired_results.py": "sha256:96969d17a91c8a6c8ad2bde1535a0ba1fdac7ad55998903d600936bb0c5c77a8",
-    "benchmarks/terminal_bench/pilot_launcher.py": "sha256:bb63139a777184fc4f02bf0e90caba3dbf6e064b9fe71009df8cf40664d16a1b",
+    "benchmarks/terminal_bench/pilot_launcher.py": "sha256:95733e740072f7e4c672621f32abc9d923de01a124db318609dfd6d04736a1da",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:3ac53dcd0938768c375d22f6b5a6505a3465700ab65843159482a9c159983dcb",
