@@ -2,14 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SseMetadataObserver } from "../src/responses-metadata.js";
+import { ResponsesSseParser, type ParsedSseFrame } from "../src/responses-sse.js";
 
 const MODEL = "glm-5.3";
 
 function observe(...frames: Array<string | Uint8Array>) {
   const observer = new SseMetadataObserver(null);
+  const parser = new ResponsesSseParser();
+  const accept = (parsed: ParsedSseFrame[]): void => {
+    for (const frame of parsed) {
+      if (frame.error === null && frame.event !== null) observer.observe(frame.event);
+      else if (frame.error !== null) observer.recordParseError();
+    }
+  };
   for (const frame of frames) {
-    observer.feed(typeof frame === "string" ? Buffer.from(frame) : frame);
+    accept(parser.feed(typeof frame === "string" ? Buffer.from(frame) : frame));
   }
+  accept(parser.finish());
   return observer.finish();
 }
 
@@ -115,17 +124,19 @@ test("invalid or impossible optional token usage fails closed", () => {
 
 test("model source saturation always reserves a terminal source", () => {
   const observer = new SseMetadataObserver(MODEL);
+  const parser = new ResponsesSseParser();
+  const feed = (source: string): void => {
+    for (const frame of parser.feed(Buffer.from(source))) {
+      if (frame.event !== null) observer.observe(frame.event);
+    }
+  };
   for (let index = 0; index < 8; index += 1) {
-    observer.feed(
-      Buffer.from(
-        `data: {"type":"response.created","response":{"id":"created-${index}","model":"${MODEL}","headers":{"openai-model":"${MODEL}"}}}\n\n`,
-      ),
+    feed(
+      `data: {"type":"response.created","response":{"id":"created-${index}","model":"${MODEL}","headers":{"openai-model":"${MODEL}"}}}\n\n`,
     );
   }
-  observer.feed(
-    Buffer.from(
-      `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`,
-    ),
+  feed(
+    `data: {"type":"response.completed","response":{"id":"one","model":"${MODEL}","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`,
   );
 
   const metadata = observer.finish();

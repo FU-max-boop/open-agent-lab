@@ -15,7 +15,7 @@ COPY packages/contracts/src packages/contracts/src
 COPY packages/contracts/tsconfig.json packages/contracts/
 COPY packages/evidence/src packages/evidence/src
 COPY packages/evidence/tsconfig.json packages/evidence/
-COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/relay-fixture-entry.ts apps/cli/src/relay-evidence.ts apps/cli/src/responses-fixture.ts apps/cli/src/responses-metadata.ts apps/cli/src/responses-relay.ts apps/cli/src/
+COPY apps/cli/src/relay-command.ts apps/cli/src/relay-entry.ts apps/cli/src/relay-fixture-entry.ts apps/cli/src/relay-evidence.ts apps/cli/src/responses-fixture.ts apps/cli/src/responses-metadata.ts apps/cli/src/responses-relay.ts apps/cli/src/responses-sse.ts apps/cli/src/
 COPY apps/cli/tsconfig.relay.json apps/cli/
 COPY benchmarks/terminal_bench/relay.Dockerfile benchmarks/terminal_bench/relay.Dockerfile
 COPY benchmarks/terminal_bench/verify-instruction-v1.txt benchmarks/terminal_bench/verify-instruction-v1.txt

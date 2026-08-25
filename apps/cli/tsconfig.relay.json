@@ -12,6 +12,7 @@
     "src/relay-evidence.ts",
     "src/responses-metadata.ts",
     "src/responses-relay.ts",
+    "src/responses-sse.ts",
     "src/responses-fixture.ts"
   ],
   "references": [
