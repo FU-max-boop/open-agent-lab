@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import stat
+import sys
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -370,6 +371,12 @@ class CampaignController:
             fcntl.flock(self._lock_descriptor, fcntl.LOCK_UN)
             os.close(self._lock_descriptor)
             self._lock_descriptor = None
+
+    @property
+    def lock_descriptor(self) -> int:
+        if self._lock_descriptor is None:
+            raise _paired.IntegrityError("pilot launcher lock is not held")
+        return self._lock_descriptor
 
     def slot_for_config(
         self, slots: tuple[PilotSlot, ...], config: TrialConfig
@@ -756,19 +763,121 @@ class SequentialTrialQueue(TrialQueue):
         ]
 
 
+def _group_source(slots: tuple[PilotSlot, ...]) -> Path:
+    roots = {slot.run.run_dir.resolve(strict=True) for slot in slots}
+    prepared_roots = {slot.prepared.run_dir.resolve(strict=True) for slot in slots}
+    if (
+        len(roots) != 1
+        or prepared_roots != roots
+        or any(
+            not _paired._same_json(slot.prepared.binding, slot.run.binding)
+            for slot in slots
+        )
+    ):
+        raise _paired.IntegrityError("logical pilot job spans prepared roots")
+    source = next(iter(roots)) / "source"
+    resolved = source.resolve(strict=True)
+    if source.is_symlink() or resolved != source:
+        raise _paired.IntegrityError("prepared source path drifted")
+    return resolved
+
+
+def _attach_campaign_lock(controller: CampaignController, descriptor: int) -> None:
+    try:
+        actual = os.fstat(descriptor)
+        expected = (controller.root / "launcher.lock").stat()
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        raise _paired.IntegrityError("pilot launcher lock was not inherited") from error
+    if (
+        not stat.S_ISREG(actual.st_mode)
+        or actual.st_dev != expected.st_dev
+        or actual.st_ino != expected.st_ino
+    ):
+        raise _paired.IntegrityError("pilot launcher lock identity drifted")
+    controller._lock_descriptor = descriptor
+
+
+async def _run_group(
+    screen: Path, mirror: Path, group_index: int, lock_descriptor: int
+) -> None:
+    plan = build_plan(screen, mirror)
+    groups = plan.groups()
+    if len(groups) != 4 or not 0 <= group_index < len(groups):
+        raise _paired.IntegrityError("logical pilot job index is invalid")
+    slots = groups[group_index]
+    expected = (
+        _REPLICATION_SEQUENCE[group_index // len(_PROVIDER_SEQUENCE)],
+        _PROVIDER_SEQUENCE[group_index % len(_PROVIDER_SEQUENCE)],
+    )
+    if any((slot.replication, slot.provider) != expected for slot in slots):
+        raise _paired.IntegrityError("logical pilot job identity drifted")
+    source = _group_source(slots)
+    module_root = Path(__file__).resolve(strict=True).parents[2]
+    try:
+        configured = Path(os.environ["OPEN_AGENT_LAB_REPO_ROOT"]).resolve(strict=True)
+    except (KeyError, OSError) as error:
+        raise _paired.IntegrityError(
+            "prepared source environment is invalid"
+        ) from error
+    if configured != source or module_root != source:
+        raise _paired.IntegrityError("logical pilot job loaded another prepared source")
+    controller = CampaignController(plan)
+    _attach_campaign_lock(controller, lock_descriptor)
+    prepared = slots[0].prepared
+    config = JobConfig.model_validate(prepared.config)
+    job = await Job.create(config)
+    controller.reconcile_job(slots, job)
+    if job._remaining_trial_configs:
+        job._trial_queue = SequentialTrialQueue(job, slots, controller)
+        await job.run()
+    _paired._validate_job_completion(prepared.job_dir, prepared.config, 10)
+
+
+async def _run_group_process(
+    screen: Path,
+    mirror: Path,
+    group_index: int,
+    source: Path,
+    lock_descriptor: int,
+) -> None:
+    environment = dict(os.environ)
+    environment["OPEN_AGENT_LAB_REPO_ROOT"] = str(source)
+    environment["PYTHONPATH"] = str(source)
+    environment["PYTHONSAFEPATH"] = "1"
+    environment.pop("PYTHONHOME", None)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "benchmarks.terminal_bench.pilot_launcher",
+        str(screen),
+        str(mirror),
+        "--group-index",
+        str(group_index),
+        "--lock-fd",
+        str(lock_descriptor),
+        cwd=source,
+        env=environment,
+        pass_fds=(lock_descriptor,),
+    )
+    if await process.wait() != 0:
+        raise _paired.IntegrityError(f"logical pilot job {group_index + 1} failed")
+
+
 async def run_campaign(screen: Path, mirror: Path) -> dict[str, object]:
+    screen = screen.expanduser().resolve(strict=True)
+    mirror = mirror.expanduser().resolve(strict=True)
     plan = build_plan(screen, mirror)
     controller = CampaignController(plan)
     with controller:
-        for slots in plan.groups():
-            prepared = slots[0].prepared
-            config = JobConfig.model_validate(prepared.config)
-            job = await Job.create(config)
-            controller.reconcile_job(slots, job)
-            if job._remaining_trial_configs:
-                job._trial_queue = SequentialTrialQueue(job, slots, controller)
-                await job.run()
-            _paired._validate_job_completion(prepared.job_dir, prepared.config, 10)
+        for group_index, slots in enumerate(plan.groups()):
+            await _run_group_process(
+                screen,
+                mirror,
+                group_index,
+                _group_source(slots),
+                controller.lock_descriptor,
+            )
         return controller.complete()
 
 
@@ -776,11 +885,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("screen", type=Path)
     parser.add_argument("mirror", type=Path)
+    parser.add_argument("--group-index", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--lock-fd", type=int, help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
+    internal = arguments.group_index is not None or arguments.lock_fd is not None
+    if internal and (arguments.group_index is None or arguments.lock_fd is None):
+        parser.error("internal pilot group arguments must be supplied together")
     try:
+        if internal:
+            asyncio.run(
+                _run_group(
+                    arguments.screen,
+                    arguments.mirror,
+                    arguments.group_index,
+                    arguments.lock_fd,
+                )
+            )
+            return 0
         result = asyncio.run(run_campaign(arguments.screen, arguments.mirror))
     except (OSError, TypeError, ValueError) as error:
-        print(f"STOP: {error}", file=os.sys.stderr)
+        print(f"STOP: {error}", file=sys.stderr)
         return 1
     print(canonical_json(result).decode(), end="")
     return 0
