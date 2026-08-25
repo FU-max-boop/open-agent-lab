@@ -492,6 +492,34 @@ test("relay preserves split SSE bytes, injects only provider auth, and journals 
   );
 });
 
+test("relay records DeepSeek x-ds-trace-id as the provider request id", async (t) => {
+  const upstream = await listen((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "x-ds-trace-id": "deepseek-trace-1",
+    });
+    response.end(
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "deepseek-response-1",
+          model: MODEL,
+          usage: COMPLETE_USAGE,
+        },
+      })}\n\n`,
+    );
+  });
+  const { relay, sidecarPath } = await fixture(t, upstream);
+  const response = await relayRequest(relay);
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+  await relay.close();
+
+  const [, headers, closed] = records(await readFile(sidecarPath, "utf8"));
+  assert.equal(headers?.providerRequestId, "deepseek-trace-1");
+  assert.equal(closed?.providerRequestId, "deepseek-trace-1");
+});
+
 test("relay forwards, queues, and omits absent per-request Codex turn state", async (t) => {
   const turnState = "s".repeat(512);
   const contenderStates = ["contender-a", "contender-b"];
