@@ -187,8 +187,8 @@
     }
   },
   "relayBuildIds": {
-    "production": "sha256:787cd0889cdd3633599742aa1688471852c4d820af6b1b06fa4d2cc8f10a24d6",
-    "providerFreeFixture": "sha256:ebb48b550dd77471b9e210cec35de9d2dc6f24a91f4a24fc6cb7cd5ab7645587"
+    "production": "sha256:1f6a7c445647efbf284a432ce860a36da84c077ffee93c69e1b5171b12736b72",
+    "providerFreeFixture": "sha256:65cb79a65e30b81e6874db9866cc04eac8ff57a641809188348f430d70dad531"
   },
   "arms": [
     {
@@ -294,9 +294,9 @@
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:3ac53dcd0938768c375d22f6b5a6505a3465700ab65843159482a9c159983dcb",
     "benchmarks/terminal_bench/relay_evidence.py": "sha256:6bae74e2bbe9f1d066076ec59418832ba6fcf61f3c38e316222b4ce5e200f07a",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:7ad91009d13d45a6bb677f040a67f0420678df0efe0f9530a33135d795b9f011",
-    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:b4fd3d67dffe0d5f5dcadfec775bf8d968ac96c4cb850f5239366efac5217a9d",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:f29e07606e6ebe9e3904a6ba9dc0f756219fdd16388d410ce267cc5e13446695",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:898b9b880cbf00e8e938e2cf179026d01fbe95d59ae16b431dc9600d6a37087b",
+    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:d4d7f773c17252668dc72c0b3c9a767ae974fbfce8bbf785dfce3ac39ecf8356",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:6e5b5ebb824eb519810b97cfeb6541d46f9486cabd57b434837b903680a4219e",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:f69581c8a011838eaf57dbcb13f20e7d4d895a131534d39e8cfc6f74e25ac4a6",
     "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:6cb5fc5bd6922504e1d50b7c81ffd8018b479c6eb095af798fbf296ad6b079d0",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
