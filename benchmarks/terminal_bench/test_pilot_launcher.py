@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from harbor.models.job.config import RetryConfig
@@ -41,6 +41,8 @@ def _slot(root: Path, ordinal: int, provider: str = "deepseek") -> launcher.Pilo
         preflight={"sourceRevision": "a" * 40},
     )
     prepared = SimpleNamespace(
+        run_dir=root,
+        binding=run.binding,
         job_dir=root / "jobs" / provider,
         entry={"configSha256": "sha256:" + "2" * 64},
         compose_path=root / "compose.yaml",
@@ -499,6 +501,259 @@ class PilotLauncherTest(unittest.TestCase):
                 "after-2",
             ],
         )
+
+    def test_campaign_dispatches_each_job_from_its_prepared_source(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw)
+            screen = parent / "screen"
+            mirror = parent / "mirror"
+            for root in (screen, mirror):
+                (root / "source").mkdir(parents=True)
+            groups = tuple(
+                tuple(
+                    SimpleNamespace(
+                        run=SimpleNamespace(run_dir=root, binding={}),
+                        prepared=SimpleNamespace(run_dir=root, binding={}),
+                    )
+                    for _ in range(10)
+                )
+                for root in (screen, screen, mirror, mirror)
+            )
+            plan = SimpleNamespace(groups=lambda: groups)
+
+            class Controller:
+                lock_descriptor = 17
+
+                def __init__(self, _plan):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    pass
+
+                def complete(self):
+                    return {"completedTrials": 40}
+
+            runner = AsyncMock()
+            with (
+                patch.object(launcher, "build_plan", return_value=plan),
+                patch.object(launcher, "CampaignController", Controller),
+                patch.object(launcher, "_run_group_process", runner),
+            ):
+                result = asyncio.run(launcher.run_campaign(screen, mirror))
+
+        self.assertEqual(result, {"completedTrials": 40})
+        self.assertEqual(
+            [call.args[3] for call in runner.await_args_list],
+            [
+                (screen / "source").resolve(),
+                (screen / "source").resolve(),
+                (mirror / "source").resolve(),
+                (mirror / "source").resolve(),
+            ],
+        )
+        self.assertEqual(
+            [call.args[2] for call in runner.await_args_list], [0, 1, 2, 3]
+        )
+        self.assertEqual({call.args[4] for call in runner.await_args_list}, {17})
+
+    def test_group_subprocess_binds_python_and_environment_to_one_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw)
+            screen = parent / "screen"
+            mirror = parent / "mirror"
+            source = mirror / "source"
+            source.mkdir(parents=True)
+            process = SimpleNamespace(wait=AsyncMock(return_value=0))
+            create = AsyncMock(return_value=process)
+            with patch.object(asyncio, "create_subprocess_exec", create):
+                asyncio.run(launcher._run_group_process(screen, mirror, 2, source, 19))
+            args = create.await_args.args
+            kwargs = create.await_args.kwargs
+
+        self.assertEqual(
+            args[1:],
+            (
+                "-m",
+                "benchmarks.terminal_bench.pilot_launcher",
+                str(screen),
+                str(mirror),
+                "--group-index",
+                "2",
+                "--lock-fd",
+                "19",
+            ),
+        )
+        self.assertEqual(kwargs["cwd"], source)
+        self.assertEqual(kwargs["env"]["OPEN_AGENT_LAB_REPO_ROOT"], str(source))
+        self.assertEqual(kwargs["env"]["PYTHONPATH"], str(source))
+        self.assertEqual(kwargs["env"]["PYTHONSAFEPATH"], "1")
+        self.assertEqual(kwargs["pass_fds"], (19,))
+
+        failed = SimpleNamespace(wait=AsyncMock(return_value=7))
+        with (
+            patch.object(
+                asyncio, "create_subprocess_exec", AsyncMock(return_value=failed)
+            ),
+            self.assertRaisesRegex(paired.IntegrityError, "logical pilot job 3"),
+        ):
+            asyncio.run(launcher._run_group_process(screen, mirror, 2, source, 19))
+
+    def test_mirror_group_rejects_screen_identity_binding_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw).resolve()
+            screen = parent / "screen"
+            mirror = parent / "mirror"
+            for root in (screen, mirror):
+                (root / "source").mkdir(parents=True)
+
+            def plan(slot):
+                groups = tuple((slot,) for _ in range(4))
+                return SimpleNamespace(groups=lambda: groups)
+
+            run = SimpleNamespace(run_dir=mirror, binding={"root": "mirror"})
+            prepared = SimpleNamespace(
+                run_dir=mirror, binding={"root": "mirror"}, config={}
+            )
+            valid = SimpleNamespace(
+                replication="mirror-v1",
+                provider="deepseek",
+                run=run,
+                prepared=prepared,
+            )
+            mutations = {
+                "screen group": SimpleNamespace(
+                    **{**vars(valid), "replication": "screen-v1"}
+                ),
+                "screen binding": SimpleNamespace(
+                    **{
+                        **vars(valid),
+                        "prepared": SimpleNamespace(
+                            run_dir=mirror,
+                            binding={"root": "screen"},
+                            config={},
+                        ),
+                    }
+                ),
+                "screen config": SimpleNamespace(
+                    **{
+                        **vars(valid),
+                        "prepared": SimpleNamespace(
+                            run_dir=screen,
+                            binding=run.binding,
+                            config={},
+                        ),
+                    }
+                ),
+            }
+            create = AsyncMock()
+            for label, slot in mutations.items():
+                with (
+                    self.subTest(label=label),
+                    patch.object(launcher, "build_plan", return_value=plan(slot)),
+                    patch.object(launcher.Job, "create", create),
+                    self.assertRaisesRegex(
+                        paired.IntegrityError, "identity drifted|spans prepared roots"
+                    ),
+                ):
+                    asyncio.run(launcher._run_group(screen, mirror, 2, -1))
+            create.assert_not_awaited()
+
+    def test_wrong_child_module_or_environment_fails_before_job_create(self) -> None:
+        module_root = Path(launcher.__file__).resolve().parents[2]
+        slot = SimpleNamespace(replication="mirror-v1", provider="deepseek")
+        groups = tuple((slot,) for _ in range(4))
+        plan = SimpleNamespace(groups=lambda: groups)
+        create = AsyncMock()
+        with tempfile.TemporaryDirectory() as raw:
+            other = Path(raw).resolve()
+            cases = ((other, other), (module_root, other))
+            for source, configured in cases:
+                with (
+                    self.subTest(source=source, configured=configured),
+                    patch.object(launcher, "build_plan", return_value=plan),
+                    patch.object(launcher, "_group_source", return_value=source),
+                    patch.object(launcher.Job, "create", create),
+                    patch.dict(
+                        os.environ, {"OPEN_AGENT_LAB_REPO_ROOT": str(configured)}
+                    ),
+                    self.assertRaisesRegex(
+                        paired.IntegrityError, "loaded another prepared source"
+                    ),
+                ):
+                    asyncio.run(launcher._run_group(other, other, 2, -1))
+        create.assert_not_awaited()
+
+    def test_mirror_source_failure_preserves_twenty_checkpoint_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            (root / "source").mkdir()
+            original = _plan(root, 40)
+            slots = list(original.slots)
+            for index in range(20, 30):
+                slot = slots[index]
+                slots[index] = launcher.PilotSlot(
+                    slot.ordinal,
+                    "mirror-v1",
+                    slot.provider,
+                    slot.model,
+                    slot.task,
+                    slot.variant,
+                    slot.trial_lock_sha256,
+                    slot.run,
+                    slot.prepared,
+                )
+            plan = launcher.PilotPlan(tuple(slots), original.value, original.sha256)
+
+            def validate(slot, _job, result):
+                return {
+                    "telemetryComplete": True,
+                    "relayPublicationGate": {"ok": True},
+                    "provider": slot.provider,
+                    "model": slot.model,
+                    "replication": slot.replication,
+                    "providerControlIdentity": _identity(slot.provider),
+                    "task": slot.task,
+                    "variant": slot.variant,
+                    "tokens": {"output_tokens": 1},
+                    "lock": {"ordinal": slot.ordinal},
+                    "trialId": f"id-{slot.ordinal}",
+                    "trialName": result.trial_name,
+                    "chainHead": "sha256:" + f"{slot.ordinal:064x}",
+                }
+
+            controller = launcher.CampaignController(plan, validate)
+            with controller:
+                for slot in plan.slots[:20]:
+                    controller.before_create(slot, _job())
+                    controller.after_result(slot, _job(), _result(slot.ordinal))
+
+            create = AsyncMock()
+            with (
+                patch.object(launcher, "build_plan", return_value=plan),
+                patch.object(launcher.Job, "create", create),
+                patch.dict(
+                    os.environ,
+                    {"OPEN_AGENT_LAB_REPO_ROOT": str(root / "source")},
+                ),
+                self.assertRaisesRegex(
+                    paired.IntegrityError, "loaded another prepared source"
+                ),
+            ):
+                asyncio.run(launcher._run_group(root, root, 2, -1))
+
+            ordinal_21 = plan.slots[20]
+            resumed = launcher.CampaignController(plan, validate)
+            prefix, _, _ = resumed._prefix()
+            self.assertEqual(len(prefix), 20)
+            self.assertFalse(resumed._admission_path(ordinal_21).exists())
+            self.assertFalse(resumed._claim_path(ordinal_21).exists())
+            self.assertFalse(resumed._checkpoint_path(21).exists())
+            create.assert_not_awaited()
 
 
 if __name__ == "__main__":
