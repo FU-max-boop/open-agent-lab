@@ -185,7 +185,7 @@ def _authorization_is_published(
         or receipt.get("sourceRevision") != run.preflight["sourceRevision"]
         or receipt.get("preflightSha256") != run.binding["preflight_sha256"]
         or receipt.get("benchmarkStartAuthorized") is not True
-        or receipt.get("verification") != "operator_attested"
+        or receipt.get("providerControlVerification") != "operator_attested"
     ):
         raise _paired.IntegrityError("pilot authorization receipt drifted")
     try:
