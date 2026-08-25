@@ -707,7 +707,7 @@ def _validate_prepared_source(
         if (
             configured != root
             or not is_strict_int(manifest.get("schemaVersion"))
-            or manifest.get("schemaVersion") != 4
+            or manifest.get("schemaVersion") != 5
             or manifest.get("experimentId") != binding["experiment_id"]
             or digest_bytes(manifest_bytes) != binding["experiment_manifest_sha256"]
             or not isinstance(file_hashes, dict)
