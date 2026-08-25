@@ -119,6 +119,7 @@ async function turnStateRequest(
 
 async function interruptedRelayRequest(
   relay: NativeResponsesRelay,
+  onData?: (body: Buffer) => void,
 ): Promise<{ body: Buffer; complete: boolean; status: number }> {
   const payload = requestBody();
   return new Promise((resolve, reject) => {
@@ -134,7 +135,10 @@ async function interruptedRelayRequest(
       },
       (response) => {
         const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+          onData?.(Buffer.concat(chunks));
+        });
         response.on("error", () => undefined);
         response.once("close", () => {
           assert.ok(response.statusCode !== undefined);
@@ -916,17 +920,24 @@ test("relay preserves a safe prefix but drops an escaped late echo and following
   const following = Buffer.from('data: {"type":"response.output_text.delta","delta":"after"}\n\n');
   const safePrefix = Buffer.concat([added, first]);
   const allUpstreamBytes = Buffer.concat([safePrefix, offending, following]);
+  let acknowledgeSafePrefix!: () => void;
+  const safePrefixDelivered = new Promise<void>((resolve) => {
+    acknowledgeSafePrefix = resolve;
+  });
+  t.after(() => acknowledgeSafePrefix());
   const upstream = await listen((_request, response) => {
     void (async () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(safePrefix);
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      await safePrefixDelivered;
       response.end(Buffer.concat([offending, following]));
     })().catch((error: unknown) => response.destroy(error instanceof Error ? error : undefined));
   });
   const { relay, sidecarPath } = await fixture(t, upstream);
 
-  const client = await interruptedRelayRequest(relay);
+  const client = await interruptedRelayRequest(relay, (body) => {
+    if (body.byteLength >= safePrefix.byteLength) acknowledgeSafePrefix();
+  });
   assert.equal(client.status, 200);
   assert.equal(client.complete, false);
   assert.deepEqual(client.body, safePrefix);
