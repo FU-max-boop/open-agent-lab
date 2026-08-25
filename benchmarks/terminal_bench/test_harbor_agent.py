@@ -37,6 +37,8 @@ from benchmarks.terminal_bench.experiment_contract import (
     ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
 )
 from benchmarks.terminal_bench.harbor_agent import (
+    _DELIVERABLE_FIRST_INSTRUCTION,
+    _DELIVERABLE_FIRST_INSTRUCTION_SHA256,
     _EXPERIMENT_MANIFEST,
     _PROFILES,
     _RELAY_AUTHORIZE_COMMAND,
@@ -46,6 +48,7 @@ from benchmarks.terminal_bench.harbor_agent import (
     _VERIFY_INSTRUCTION,
     _VERIFY_INSTRUCTION_SHA256,
     OpenAgentLabCodex,
+    OpenAgentLabCodexDeliverableFirstV1,
     OpenAgentLabCodexLiveRouteProbe,
     OpenAgentLabCodexVerifyInstructionV1,
     _validate_live_source,
@@ -566,6 +569,24 @@ class ProfileDriftTest(unittest.TestCase):
         self.assertTrue(content.endswith(b"\n"))
         self.assertFalse(content.endswith(b"\n\n"))
 
+    def test_deliverable_first_instruction_bytes_are_frozen(self) -> None:
+        path = Path(__file__).with_name("deliverable-first-v1.txt")
+        content = path.read_bytes()
+        self.assertEqual(len(content), 1184)
+        self.assertEqual(content.decode(), _DELIVERABLE_FIRST_INSTRUCTION)
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(content).hexdigest(),
+            _DELIVERABLE_FIRST_INSTRUCTION_SHA256,
+        )
+        self.assertTrue(
+            content.startswith(
+                _VERIFY_INSTRUCTION.rstrip().encode()
+                + b"\n\nDELIVERABLE-FIRST-V1 (exploratory treatment)\n"
+            )
+        )
+        self.assertTrue(content.endswith(b"\n"))
+        self.assertFalse(content.endswith(b"\n\n"))
+
     def test_provider_free_e2e_rejects_a_degraded_isolation_command(self) -> None:
         secret = b"provider-free-test-key"
         _assert_isolation_call({"cmd": _isolation_command(secret)}, secret)
@@ -754,7 +775,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     )
                 parent.assert_not_called()
 
-    def test_verify_instruction_is_opt_in_and_uses_real_codex_config(self) -> None:
+    def test_instruction_variants_use_exact_real_codex_config(self) -> None:
         common = {
             "model_name": "zai/glm-5.3",
             "version": "0.149.0",
@@ -770,8 +791,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
             treatment = OpenAgentLabCodexVerifyInstructionV1(
                 Path(raw) / "treatment", run_binding=_RUN_BINDING, **common
             )
+            deliverable = OpenAgentLabCodexDeliverableFirstV1(
+                Path(raw) / "deliverable", run_binding=_RUN_BINDING, **common
+            )
 
-        self.assertNotIn("developer_instructions", control._build_effective_config())
         self.assertEqual(
             control._build_effective_config()["features"],
             {
@@ -780,36 +803,53 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 "unbounded_connection_retries": False,
             },
         )
-        self.assertEqual(
-            treatment._build_effective_config()["developer_instructions"],
-            _VERIFY_INSTRUCTION,
+        cases = (
+            (
+                control,
+                "open-agent-lab-codex",
+                "control-v1",
+                None,
+                None,
+            ),
+            (
+                treatment,
+                "open-agent-lab-codex-verify-instruction-v1",
+                "verify-instruction-v1",
+                _VERIFY_INSTRUCTION,
+                _VERIFY_INSTRUCTION_SHA256,
+            ),
+            (
+                deliverable,
+                "open-agent-lab-codex-deliverable-first-v1",
+                "deliverable-first-v1",
+                _DELIVERABLE_FIRST_INSTRUCTION,
+                _DELIVERABLE_FIRST_INSTRUCTION_SHA256,
+            ),
         )
-        self.assertEqual(control._open_agent_lab_variant["variant_id"], "control-v1")
-        self.assertEqual(
-            treatment._open_agent_lab_variant,
-            {
-                "schema_version": 1,
-                "variant_id": "verify-instruction-v1",
-                "developer_instruction_requested": True,
-                "requested_developer_instructions_sha256": _VERIFY_INSTRUCTION_SHA256,
-                "request_max_retries": 0,
-                "stream_max_retries": 0,
-                "unbounded_connection_retries": False,
-            },
-        )
-
-        for agent in (control, treatment):
-            with self.subTest(variant=agent._open_agent_lab_variant["variant_id"]):
-                provider = agent._build_effective_config()["model_providers"][
-                    "open-agent-lab"
-                ]
+        for agent, name, variant_id, instruction, instruction_sha256 in cases:
+            with self.subTest(variant=variant_id):
+                config = agent._build_effective_config()
+                if instruction is None:
+                    self.assertNotIn("developer_instructions", config)
+                else:
+                    self.assertEqual(config["developer_instructions"], instruction)
+                self.assertEqual(agent.name(), name)
+                self.assertEqual(
+                    agent._open_agent_lab_variant,
+                    {
+                        "schema_version": 1,
+                        "variant_id": variant_id,
+                        "developer_instruction_requested": instruction is not None,
+                        "requested_developer_instructions_sha256": instruction_sha256,
+                        "request_max_retries": 0,
+                        "stream_max_retries": 0,
+                        "unbounded_connection_retries": False,
+                    },
+                )
+                provider = config["model_providers"]["open-agent-lab"]
                 self.assertEqual(provider["request_max_retries"], 0)
                 self.assertEqual(provider["stream_max_retries"], 0)
-                self.assertFalse(
-                    agent._build_effective_config()["features"][
-                        "unbounded_connection_retries"
-                    ]
-                )
+                self.assertFalse(config["features"]["unbounded_connection_retries"])
 
     def test_live_route_probe_is_zero_retry_and_non_scoring(self) -> None:
         with (
@@ -997,12 +1037,17 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 OpenAgentLabCodex(
                     Path(raw), enable_verify_instruction_v1="true", **common
                 )  # type: ignore[arg-type]
-            with self.assertRaisesRegex(
-                ValueError, "requires enable_verify_instruction_v1=true"
+            for treatment in (
+                OpenAgentLabCodexVerifyInstructionV1,
+                OpenAgentLabCodexDeliverableFirstV1,
             ):
-                OpenAgentLabCodexVerifyInstructionV1(
-                    Path(raw), enable_verify_instruction_v1=False, **common
-                )
+                with (
+                    self.subTest(treatment=treatment.__name__),
+                    self.assertRaisesRegex(
+                        ValueError, "requires enable_verify_instruction_v1=true"
+                    ),
+                ):
+                    treatment(Path(raw), enable_verify_instruction_v1=False, **common)
 
     def test_live_run_binding_is_strict_and_copied(self) -> None:
         common = {

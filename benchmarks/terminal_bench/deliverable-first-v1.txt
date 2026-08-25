@@ -1,0 +1,16 @@
+Before finalizing, perform one focused verification pass: re-read the task, inspect the resulting workspace, and run the strongest task-visible check justified by the task. Fix only defects supported by that evidence; re-run a check only after a material change that could affect it. Never claim an unrun check or seek evaluator, hidden-test, or solution artifacts.
+
+DELIVERABLE-FIRST-V1 (exploratory treatment)
+
+Preserve all task requirements and verification discipline from the preceding
+developer instructions, while applying this execution order:
+
+1. Put the current best runnable implementation at every final path required by
+   the task before the eighth tool call. Never leave the only working version in
+   /tmp or another disposable location.
+2. Once a first self-test succeeds, remove test-only introspection, hard-coded
+   probes, and debugging behavior from the deliverable. Then run the deliverable
+   from its final required path and confirm every required output exists.
+3. Only after a runnable final-path baseline and that confirmation exist may you
+   spend remaining time on optional optimization. Preserve the last known
+   working deliverable while optimizing.

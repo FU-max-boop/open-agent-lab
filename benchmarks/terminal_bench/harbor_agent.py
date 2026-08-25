@@ -102,6 +102,21 @@ if (
 ):
     raise RuntimeError("verify-instruction-v1.txt drifted from its frozen bytes.")
 _VERIFY_INSTRUCTION = _VERIFY_INSTRUCTION_BYTES.decode("utf-8")
+_DELIVERABLE_FIRST_INSTRUCTION_PATH = Path(__file__).with_name(
+    "deliverable-first-v1.txt"
+)
+_DELIVERABLE_FIRST_INSTRUCTION_SHA256 = (
+    "sha256:5f1249f118ea229f35c1822c038e6ac8e671326f7e37e5079393a5c111c54be6"
+)
+_DELIVERABLE_FIRST_INSTRUCTION_BYTES = _DELIVERABLE_FIRST_INSTRUCTION_PATH.read_bytes()
+if (
+    "sha256:" + hashlib.sha256(_DELIVERABLE_FIRST_INSTRUCTION_BYTES).hexdigest()
+    != _DELIVERABLE_FIRST_INSTRUCTION_SHA256
+    or not _DELIVERABLE_FIRST_INSTRUCTION_BYTES.endswith(b"\n")
+    or _DELIVERABLE_FIRST_INSTRUCTION_BYTES.endswith(b"\n\n")
+):
+    raise RuntimeError("deliverable-first-v1.txt drifted from its frozen bytes.")
+_DELIVERABLE_FIRST_INSTRUCTION = _DELIVERABLE_FIRST_INSTRUCTION_BYTES.decode("utf-8")
 _CODEX_BASE_INSTRUCTIONS_PATH = Path(__file__).with_name(
     "codex-0.149.0-base-instructions.md"
 )
@@ -412,7 +427,7 @@ def _provider_config(
     relay_url: str,
     *,
     live_route_probe: bool,
-    enable_verification: bool,
+    developer_instruction: str | None,
 ) -> dict[str, Any]:
     context_window = profile["context_window"]
     config: dict[str, Any] = {
@@ -453,8 +468,8 @@ def _provider_config(
             }
         },
     }
-    if enable_verification:
-        config["developer_instructions"] = _VERIFY_INSTRUCTION
+    if developer_instruction is not None:
+        config["developer_instructions"] = developer_instruction
     return config
 
 
@@ -505,19 +520,21 @@ def _model_catalog(model: str, profile: _Profile) -> str:
 
 
 def _variant(
-    provider: str, enable_verification: bool, *, live_route_probe: bool
+    provider: str,
+    *,
+    live_route_probe: bool,
+    variant_id: str | None,
+    instruction_sha256: str | None,
 ) -> dict[str, Any]:
     if live_route_probe:
         return live_route_probe_variant(provider, effect_verified=False)
+    if (variant_id is None) != (instruction_sha256 is None):
+        raise RuntimeError("The developer instruction variant is incomplete.")
     return {
         "schema_version": 1,
-        "variant_id": (
-            "verify-instruction-v1" if enable_verification else "control-v1"
-        ),
-        "developer_instruction_requested": enable_verification,
-        "requested_developer_instructions_sha256": (
-            _VERIFY_INSTRUCTION_SHA256 if enable_verification else None
-        ),
+        "variant_id": variant_id or "control-v1",
+        "developer_instruction_requested": variant_id is not None,
+        "requested_developer_instructions_sha256": instruction_sha256,
         **CODEX_PROVIDER_RETRY_POLICY,
     }
 
@@ -528,6 +545,9 @@ class OpenAgentLabCodex(Codex):
     MODEL_CONNECTION = None
     SUPPORTS_RESUME = False
     _LIVE_ROUTE_PROBE = False
+    _VARIANT_ID = "verify-instruction-v1"
+    _DEVELOPER_INSTRUCTION = _VERIFY_INSTRUCTION
+    _DEVELOPER_INSTRUCTION_SHA256 = _VERIFY_INSTRUCTION_SHA256
 
     def __init__(
         self,
@@ -560,12 +580,15 @@ class OpenAgentLabCodex(Codex):
         if binding is None:
             raise RuntimeError("Live provider work requires a prepared run binding.")
         _validate_live_source(binding)
+        developer_instruction = (
+            self._DEVELOPER_INSTRUCTION if enable_verify_instruction_v1 else None
+        )
         provider_config = _provider_config(
             provider,
             profile,
             relay_url,
             live_route_probe=self._LIVE_ROUTE_PROBE,
-            enable_verification=enable_verify_instruction_v1,
+            developer_instruction=developer_instruction,
         )
         agent_env["CODEX_AUTH_JSON_PATH"] = str(_EMPTY_AUTH)
         self._open_agent_lab_provider = provider
@@ -585,8 +608,13 @@ class OpenAgentLabCodex(Codex):
         self._codex_run_active = False
         self._open_agent_lab_variant = _variant(
             provider,
-            enable_verify_instruction_v1,
             live_route_probe=self._LIVE_ROUTE_PROBE,
+            variant_id=self._VARIANT_ID if developer_instruction is not None else None,
+            instruction_sha256=(
+                self._DEVELOPER_INSTRUCTION_SHA256
+                if developer_instruction is not None
+                else None
+            ),
         )
         self._provider_evidence_dir = (
             logs_dir.parent / "artifacts" / "provider-evidence"
@@ -1059,6 +1087,19 @@ class OpenAgentLabCodexVerifyInstructionV1(OpenAgentLabCodex):
     @override
     def name() -> str:
         return "open-agent-lab-codex-verify-instruction-v1"
+
+
+class OpenAgentLabCodexDeliverableFirstV1(OpenAgentLabCodexVerifyInstructionV1):
+    """Named Harbor treatment arm for the observed deliverable-first instruction."""
+
+    _VARIANT_ID = "deliverable-first-v1"
+    _DEVELOPER_INSTRUCTION = _DELIVERABLE_FIRST_INSTRUCTION
+    _DEVELOPER_INSTRUCTION_SHA256 = _DELIVERABLE_FIRST_INSTRUCTION_SHA256
+
+    @staticmethod
+    @override
+    def name() -> str:
+        return "open-agent-lab-codex-deliverable-first-v1"
 
 
 class OpenAgentLabCodexLiveRouteProbe(OpenAgentLabCodex):
