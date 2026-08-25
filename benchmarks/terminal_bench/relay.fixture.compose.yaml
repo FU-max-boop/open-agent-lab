@@ -3,7 +3,7 @@ services:
     build:
       target: fixture
     environment:
-      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:ebb48b550dd77471b9e210cec35de9d2dc6f24a91f4a24fc6cb7cd5ab7645587"
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:65cb79a65e30b81e6874db9866cc04eac8ff57a641809188348f430d70dad531"
     entrypoint:
       - node
       - /app/apps/cli/relay-dist/relay-fixture-entry.js

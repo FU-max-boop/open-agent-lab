@@ -644,7 +644,8 @@ export async function startNativeResponsesRelay(
           upstreamStatus = upstreamResponse.status;
           const upstreamProviderRequestId =
             upstreamResponse.headers.get("x-request-id") ??
-            upstreamResponse.headers.get("request-id");
+            upstreamResponse.headers.get("request-id") ??
+            upstreamResponse.headers.get("x-ds-trace-id");
           const upstreamModelHeader = upstreamResponse.headers.get("openai-model");
           const forwarded: Record<string, string> = {};
           for (const name of FORWARDED_HEADERS) {
