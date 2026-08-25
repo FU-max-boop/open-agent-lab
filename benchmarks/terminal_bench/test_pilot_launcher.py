@@ -186,7 +186,7 @@ class PilotLauncherTest(unittest.TestCase):
                         "providerCredentialSha256": "sha256:"
                         + ("6" if provider == "deepseek" else "7") * 64,
                         "providerControl": _provider_control(provider, replication),
-                        "verification": "operator_attested",
+                        "providerControlVerification": "operator_attested",
                         "benchmarkStartAuthorized": True,
                     }
                     path = auth / f"{provider}.json"
@@ -201,6 +201,20 @@ class PilotLauncherTest(unittest.TestCase):
                 plan = launcher.build_plan(screen, mirror)
                 receipt_path = mirror / "authorizations" / "zai.json"
                 receipt = json.loads(receipt_path.read_text())
+                for legacy in (False, True):
+                    invalid = dict(receipt)
+                    invalid.pop("providerControlVerification")
+                    if legacy:
+                        invalid["verification"] = "operator_attested"
+                    receipt_path.write_bytes(canonical_json(invalid))
+                    with (
+                        self.subTest(legacy=legacy),
+                        self.assertRaisesRegex(
+                            paired.IntegrityError, "authorization receipt drifted"
+                        ),
+                    ):
+                        launcher.build_plan(screen, mirror)
+                receipt_path.write_bytes(canonical_json(receipt))
                 receipt["providerCredentialSha256"] = "sha256:" + "8" * 64
                 receipt_path.write_bytes(canonical_json(receipt))
                 with self.assertRaisesRegex(
