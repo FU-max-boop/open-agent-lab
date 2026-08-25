@@ -53,6 +53,7 @@ _CHECKPOINT_FIELDS = {
     "replicationId",
     "provider",
     "model",
+    "providerControlIdentitySha256",
     "task",
     "variant",
     "admissionSha256",
@@ -105,6 +106,14 @@ class PilotPlan:
         return tuple(
             tuple(self.slots[offset : offset + 10]) for offset in range(0, 40, 10)
         )
+
+    def provider_identity(self, provider: str) -> dict[str, object]:
+        identities = self.value.get("providerControlIdentities")
+        if not isinstance(identities, dict) or not isinstance(
+            identities.get(provider), dict
+        ):
+            raise _paired.IntegrityError("pilot plan lacks a provider identity")
+        return identities[provider]
 
 
 def _utc_now() -> str:
@@ -438,6 +447,9 @@ class CampaignController:
                 "replicationId": slot.replication,
                 "provider": slot.provider,
                 "model": slot.model,
+                "providerControlIdentitySha256": _paired._digest(
+                    self.plan.provider_identity(slot.provider)
+                ),
                 "task": slot.task,
                 "variant": slot.variant,
                 "admissionSha256": digest_bytes(admission_raw),
@@ -511,6 +523,9 @@ class CampaignController:
             "replicationId": slot.replication,
             "provider": slot.provider,
             "model": slot.model,
+            "providerControlIdentitySha256": _paired._digest(
+                self.plan.provider_identity(slot.provider)
+            ),
             "preflightSha256": slot.run.binding["preflight_sha256"],
             "jobId": str(job.id),
             "jobDir": str(slot.prepared.job_dir),
@@ -567,6 +582,15 @@ class CampaignController:
                 attempt.get("telemetryComplete") is not True
                 or not isinstance(gate, dict)
                 or gate.get("ok") is not True
+                or attempt.get("provider") != slot.provider
+                or attempt.get("model") != slot.model
+                or attempt.get("replication") != slot.replication
+                or attempt.get("task") != slot.task
+                or attempt.get("variant") != slot.variant
+                or not _paired._same_json(
+                    attempt.get("providerControlIdentity"),
+                    self.plan.provider_identity(slot.provider),
+                )
                 or not is_strict_int(output)
                 or not 0 <= output <= SCORED_SLOT_OUTPUT_TOKEN_LIMIT
                 or _paired._digest(attempt.get("lock")) != slot.trial_lock_sha256
@@ -590,6 +614,9 @@ class CampaignController:
             "replicationId": slot.replication,
             "provider": slot.provider,
             "model": slot.model,
+            "providerControlIdentitySha256": _paired._digest(
+                self.plan.provider_identity(slot.provider)
+            ),
             "task": slot.task,
             "variant": slot.variant,
             "admissionSha256": digest_bytes(admission_raw),

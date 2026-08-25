@@ -59,11 +59,18 @@ def _slot(root: Path, ordinal: int, provider: str = "deepseek") -> launcher.Pilo
     )
 
 
+def _identity(provider: str) -> dict[str, object]:
+    return {"provider": provider, "model": paired._PROVIDERS[provider]["model"]}
+
+
 def _plan(root: Path, count: int, provider: str = "deepseek") -> launcher.PilotPlan:
     slots = tuple(_slot(root, ordinal, provider) for ordinal in range(1, count + 1))
     value = {
         "schemaVersion": 1,
         "proofClass": "test-plan",
+        "providerControlIdentities": {
+            item: _identity(item) for item in sorted({slot.provider for slot in slots})
+        },
         "slots": [slot.public() for slot in slots],
     }
     return launcher.PilotPlan(slots, value, paired._digest(value))
@@ -239,6 +246,12 @@ class PilotLauncherTest(unittest.TestCase):
                 return {
                     "telemetryComplete": True,
                     "relayPublicationGate": {"ok": True},
+                    "provider": slot.provider,
+                    "model": slot.model,
+                    "replication": slot.replication,
+                    "providerControlIdentity": _identity(slot.provider),
+                    "task": slot.task,
+                    "variant": slot.variant,
                     "tokens": {"output_tokens": 50_000},
                     "lock": lock,
                     "trialId": f"id-{slot.ordinal}",
@@ -277,6 +290,10 @@ class PilotLauncherTest(unittest.TestCase):
             value = {
                 "schemaVersion": 1,
                 "proofClass": "test-plan",
+                "providerControlIdentities": {
+                    provider: _identity(provider)
+                    for provider in launcher._PROVIDER_SEQUENCE
+                },
                 "slots": [slot.public() for slot in slots],
             }
             plan = launcher.PilotPlan(slots, value, paired._digest(value))
@@ -285,6 +302,12 @@ class PilotLauncherTest(unittest.TestCase):
                 return {
                     "telemetryComplete": True,
                     "relayPublicationGate": {"ok": True},
+                    "provider": slot.provider,
+                    "model": slot.model,
+                    "replication": slot.replication,
+                    "providerControlIdentity": _identity(slot.provider),
+                    "task": slot.task,
+                    "variant": slot.variant,
                     "tokens": {"output_tokens": 50_000},
                     "lock": {"ordinal": slot.ordinal},
                     "trialId": f"id-{slot.ordinal}",
@@ -305,6 +328,55 @@ class PilotLauncherTest(unittest.TestCase):
             )
             self.assertEqual(complete["campaignOutputTokens"], 2_000_000)
             self.assertFalse((controller.root / "stop.json").exists())
+
+    def test_checkpoint_binds_the_sealed_attempt_to_the_planned_slot(self) -> None:
+        mutations = {
+            "provider": "zai",
+            "model": "wrong-model",
+            "replication": "mirror-v1",
+            "task": paired._TASKS[1],
+            "variant": "verify-instruction-v1",
+            "providerControlIdentity": {"provider": "deepseek", "model": "wrong"},
+        }
+        for field, replacement in mutations.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as raw:
+                plan = _plan(Path(raw), 1)
+                slot = plan.slots[0]
+
+                def validate(
+                    _slot,
+                    _job,
+                    result,
+                    planned_slot=slot,
+                    mutation_field=field,
+                    mutation_value=replacement,
+                ):
+                    attempt = {
+                        "telemetryComplete": True,
+                        "relayPublicationGate": {"ok": True},
+                        "provider": planned_slot.provider,
+                        "model": planned_slot.model,
+                        "replication": planned_slot.replication,
+                        "providerControlIdentity": _identity(planned_slot.provider),
+                        "task": planned_slot.task,
+                        "variant": planned_slot.variant,
+                        "tokens": {"output_tokens": 1},
+                        "lock": {"ordinal": planned_slot.ordinal},
+                        "trialId": "trial-id",
+                        "trialName": result.trial_name,
+                        "chainHead": "sha256:" + "4" * 64,
+                    }
+                    attempt[mutation_field] = mutation_value
+                    return attempt
+
+                controller = launcher.CampaignController(plan, validate)
+                with controller:
+                    controller.before_create(slot, _job())
+                    with self.assertRaisesRegex(
+                        paired.IntegrityError, "complete sealed checkpoint"
+                    ):
+                        controller.after_result(slot, _job(), _result(1))
+                self.assertFalse(controller._checkpoint_path(1).exists())
 
     def test_admission_without_a_claim_is_resumable_but_claimed_slot_is_not(
         self,
@@ -334,10 +406,16 @@ class PilotLauncherTest(unittest.TestCase):
             plan = _plan(root, 1)
             slot = plan.slots[0]
 
-            def validate(_slot, _job, result):
+            def validate(validated_slot, _job, result):
                 return {
                     "telemetryComplete": True,
                     "relayPublicationGate": {"ok": True},
+                    "provider": validated_slot.provider,
+                    "model": validated_slot.model,
+                    "replication": validated_slot.replication,
+                    "providerControlIdentity": _identity(validated_slot.provider),
+                    "task": validated_slot.task,
+                    "variant": validated_slot.variant,
                     "tokens": {"output_tokens": 7},
                     "lock": {"ordinal": 1},
                     "trialId": "recovered-id",

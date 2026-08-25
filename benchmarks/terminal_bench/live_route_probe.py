@@ -34,6 +34,7 @@ from .experiment_contract import (
     is_digest,
     is_strict_int,
     live_route_probe_variant,
+    provider_control_identity,
     provider_control_window,
     relay_claim_name,
     same_json,
@@ -72,6 +73,7 @@ _PILOT_SCHEDULER_ADMISSION_FIELDS = {
     "replicationId",
     "provider",
     "model",
+    "providerControlIdentitySha256",
     "preflightSha256",
     "jobId",
     "jobDir",
@@ -178,6 +180,7 @@ def _validate_pilot_scheduler_admission(
     job_dir: Path,
     job_id: UUID,
     trial_lock_sha256: str,
+    provider_control_identity_sha256: str,
 ) -> dict[str, Any]:
     path = pilot_scheduler_admission_path(run_dir, provider, trial_lock_sha256)
     try:
@@ -213,6 +216,8 @@ def _validate_pilot_scheduler_admission(
         or admission.get("replicationId") != binding.get("replication_id")
         or admission.get("provider") != provider
         or admission.get("model") != model
+        or admission.get("providerControlIdentitySha256")
+        != provider_control_identity_sha256
         or admission.get("preflightSha256") != binding.get("preflight_sha256")
         or admission.get("jobId") != str(job_id)
         or admission.get("jobDir") != str(job_dir)
@@ -1164,6 +1169,19 @@ def validate_pilot_authorization(
     _relay_window(expires, PILOT_RELAY_TTL_SECONDS)
     pilot = LiveRouteRun.open(run_dir, provider).pilot_job()
     job_id, trial_lock_sha256 = pilot.claim_active_trial(active_trial_dir)
+    try:
+        current_identity_sha256 = canonical_digest(
+            provider_control_identity(
+                fresh.get("providerControl"),
+                provider,
+                model,
+                fresh.get("providerCredentialSha256"),
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise IntegrityError(
+            "pilot authorization stable identity is invalid"
+        ) from error
     _validate_pilot_scheduler_admission(
         run_dir,
         provider,
@@ -1172,6 +1190,7 @@ def validate_pilot_authorization(
         pilot.job_dir,
         job_id,
         trial_lock_sha256,
+        current_identity_sha256,
     )
     _claim_slot(
         run_dir,

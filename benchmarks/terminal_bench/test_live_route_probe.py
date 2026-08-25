@@ -651,7 +651,12 @@ class ProbeFixture:
                 output,
             )
 
-    def validate_authorization(self, *, scheduled: bool = True) -> dict[str, object]:
+    def validate_authorization(
+        self,
+        *,
+        scheduled: bool = True,
+        planned_identity_sha256: str | None = None,
+    ) -> dict[str, object]:
         pilot_job = self.root / self.pilot_entry["jobDir"]
         pilot_compose = self.root / self.pilot_entry["compose"]
         trial_lock_sha256 = "sha256:" + "a" * 64
@@ -659,6 +664,13 @@ class ProbeFixture:
             self.root, self.provider, trial_lock_sha256
         )
         if scheduled:
+            receipt = json.loads(self.authorization.read_text())
+            identity = paired.provider_control_identity(
+                receipt["providerControl"],
+                self.provider,
+                self.model,
+                receipt["providerCredentialSha256"],
+            )
             _write(
                 admission_path,
                 {
@@ -670,6 +682,9 @@ class ProbeFixture:
                     "replicationId": self.binding["replication_id"],
                     "provider": self.provider,
                     "model": self.model,
+                    "providerControlIdentitySha256": (
+                        planned_identity_sha256 or paired._digest(identity)
+                    ),
                     "preflightSha256": self.binding["preflight_sha256"],
                     "jobId": str(UUID(int=102)),
                     "jobDir": str(pilot_job),
@@ -1162,6 +1177,45 @@ class LiveRouteProbeTest(unittest.TestCase):
             paired.IntegrityError, "project-owned sequential launcher"
         ):
             self.fixture.validate_authorization(scheduled=False)
+        self.assertEqual(
+            list(self.fixture.authorizations.glob("deepseek.pilot.*.claim.json")), []
+        )
+
+    def test_pilot_admission_binds_the_current_provider_control_identity(self) -> None:
+        self.fixture.verify(self.fixture.authorization)
+        receipt_a = json.loads(self.fixture.authorization.read_text())
+        identity_a = paired.provider_control_identity(
+            receipt_a["providerControl"],
+            self.fixture.provider,
+            self.fixture.model,
+            receipt_a["providerCredentialSha256"],
+        )
+        cap = json.loads(self.fixture.cap.read_text())
+        cap["providerControl"]["limitUsd"] = 1
+        _write(self.fixture.cap, cap)
+        claim_path = next(
+            self.fixture.authorizations.glob("deepseek.probe.*.claim.json")
+        )
+        claim = json.loads(claim_path.read_text())
+        claim["policySha256"] = paired._digest_bytes(self.fixture.cap.read_bytes())
+        _write(claim_path, claim)
+        self.fixture.authorization.unlink()
+        receipt_b = self.fixture.verify(self.fixture.authorization)
+        self.assertNotEqual(
+            paired._digest(identity_a),
+            paired._digest(
+                paired.provider_control_identity(
+                    receipt_b["providerControl"],
+                    self.fixture.provider,
+                    self.fixture.model,
+                    receipt_b["providerCredentialSha256"],
+                )
+            ),
+        )
+        with self.assertRaisesRegex(paired.IntegrityError, "scheduler admission"):
+            self.fixture.validate_authorization(
+                planned_identity_sha256=paired._digest(identity_a)
+            )
         self.assertEqual(
             list(self.fixture.authorizations.glob("deepseek.pilot.*.claim.json")), []
         )
