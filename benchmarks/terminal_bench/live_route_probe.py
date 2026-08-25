@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import os
 import stat
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ from .experiment_contract import (
     is_digest,
     is_strict_int,
     live_route_probe_variant,
+    provider_control_identity,
     provider_control_window,
     relay_claim_name,
     same_json,
@@ -61,6 +64,26 @@ _MAX_SCANNED_FILES = 4096
 _MAX_SCANNED_DIRS = 1024
 _MAX_SCAN_DEPTH = 32
 _RELAY_START_MARGIN_SECONDS = 60
+_PILOT_SCHEDULER_ADMISSION_FIELDS = {
+    "schemaVersion",
+    "proofClass",
+    "experimentId",
+    "planSha256",
+    "ordinal",
+    "replicationId",
+    "provider",
+    "model",
+    "providerControlIdentitySha256",
+    "preflightSha256",
+    "jobId",
+    "jobDir",
+    "trialLockSha256",
+    "previousCheckpointSha256",
+    "admittedAt",
+}
+_ACTIVE_PILOT_SCHEDULER_ADMISSION: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("open_agent_lab_pilot_scheduler_admission", default=None)
+)
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
@@ -119,6 +142,92 @@ def _bounded_file(path: Path, label: str) -> bytes:
     if not data or len(data) > _MAX_INPUT_BYTES:
         raise IntegrityError(f"{label} must be a non-empty bounded regular file")
     return data
+
+
+def pilot_scheduler_admission_path(
+    run_dir: Path, provider: str, trial_lock_sha256: str
+) -> Path:
+    """Return the one admission path consumed by a scored pilot trial."""
+    if provider not in LiveRouteRun.providers() or not is_digest(trial_lock_sha256):
+        raise IntegrityError("pilot scheduler admission identity is invalid")
+    return (
+        run_dir
+        / "authorizations"
+        / (
+            f"{provider}.pilot-scheduler."
+            f"{trial_lock_sha256.removeprefix('sha256:')}.json"
+        )
+    )
+
+
+@contextmanager
+def active_pilot_scheduler_admission(admission_sha256: str):
+    """Bind one in-process Harbor trial to the project-owned launcher."""
+    if not is_digest(admission_sha256):
+        raise IntegrityError("pilot scheduler admission digest is invalid")
+    token = _ACTIVE_PILOT_SCHEDULER_ADMISSION.set(admission_sha256)
+    try:
+        yield
+    finally:
+        _ACTIVE_PILOT_SCHEDULER_ADMISSION.reset(token)
+
+
+def _validate_pilot_scheduler_admission(
+    run_dir: Path,
+    provider: str,
+    model: str,
+    binding: dict[str, Any],
+    job_dir: Path,
+    job_id: UUID,
+    trial_lock_sha256: str,
+    provider_control_identity_sha256: str,
+) -> dict[str, Any]:
+    path = pilot_scheduler_admission_path(run_dir, provider, trial_lock_sha256)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise IntegrityError(
+            "scored trials require the project-owned sequential launcher"
+        ) from error
+    raw = _bounded_file(path, "pilot scheduler admission")
+    try:
+        admission = _mapping(
+            _loads(raw.decode(), "pilot scheduler admission"),
+            "pilot scheduler admission",
+        )
+    except (UnicodeError, ValueError) as error:
+        raise IntegrityError("pilot scheduler admission is invalid") from error
+    admitted_at = _iso(admission.get("admittedAt"), "pilot scheduler admittedAt")
+    previous = admission.get("previousCheckpointSha256")
+    admission_sha256 = digest_bytes(raw)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or raw != canonical_json(admission)
+        or set(admission) != _PILOT_SCHEDULER_ADMISSION_FIELDS
+        or not is_strict_int(admission.get("schemaVersion"))
+        or admission["schemaVersion"] != 1
+        or admission.get("proofClass") != "sequential-pilot-trial-admission-v1"
+        or admission.get("experimentId") != EXPERIMENT_ID
+        or not is_digest(admission.get("planSha256"))
+        or not is_strict_int(admission.get("ordinal"))
+        or not 1 <= admission["ordinal"] <= 40
+        or admission.get("replicationId") != binding.get("replication_id")
+        or admission.get("provider") != provider
+        or admission.get("model") != model
+        or admission.get("providerControlIdentitySha256")
+        != provider_control_identity_sha256
+        or admission.get("preflightSha256") != binding.get("preflight_sha256")
+        or admission.get("jobId") != str(job_id)
+        or admission.get("jobDir") != str(job_dir)
+        or admission.get("trialLockSha256") != trial_lock_sha256
+        or (previous is not None and not is_digest(previous))
+        or admitted_at > datetime.now(timezone.utc)
+        or _ACTIVE_PILOT_SCHEDULER_ADMISSION.get() != admission_sha256
+    ):
+        raise IntegrityError("pilot scheduler admission drifted")
+    return admission
 
 
 def _credential_bytes(path: Path, label: str) -> bytes:
@@ -1060,6 +1169,29 @@ def validate_pilot_authorization(
     _relay_window(expires, PILOT_RELAY_TTL_SECONDS)
     pilot = LiveRouteRun.open(run_dir, provider).pilot_job()
     job_id, trial_lock_sha256 = pilot.claim_active_trial(active_trial_dir)
+    try:
+        current_identity_sha256 = canonical_digest(
+            provider_control_identity(
+                fresh.get("providerControl"),
+                provider,
+                model,
+                fresh.get("providerCredentialSha256"),
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise IntegrityError(
+            "pilot authorization stable identity is invalid"
+        ) from error
+    _validate_pilot_scheduler_admission(
+        run_dir,
+        provider,
+        model,
+        binding,
+        pilot.job_dir,
+        job_id,
+        trial_lock_sha256,
+        current_identity_sha256,
+    )
     _claim_slot(
         run_dir,
         provider,

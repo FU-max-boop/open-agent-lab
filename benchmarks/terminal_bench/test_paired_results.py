@@ -1716,7 +1716,7 @@ class StrictInputTest(unittest.TestCase):
     def test_manifest_policy_has_one_frozen_authority(self) -> None:
         root = paired._repo_root()
         manifest = json.loads((root / paired._MANIFEST).read_text())
-        self.assertEqual(manifest["schemaVersion"], 4)
+        self.assertEqual(manifest["schemaVersion"], 5)
         self.assertEqual(
             manifest["runtime"]["outputTokenBudget"],
             {
@@ -1762,6 +1762,23 @@ class StrictInputTest(unittest.TestCase):
                 "allOtherBudgetOutcomes": "block_complete_analysis",
             },
         )
+        self.assertEqual(
+            manifest["runtime"]["scoredLauncher"],
+            {
+                "module": "benchmarks.terminal_bench.pilot_launcher",
+                "logicalJobs": 4,
+                "trialsPerJob": 10,
+                "groupOrder": [
+                    "screen-v1/deepseek",
+                    "screen-v1/zai",
+                    "mirror-v1/deepseek",
+                    "mirror-v1/zai",
+                ],
+                "admissionBarrier": ("previous_sealed_checkpoint_before_trial_create"),
+                "directHarborJobsStartAllowed": False,
+                "resumePolicy": ("contiguous_completed_prefix_no_claimed_slot_rerun"),
+            },
+        )
         self.assertIn("sealed_slot_output_token_accounting", manifest["metrics"])
         self.assertIn("model_budget_outcomes", manifest["metrics"])
         self.assertEqual(
@@ -1788,7 +1805,7 @@ class StrictInputTest(unittest.TestCase):
         original = json.loads(path.read_text())
         real_load = paired._load
         mutations = {
-            "schema-type": (("schemaVersion",), 4.0),
+            "schema-type": (("schemaVersion",), 5.0),
             "scored-slot-type": (
                 ("runtime", "outputTokenBudget", "scored", "slotOutputTokenLimit"),
                 50_000.0,
@@ -1825,6 +1842,10 @@ class StrictInputTest(unittest.TestCase):
                     "outputTokenBudget",
                     "routeProbeUsageIncludedInScoredBudget",
                 ),
+                True,
+            ),
+            "direct-harbor-bypass": (
+                ("runtime", "scoredLauncher", "directHarborJobsStartAllowed"),
                 True,
             ),
             "model-budget-outcome": (

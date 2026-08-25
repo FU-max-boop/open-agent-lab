@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "experimentId": "terminal-bench-2.1-verify-instruction-v1",
   "frozenAt": "2026-08-22",
   "runClass": "development",
@@ -104,6 +104,20 @@
         "maxRequests": 2
       },
       "routeProbeUsageIncludedInScoredBudget": false
+    },
+    "scoredLauncher": {
+      "module": "benchmarks.terminal_bench.pilot_launcher",
+      "logicalJobs": 4,
+      "trialsPerJob": 10,
+      "groupOrder": [
+        "screen-v1/deepseek",
+        "screen-v1/zai",
+        "mirror-v1/deepseek",
+        "mirror-v1/zai"
+      ],
+      "admissionBarrier": "previous_sealed_checkpoint_before_trial_create",
+      "directHarborJobsStartAllowed": false,
+      "resumePolicy": "contiguous_completed_prefix_no_claimed_slot_rerun"
     },
     "hermeticCodexRuntimeReady": true,
     "taskOrder": [
@@ -268,13 +282,14 @@
     "benchmarks/terminal_bench/experiment_contract.py": "sha256:6deadb7557fd526980f7f37d1aae3f08dc94b1d1c2e6aa7bace0f0aa0bce6130",
     "benchmarks/terminal_bench/failure_classification.py": "sha256:474a914ebe796369350b12d6ff9a6c675581b2f72c1f9ff2eaa3fac707bf79c5",
     "benchmarks/terminal_bench/harbor_agent.py": "sha256:650e0f4319d2ddc45b7d6f61b69e0da511294d9c12e076d7c63e282dbecc351a",
-    "benchmarks/terminal_bench/harbor_environment.py": "sha256:cbd65f45af0f1cc2530dfc68c100603b293a11cceeb64d2d1c9097ecf7f4ca06",
+    "benchmarks/terminal_bench/harbor_environment.py": "sha256:51775c98a592f28346a695e918fdbadb0790fbed35f1335e6aa3e752d4d84c4f",
     "benchmarks/terminal_bench/live-route-probe-task/environment/.gitkeep": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",
     "benchmarks/terminal_bench/live-route-probe-task/task.toml": "sha256:d5b5d5fc2289b5c1a185014234de82d6b8927e515ba069a8c197e001b2bbb19e",
     "benchmarks/terminal_bench/live-route-probe-task/tests/test.sh": "sha256:ca91b28c4d53dd5f916e0fc9fad20fcbbf04e8f1fa0dcef97b0884d0bd68caf2",
-    "benchmarks/terminal_bench/live_route_probe.py": "sha256:98f85d224069b34d2a32d3bce1fe041b5ecf5ad3e644e99bfc1839df62b1b91d",
-    "benchmarks/terminal_bench/paired_results.py": "sha256:595b1ea22daa08da4e052023fa72225cb266b9bff9461158197d6b11e8318591",
+    "benchmarks/terminal_bench/live_route_probe.py": "sha256:e9f33fc931753986aa9ac99a9c28e35e2c377362f77c10474ffce66ad3e54cfc",
+    "benchmarks/terminal_bench/paired_results.py": "sha256:96969d17a91c8a6c8ad2bde1535a0ba1fdac7ad55998903d600936bb0c5c77a8",
+    "benchmarks/terminal_bench/pilot_launcher.py": "sha256:bb63139a777184fc4f02bf0e90caba3dbf6e064b9fe71009df8cf40664d16a1b",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
     "benchmarks/terminal_bench/relay.Dockerfile": "sha256:3ac53dcd0938768c375d22f6b5a6505a3465700ab65843159482a9c159983dcb",

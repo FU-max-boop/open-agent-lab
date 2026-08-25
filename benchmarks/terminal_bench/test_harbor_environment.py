@@ -1351,7 +1351,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 }
             }
             manifest = {
-                "schemaVersion": 4,
+                "schemaVersion": 5,
                 "experimentId": EXPERIMENT_ID,
                 "relayBuildIds": {
                     "production": build,
@@ -1514,7 +1514,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
             ):
                 _validate_prepared_source(binding, root)
                 manifest_path.write_bytes(
-                    canonical_json({**manifest, "schemaVersion": 2})
+                    canonical_json({**manifest, "schemaVersion": 4})
                 )
                 with self.assertRaisesRegex(RuntimeError, "identity"):
                     _validate_prepared_source(
