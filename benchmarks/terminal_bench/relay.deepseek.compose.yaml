@@ -9,7 +9,7 @@ services:
       context: ${OPEN_AGENT_LAB_REPO_ROOT:?Set OPEN_AGENT_LAB_REPO_ROOT}
       dockerfile: benchmarks/terminal_bench/relay.Dockerfile
       args:
-        OAL_DOCKERIGNORE_SHA256: "50481989cf0f59045cb9af7c86931676ca355315d8fad0fe9946022fab652755"
+        OAL_DOCKERIGNORE_SHA256: "fd2cf16dee771934e0f9809c9309c660d738d64d07a7a1fdbe5647cac81a7e27"
     command:
       - --provider
       - deepseek
@@ -33,7 +33,7 @@ services:
       - /app/relay-build-id
     environment:
       DEEPSEEK_API_KEY_FILE: /run/secrets/provider-api-key
-      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:4128637334c2af00dc356f9b2f9c85bfe4d1c655f2bae8f9b9de0a7eba731e87"
+      OAL_EXPECTED_RELAY_BUILD_ID: "sha256:787cd0889cdd3633599742aa1688471852c4d820af6b1b06fa4d2cc8f10a24d6"
       OAL_RELAY_GID: "1000"
       OAL_RELAY_UID: "1000"
     secrets:
