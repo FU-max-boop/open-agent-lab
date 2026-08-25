@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "experimentId": "terminal-bench-2.1-verify-instruction-v1",
   "frozenAt": "2026-08-22",
   "runClass": "development",
@@ -82,6 +82,29 @@
     "concurrency": 1,
     "harborRetries": 0,
     "relayRequestCapPerTrial": 256,
+    "outputTokenBudget": {
+      "scored": {
+        "budgetClass": "scored_slot",
+        "accountingMode": "sealed_usage_debit",
+        "slotOutputTokenLimit": 50000,
+        "slotsPerProvider": 20,
+        "providerOutputTokenLimit": 1000000,
+        "campaignOutputTokenLimit": 2000000,
+        "slotTransferable": false
+      },
+      "zaiRouteProbe": {
+        "budgetClass": "zai_route_probe",
+        "accountingMode": "fixed_round_allocations",
+        "slotOutputTokenLimit": 8448,
+        "roundOutputTokenLimits": [8192, 256],
+        "unusedRoundAllocationTransferable": false,
+        "minimumRequestedRound2OutputTokens": 1024,
+        "round2TerminalEvent": "response.incomplete",
+        "round2IncompleteReason": "max_output_tokens",
+        "maxRequests": 2
+      },
+      "routeProbeUsageIncludedInScoredBudget": false
+    },
     "hermeticCodexRuntimeReady": true,
     "taskOrder": [
       "terminal-bench/model-extraction-relu-logits",
@@ -150,8 +173,8 @@
     }
   },
   "relayBuildIds": {
-    "production": "sha256:4128637334c2af00dc356f9b2f9c85bfe4d1c655f2bae8f9b9de0a7eba731e87",
-    "providerFreeFixture": "sha256:938e9706e5804cfe6ea5c4af822d4f8c8b6f3b5d3e8add2509ec115a37099d75"
+    "production": "sha256:787cd0889cdd3633599742aa1688471852c4d820af6b1b06fa4d2cc8f10a24d6",
+    "providerFreeFixture": "sha256:ebb48b550dd77471b9e210cec35de9d2dc6f24a91f4a24fc6cb7cd5ab7645587"
   },
   "arms": [
     {
@@ -205,7 +228,17 @@
     "exceptionOrTimeout": "scores_official_reward_and_remains_in_denominator",
     "missingRequiredTelemetry": "preserved_as_null_and_blocks_complete_analysis",
     "missingCostUsdTelemetry": "preserved_as_null_and_does_not_block_complete_analysis",
-    "rerunPolicy": "new_predeclared_experiment_only"
+    "rerunPolicy": "new_predeclared_experiment_only",
+    "modelBudget": {
+      "scorableOutcomes": [
+        "provider_incomplete_max_output_tokens_with_complete_sealed_usage",
+        "local_slot_output_budget_exhausted_after_exact_complete_sealed_usage_without_upstream_request"
+      ],
+      "officialReward": "preserved",
+      "pairedDenominator": "preserved",
+      "analysisComplete": "allowed_with_complete_required_telemetry",
+      "allOtherBudgetOutcomes": "block_complete_analysis"
+    }
   },
   "costTelemetry": {
     "provenance": "harbor_trial_result.agent_result.cost_usd",
@@ -221,34 +254,34 @@
     "promotionBoundary": "this five-task development experiment is never leaderboard-promotable, even when all directional criteria pass"
   },
   "fileSha256": {
-    ".dockerignore": "sha256:50481989cf0f59045cb9af7c86931676ca355315d8fad0fe9946022fab652755",
-    "apps/cli/src/codex-probe.ts": "sha256:1440e5a04b737bf4f5d98b7ec8c603d1509d37cd560c60af616e7581216a219c",
-    "apps/cli/src/codex-route-probe.ts": "sha256:61d3cb85bf96ac9160da1502ae68e9b4a400c1345b5302df6768f7891f51f650",
+    ".dockerignore": "sha256:fd2cf16dee771934e0f9809c9309c660d738d64d07a7a1fdbe5647cac81a7e27",
+    "apps/cli/src/codex-probe.ts": "sha256:52b70533df70a070a4f3e4e633d7a21ba844226f51699b1f96bd58063a746991",
+    "apps/cli/src/codex-route-probe.ts": "sha256:edac184377220b79d76c3d531519e40d956dbb2de032af81d742ca3814a3eeae",
     "apps/cli/src/codex-runner.ts": "sha256:0dce996eb670dd3e8ac780ad8b8b0ba06ab6785a8dd778d76fbca7e59e70013f",
-    "apps/cli/src/relay-command.ts": "sha256:29ca5cd72acc6905e615c1974a535414ea60d465b6059d106962007e9f20ae72",
-    "apps/cli/src/relay-fixture-entry.ts": "sha256:d3ba67816ebcaf0a9c42f9f5dca9bd445e5383a355e37b4fbc96bfa432802d53",
+    "apps/cli/src/relay-command.ts": "sha256:3b6fc10de28f3ea832da8228db5e898d470c162ff05fe6d860d445240b0a2d04",
+    "apps/cli/src/relay-fixture-entry.ts": "sha256:ab284d0adb49dd70a6eaa72bd56bb03271e054375c226025aec19a9f4f8155c6",
     "apps/cli/src/responses-fixture.ts": "sha256:19fcc75b44633f012cab05384d926669511f5c1950a0602f219fe41e2e2bf95e",
     "benchmarks/terminal_bench/harbor-e2e.yaml": "sha256:3aa2b2f07067ac9221a447ec94857592b3e391286e302ed52ebab4ba7c0cd7cd",
     "benchmarks/terminal_bench/harbor-verify-instruction-e2e.yaml": "sha256:1cbf361ed3452c68fe07b9d3e016bdb0416b32d4f8490d58c88933cfa53564b9",
     "benchmarks/terminal_bench/codex-0.149.0-base-instructions.md": "sha256:ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807",
     "benchmarks/terminal_bench/codex_runtime.py": "sha256:0f9b42ca28dc8f825e8f80c2a83ae7b6b88c9cf7bba264d6172350b46f51bd5e",
-    "benchmarks/terminal_bench/experiment_contract.py": "sha256:e2c7618fb5338df46ae5116092ef4f89a12f30e0358ab044bbd962c5afa24770",
+    "benchmarks/terminal_bench/experiment_contract.py": "sha256:6deadb7557fd526980f7f37d1aae3f08dc94b1d1c2e6aa7bace0f0aa0bce6130",
     "benchmarks/terminal_bench/failure_classification.py": "sha256:474a914ebe796369350b12d6ff9a6c675581b2f72c1f9ff2eaa3fac707bf79c5",
-    "benchmarks/terminal_bench/harbor_agent.py": "sha256:5e92d6913388a56b905e8f4a5fdafd072d6456e16fbf27cd7848b312546a70e5",
-    "benchmarks/terminal_bench/harbor_environment.py": "sha256:dd8dfb1c641b0afefc43456c083e015ca7d3b0ecd1cad1ea174ae3be45afce6e",
+    "benchmarks/terminal_bench/harbor_agent.py": "sha256:650e0f4319d2ddc45b7d6f61b69e0da511294d9c12e076d7c63e282dbecc351a",
+    "benchmarks/terminal_bench/harbor_environment.py": "sha256:cbd65f45af0f1cc2530dfc68c100603b293a11cceeb64d2d1c9097ecf7f4ca06",
     "benchmarks/terminal_bench/live-route-probe-task/environment/.gitkeep": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "benchmarks/terminal_bench/live-route-probe-task/instruction.md": "sha256:ceffddcb34b80a9adb591c1aa6728e0aa5e4043d42e3a38de4d3b2fce854f705",
     "benchmarks/terminal_bench/live-route-probe-task/task.toml": "sha256:d5b5d5fc2289b5c1a185014234de82d6b8927e515ba069a8c197e001b2bbb19e",
     "benchmarks/terminal_bench/live-route-probe-task/tests/test.sh": "sha256:ca91b28c4d53dd5f916e0fc9fad20fcbbf04e8f1fa0dcef97b0884d0bd68caf2",
-    "benchmarks/terminal_bench/live_route_probe.py": "sha256:be5940ccca59a2ddd4461c88acfcac273643917001a2a9f86d748ad0b40b9c32",
-    "benchmarks/terminal_bench/paired_results.py": "sha256:5c60364dfce066dd96ed25441e25eba12ea8bf0a3741aafceba0cf3e6fe2d132",
+    "benchmarks/terminal_bench/live_route_probe.py": "sha256:98f85d224069b34d2a32d3bce1fe041b5ecf5ad3e644e99bfc1839df62b1b91d",
+    "benchmarks/terminal_bench/paired_results.py": "sha256:595b1ea22daa08da4e052023fa72225cb266b9bff9461158197d6b11e8318591",
     "benchmarks/terminal_bench/pilot-v2.deepseek.yaml": "sha256:26f0c3f10ef3ab092ac6a9027ed5cf1cdcb3e6bd8400e3e0d00dd0a7f30d5f94",
     "benchmarks/terminal_bench/pilot-v2.zai.yaml": "sha256:0d95cfb8d7f63e5b67e7eee331419b2bf0e3ba9c6d466099457cbaefa59f5ee9",
-    "benchmarks/terminal_bench/relay.Dockerfile": "sha256:cb7eda91e5c6415f10d1fc62740b4a91b19c41326aa05488b13b3b4b16accad0",
-    "benchmarks/terminal_bench/relay_evidence.py": "sha256:ae2312d5e723bc795c258c6e25c0f2cde0af44b1e6d4f60bd7204672e4afa4da",
-    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:7810d2784924b65ad667c678ec9b8c5af22cc805221565b39b99f0b868238a7d",
-    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:c164396e984fd7a77c8dd0e3837881c2ad53a03c8f887b5178b560805676bd7e",
-    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:549ff896257bc374e3ed7e574fa81425518ba65f9147f966d50460542d30f390",
+    "benchmarks/terminal_bench/relay.Dockerfile": "sha256:3ac53dcd0938768c375d22f6b5a6505a3465700ab65843159482a9c159983dcb",
+    "benchmarks/terminal_bench/relay_evidence.py": "sha256:6bae74e2bbe9f1d066076ec59418832ba6fcf61f3c38e316222b4ce5e200f07a",
+    "benchmarks/terminal_bench/relay.deepseek.compose.yaml": "sha256:7ad91009d13d45a6bb677f040a67f0420678df0efe0f9530a33135d795b9f011",
+    "benchmarks/terminal_bench/relay.fixture.compose.yaml": "sha256:b4fd3d67dffe0d5f5dcadfec775bf8d968ac96c4cb850f5239366efac5217a9d",
+    "benchmarks/terminal_bench/relay.zai.compose.yaml": "sha256:f29e07606e6ebe9e3904a6ba9dc0f756219fdd16388d410ce267cc5e13446695",
     "benchmarks/terminal_bench/validate_harbor_e2e.py": "sha256:f69581c8a011838eaf57dbcb13f20e7d4d895a131534d39e8cfc6f74e25ac4a6",
     "benchmarks/terminal_bench/validate_harbor_install_only.py": "sha256:6cb5fc5bd6922504e1d50b7c81ffd8018b479c6eb095af798fbf296ad6b079d0",
     "benchmarks/terminal_bench/verify-instruction-v1.txt": "sha256:9f855e1e34702265ed0ff4c4fcfb2483cb9777c5f37d8c29daccd2c454f84e4a"
@@ -265,6 +298,8 @@
     "wall_time",
     "exceptions_timeouts",
     "task_agnostic_failure_classes",
+    "sealed_slot_output_token_accounting",
+    "model_budget_outcomes",
     "publication_integrity_gate"
   ],
   "claimRule": "directional five-task development result only; never a full, significant, official, or leaderboard score",

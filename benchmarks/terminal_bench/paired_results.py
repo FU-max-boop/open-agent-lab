@@ -63,6 +63,10 @@ from .experiment_contract import (
     RELAY_CLAIM_FIELDS,
     RELAY_JOURNAL_PATH,
     RELAY_SEAL_PATH,
+    SCORED_CAMPAIGN_OUTPUT_TOKEN_LIMIT,
+    SCORED_PROVIDER_OUTPUT_TOKEN_LIMIT,
+    SCORED_SLOT_OUTPUT_TOKEN_LIMIT,
+    ZAI_ROUTE_PROBE_OUTPUT_BUDGET,
     artifact_manifest,
     canonical_digest,
     canonical_json,
@@ -88,7 +92,7 @@ from .relay_evidence import (
 
 _MANIFEST = "benchmarks/terminal_bench/verify-instruction-v1.experiment.json"
 _POLICY_SHA256 = (
-    "sha256:34826f4e7b18d58f76598255ffa0d80670e9fe406eb493d97057fe5ea65aa0a4"
+    "sha256:3af60b411798e21fa3405493f9540ad149a74653fad0497a64f9a86c1a8ad527"
 )
 _HARBOR_VERSION = "0.22.0"
 _CODEX_VERSION = CODEX_VERSION
@@ -151,6 +155,7 @@ _PROBE_RECEIPT_FIELDS = frozenset(
         "responseIdsSha256",
         "requestCount",
         "usage",
+        "outputBudgetProbe",
         "credentialLeakScan",
         "providerControl",
         "codexProviderRetryPolicy",
@@ -161,6 +166,7 @@ _PROBE_RECEIPT_FIELDS = frozenset(
         "authorizationExpiresAt",
         "liveProviderRouteObserved",
         "liveProviderConformance",
+        "empiricalResponseTruncationObserved",
         "benchmarkTaskInstructionUsed",
         "benchmarkRewardUsed",
         "providerControlVerification",
@@ -197,6 +203,9 @@ _PROVIDERS = {
     "deepseek": {"model": "deepseek-v4-pro", "reasoning": "high"},
     "zai": {"model": "glm-5.3", "reasoning": "max"},
 }
+_SCORED_SLOTS_PER_PROVIDER = (
+    SCORED_PROVIDER_OUTPUT_TOKEN_LIMIT // SCORED_SLOT_OUTPUT_TOKEN_LIMIT
+)
 _TASKS = (
     "terminal-bench/model-extraction-relu-logits",
     "terminal-bench/video-processing",
@@ -359,6 +368,7 @@ _RELAY_BUILD_INPUTS = (
     "apps/cli/src/relay-entry.ts",
     "apps/cli/src/relay-evidence.ts",
     "apps/cli/src/responses-metadata.ts",
+    "apps/cli/src/responses-output-budget.ts",
     "apps/cli/src/responses-relay.ts",
     "apps/cli/src/responses-sse.ts",
     "apps/cli/tsconfig.relay.json",
@@ -389,11 +399,16 @@ _SCORABLE_INCOMPLETE_RELAY_REASONS = {
     "provider_request_id_missing",
     "provider_request_incomplete_or_failed",
     "provider_metadata_unreliable",
-    "relay_rejected_requests",
     "response_id_missing",
     "returned_model_missing",
+    "terminal_event_incomplete",
     "terminal_event_missing",
     "usage_missing_or_invalid",
+}
+_MODEL_BUDGET_INCOMPLETE_REASONS = {"terminal_event_incomplete"}
+_MODEL_BUDGET_EXHAUSTION_REASONS = {
+    "relay_rejected_requests",
+    "slot_output_budget_exhausted",
 }
 
 
@@ -943,7 +958,9 @@ def _pinned_overlay(
     relay["image"] = image
     relay["pull_policy"] = "never"
     if live_route_probe:
-        relay["command"] = live_route_probe_relay_command(relay.get("command"))
+        relay["command"] = live_route_probe_relay_command(
+            relay.get("command"), provider
+        )
         base = live_route_probe_networks(base)
     return base
 
@@ -1018,7 +1035,7 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
     arms = _sequence(manifest.get("arms"), "arms")
     if (
         _digest(manifest) != _POLICY_SHA256
-        or manifest.get("schemaVersion") != 3
+        or not _same_json(manifest.get("schemaVersion"), 4)
         or manifest.get("experimentId") != EXPERIMENT_ID
         or manifest.get("runClass") != "development"
         or runtime.get("harborVersion") != _HARBOR_VERSION
@@ -1029,6 +1046,40 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
         or runtime.get("harborRetries") != 0
         or runtime.get("hermeticCodexRuntimeReady") is not True
         or runtime.get("relayRequestCapPerTrial") != _RELAY_REQUEST_CAP
+        or not _same_json(
+            runtime.get("outputTokenBudget"),
+            {
+                "scored": {
+                    "budgetClass": "scored_slot",
+                    "accountingMode": "sealed_usage_debit",
+                    "slotOutputTokenLimit": SCORED_SLOT_OUTPUT_TOKEN_LIMIT,
+                    "slotsPerProvider": _SCORED_SLOTS_PER_PROVIDER,
+                    "providerOutputTokenLimit": SCORED_PROVIDER_OUTPUT_TOKEN_LIMIT,
+                    "campaignOutputTokenLimit": SCORED_CAMPAIGN_OUTPUT_TOKEN_LIMIT,
+                    "slotTransferable": False,
+                },
+                "zaiRouteProbe": {
+                    "budgetClass": "zai_route_probe",
+                    "accountingMode": "fixed_round_allocations",
+                    "slotOutputTokenLimit": ZAI_ROUTE_PROBE_OUTPUT_BUDGET[
+                        "slotOutputTokenLimit"
+                    ],
+                    "roundOutputTokenLimits": list(
+                        ZAI_ROUTE_PROBE_OUTPUT_BUDGET["roundOutputTokenLimits"]
+                    ),
+                    "unusedRoundAllocationTransferable": False,
+                    "minimumRequestedRound2OutputTokens": (
+                        ZAI_ROUTE_PROBE_OUTPUT_BUDGET[
+                            "minimumRequestedRound2OutputTokens"
+                        ]
+                    ),
+                    "round2TerminalEvent": "response.incomplete",
+                    "round2IncompleteReason": "max_output_tokens",
+                    "maxRequests": LIVE_ROUTE_PROBE_LIMITS["maxRequests"],
+                },
+                "routeProbeUsageIncludedInScoredBudget": False,
+            },
+        )
         or runtime.get("taskOrder") != list(_TASKS)
         or runtime.get("taskDigests") != _TASK_DIGESTS
         or manifest.get("taskRuntimeBindings") != _TASK_RUNTIME_BINDINGS
@@ -1061,25 +1112,66 @@ def _manifest(root: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
             "production": _relay_build_id(root),
             "providerFreeFixture": _relay_build_id(root, fixture=True),
         }
-        or manifest.get("failureScoring")
-        != {
-            "missingOfficialReward": "invalidates_analysis",
-            "exceptionOrTimeout": ("scores_official_reward_and_remains_in_denominator"),
-            "missingRequiredTelemetry": (
-                "preserved_as_null_and_blocks_complete_analysis"
-            ),
-            "missingCostUsdTelemetry": (
-                "preserved_as_null_and_does_not_block_complete_analysis"
-            ),
-            "rerunPolicy": "new_predeclared_experiment_only",
-        }
-        or manifest.get("costTelemetry")
-        != {
-            "provenance": "harbor_trial_result.agent_result.cost_usd",
-            "missingValuePolicy": "preserve_null",
-            "providerBillingProof": False,
-            "requiredForAnalysisComplete": False,
-        }
+        or not _same_json(
+            manifest.get("failureScoring"),
+            {
+                "missingOfficialReward": "invalidates_analysis",
+                "exceptionOrTimeout": (
+                    "scores_official_reward_and_remains_in_denominator"
+                ),
+                "missingRequiredTelemetry": (
+                    "preserved_as_null_and_blocks_complete_analysis"
+                ),
+                "missingCostUsdTelemetry": (
+                    "preserved_as_null_and_does_not_block_complete_analysis"
+                ),
+                "rerunPolicy": "new_predeclared_experiment_only",
+                "modelBudget": {
+                    "scorableOutcomes": [
+                        (
+                            "provider_incomplete_max_output_tokens_with_complete_"
+                            "sealed_usage"
+                        ),
+                        (
+                            "local_slot_output_budget_exhausted_after_exact_complete_"
+                            "sealed_usage_without_upstream_request"
+                        ),
+                    ],
+                    "officialReward": "preserved",
+                    "pairedDenominator": "preserved",
+                    "analysisComplete": "allowed_with_complete_required_telemetry",
+                    "allOtherBudgetOutcomes": "block_complete_analysis",
+                },
+            },
+        )
+        or not _same_json(
+            manifest.get("costTelemetry"),
+            {
+                "provenance": "harbor_trial_result.agent_result.cost_usd",
+                "missingValuePolicy": "preserve_null",
+                "providerBillingProof": False,
+                "requiredForAnalysisComplete": False,
+            },
+        )
+        or not _same_json(
+            manifest.get("metrics"),
+            [
+                "official_reward",
+                "paired_reward_delta",
+                "task_level_paired_bootstrap_95ci",
+                "win_tie_loss",
+                "input_cache_output_reasoning_tokens",
+                "optional_harbor_agent_result_cost_usd",
+                "responses_requests",
+                "tool_calls",
+                "wall_time",
+                "exceptions_timeouts",
+                "task_agnostic_failure_classes",
+                "sealed_slot_output_token_accounting",
+                "model_budget_outcomes",
+                "publication_integrity_gate",
+            ],
+        )
     ):
         raise IntegrityError("experiment manifest policy drifted")
     for name, expected in hashes.items():
@@ -1698,7 +1790,12 @@ def _expected_binding(preflight: dict[str, Any], preflight_sha: str) -> dict[str
     }
 
 
-def _relay_usage(records: list[dict[str, Any]], model: str) -> dict[str, int | None]:
+def _relay_usage(
+    records: list[dict[str, Any]],
+    model: str,
+    *,
+    final_terminal_event: str = "response.completed",
+) -> dict[str, int | None]:
     closed = [
         item for item in records if item.get("event") == "transport.responses.closed"
     ]
@@ -1707,7 +1804,7 @@ def _relay_usage(records: list[dict[str, Any]], model: str) -> dict[str, int | N
     required = ("input_tokens", "output_tokens", "total_tokens")
     optional = ("cached_input_tokens", "reasoning_output_tokens")
     totals: dict[str, int | None] = {key: 0 for key in (*required, *optional)}
-    for record in closed:
+    for index, record in enumerate(closed):
         usage = _mapping(record.get("usage"), "relay usage")
         if not set(required) <= set(usage) <= set(totals):
             raise IntegrityError("relay usage has missing required or unknown fields")
@@ -1732,7 +1829,12 @@ def _relay_usage(records: list[dict[str, Any]], model: str) -> dict[str, int | N
             )
             or record.get("returnedModel") != model
             or not record.get("providerRequestId")
-            or record.get("terminalEvent") != "response.completed"
+            or record.get("terminalEvent")
+            != (
+                final_terminal_event
+                if index == len(closed) - 1
+                else "response.completed"
+            )
         ):
             raise IntegrityError("provider response identity is incomplete")
     if (
@@ -1845,17 +1947,134 @@ def _validate_relay_timing(
         raise IntegrityError("relay evidence identity or timing is invalid")
 
 
-def _relay_gate_is_complete(gate: Any, allow_incomplete: bool) -> bool:
-    if gate == {"ok": True, "reasons": []}:
-        return True
-    reasons = set(_mapping(gate, "relay publication gate").get("reasons", []))
+def _model_budget_relay_usage(
+    verified: dict[str, Any], model: str
+) -> tuple[str, dict[str, int | None]] | None:
+    gate = _mapping(verified.get("publication_gate"), "relay publication gate")
+    reasons = set(_sequence(gate.get("reasons"), "relay publication reasons"))
+    marker = _mapping(verified.get("seal"), "relay seal")
+    accounting = _mapping(
+        marker.get("outputTokenAccounting"), "relay output token accounting"
+    )
+    records = _sequence(verified.get("records"), "relay records")
+    closed = [
+        item for item in records if item.get("event") == "transport.responses.closed"
+    ]
     if (
-        not allow_incomplete
-        or not reasons
-        or not reasons <= _SCORABLE_INCOMPLETE_RELAY_REASONS
+        marker.get("budgetClass") != "scored_slot"
+        or marker.get("accountingMode") != "sealed_usage_debit"
+        or marker.get("slotOutputTokenLimit") != SCORED_SLOT_OUTPUT_TOKEN_LIMIT
+        or not closed
     ):
-        raise IntegrityError("relay publication gate failed")
-    return False
+        return None
+    rejected = marker.get("rejectedRequests")
+    if reasons == _MODEL_BUDGET_INCOMPLETE_REASONS:
+        if (
+            rejected != {}
+            or accounting.get("state") != "budget_terminal"
+            or [item.get("terminalEvent") for item in closed[:-1]]
+            != ["response.completed"] * (len(closed) - 1)
+            or closed[-1].get("terminalEvent") != "response.incomplete"
+            or closed[-1].get("incompleteReason") != "max_output_tokens"
+            or closed[-1].get("terminalStatus") not in {None, "incomplete"}
+        ):
+            return None
+        outcome = "incomplete_max_output_tokens"
+        totals = _relay_usage(
+            records, model, final_terminal_event="response.incomplete"
+        )
+    elif reasons == _MODEL_BUDGET_EXHAUSTION_REASONS:
+        if (
+            rejected != {"slot_output_budget_exhausted": 1}
+            or accounting.get("state") != "exact_exhaustion"
+            or any(
+                item.get("terminalEvent") != "response.completed"
+                or item.get("terminalStatus") not in {None, "completed"}
+                or item.get("incompleteReason") is not None
+                for item in closed
+            )
+        ):
+            return None
+        outcome = "exact_exhaustion"
+        totals = _relay_usage(records, model)
+    else:
+        return None
+    reported = totals["output_tokens"]
+    assert isinstance(reported, int)
+    if accounting != {
+        "state": accounting["state"],
+        "reportedOutputTokens": reported,
+        "conservativeOutputTokenUpperBound": reported,
+        "unusedOutputTokensBurned": SCORED_SLOT_OUTPUT_TOKEN_LIMIT - reported,
+    } or (outcome == "exact_exhaustion" and reported != SCORED_SLOT_OUTPUT_TOKEN_LIMIT):
+        return None
+    return outcome, totals
+
+
+def _zai_probe_relay_usage(
+    verified: dict[str, Any], model: str
+) -> dict[str, int | None] | None:
+    marker = _mapping(verified.get("seal"), "relay seal")
+    accounting = _mapping(
+        marker.get("outputTokenAccounting"), "relay output token accounting"
+    )
+    records = _sequence(verified.get("records"), "relay records")
+    requests = [
+        item for item in records if item.get("event") == "transport.responses.request"
+    ]
+    closed = [
+        item for item in records if item.get("event") == "transport.responses.closed"
+    ]
+    if (
+        verified.get("publication_gate")
+        != {"ok": False, "reasons": ["terminal_event_incomplete"]}
+        or marker.get("budgetClass") != "zai_route_probe"
+        or marker.get("accountingMode") != "fixed_round_allocations"
+        or marker.get("slotOutputTokenLimit") != 8_448
+        or marker.get("rejectedRequests") != {}
+        or accounting.get("state") != "probe_conformant"
+        or len(requests) != 2
+        or [item.get("effectiveMaxOutputTokens") for item in requests] != [8_192, 256]
+        or len(closed) != 2
+        or closed[0].get("terminalEvent") != "response.completed"
+        or closed[0].get("terminalStatus") not in {None, "completed"}
+        or closed[0].get("incompleteReason") is not None
+        or closed[1].get("terminalEvent") != "response.incomplete"
+        or closed[1].get("terminalStatus") not in {None, "incomplete"}
+        or closed[1].get("incompleteReason") != "max_output_tokens"
+    ):
+        return None
+    totals = _relay_usage(records, model, final_terminal_event="response.incomplete")
+    reported = totals["output_tokens"]
+    assert isinstance(reported, int)
+    if accounting != {
+        "state": "probe_conformant",
+        "reportedOutputTokens": reported,
+        "conservativeOutputTokenUpperBound": reported,
+        "unusedOutputTokensBurned": 8_448 - reported,
+    }:
+        return None
+    return totals
+
+
+def _scored_success_relay_usage(
+    records: list[dict[str, Any]], marker: dict[str, Any], model: str
+) -> dict[str, int | None] | None:
+    accounting = _mapping(
+        marker.get("outputTokenAccounting"), "relay output token accounting"
+    )
+    if (
+        marker.get("budgetClass") != "scored_slot"
+        or marker.get("accountingMode") != "sealed_usage_debit"
+        or type(marker.get("slotOutputTokenLimit")) is not int
+        or marker.get("slotOutputTokenLimit") != SCORED_SLOT_OUTPUT_TOKEN_LIMIT
+    ):
+        raise IntegrityError("scored relay output budget drifted")
+    if accounting.get("state") == "poisoned":
+        return None
+    if accounting.get("state") != "complete":
+        raise IntegrityError("scored relay output budget drifted")
+    return _relay_usage(records, model)
 
 
 def _validate_relay(
@@ -1866,7 +2085,10 @@ def _validate_relay(
     started: datetime,
     finished: datetime,
     allow_incomplete: bool,
-) -> tuple[dict[str, Any], dict[str, int | None] | None]:
+    *,
+    allow_zai_probe: bool = False,
+    require_scored_budget: bool = False,
+) -> tuple[dict[str, Any], dict[str, int | None] | None, str | None]:
     journal, seal, records, marker = _read_relay_evidence(trial_dir)
     try:
         verified = relay_metadata(journal, seal, allow_empty=allow_incomplete)
@@ -1874,9 +2096,6 @@ def _validate_relay(
         raise IntegrityError(f"relay evidence failed validation: {error}") from error
     if len(verified["records"]) // 3 > _RELAY_REQUEST_CAP:
         raise IntegrityError("relay request count is outside the frozen limit")
-    complete = _relay_gate_is_complete(
-        verified.get("publication_gate"), allow_incomplete
-    )
     if (
         verified["records"] != records
         or verified["seal"] != marker
@@ -1886,8 +2105,27 @@ def _validate_relay(
     ):
         raise IntegrityError("relay identity or derived evidence drifted")
     _validate_relay_timing(records, marker, started, finished)
-    totals = _relay_usage(records, model) if complete else None
-    return verified, totals
+    gate = verified.get("publication_gate")
+    if gate == {"ok": True, "reasons": []}:
+        if require_scored_budget:
+            return verified, _scored_success_relay_usage(records, marker, model), None
+        return verified, _relay_usage(records, model), None
+    if allow_zai_probe and provider == "zai":
+        probe_usage = _zai_probe_relay_usage(verified, model)
+        if probe_usage is not None:
+            return verified, probe_usage, None
+    budget = _model_budget_relay_usage(verified, model) if allow_incomplete else None
+    if budget is not None:
+        outcome, totals = budget
+        return verified, totals, outcome
+    reasons = set(_mapping(gate, "relay publication gate").get("reasons", []))
+    if (
+        not allow_incomplete
+        or not reasons
+        or not reasons <= _SCORABLE_INCOMPLETE_RELAY_REASONS
+    ):
+        raise IntegrityError("relay publication gate failed")
+    return verified, None, None
 
 
 def _nullable_zero(value: Any, expected: int, label: str) -> None:
@@ -2398,7 +2636,7 @@ def _provider_binding(
     if (
         set(provider_data) != _PROVIDER_METADATA_FIELDS
         or not is_strict_int(provider_data.get("schema_version"))
-        or provider_data["schema_version"] != 1
+        or provider_data["schema_version"] != 2
     ):
         raise IntegrityError("embedded provider metadata schema drifted")
     for key in ("event_count", "chain_head", "seal", "records"):
@@ -2577,6 +2815,119 @@ def _probe_receipt_payloads(
     return observed, expires, control
 
 
+def _validate_probe_output_budget(
+    receipt: dict[str, Any],
+    provider: str,
+    model: str,
+    probe_started: datetime,
+    probe_finished: datetime,
+) -> None:
+    value = receipt.get("outputBudgetProbe")
+    empirical = receipt.get("empiricalResponseTruncationObserved")
+    if provider == "deepseek":
+        if value is not None or empirical is not False:
+            raise IntegrityError("DeepSeek probe budget evidence drifted")
+        return
+    if empirical is not True:
+        raise IntegrityError("ZAI empirical truncation evidence is missing")
+    probe = _mapping(value, "ZAI output budget probe")
+    fields = {
+        "schemaVersion",
+        "proofClass",
+        "evidenceScope",
+        "observedAt",
+        "endpoint",
+        "model",
+        "protocol",
+        "accountingMode",
+        "burnedAccounting",
+        "slotOutputTokenLimit",
+        "minimumRequestedRound2OutputTokens",
+        "rounds",
+        "totalReportedOutputTokens",
+        "totalBurnedOutputBudgetTokens",
+        "noThirdRequest",
+    }
+    limits = dict(ZAI_ROUTE_PROBE_OUTPUT_BUDGET)
+    allocations = tuple(limits["roundOutputTokenLimits"])
+    observed = _iso(probe.get("observedAt"), "ZAI probe observedAt")
+    rounds = _sequence(probe.get("rounds"), "ZAI probe rounds")
+    reported = 0
+    expected = (
+        ("response.completed", {None, "completed"}, None),
+        ("response.incomplete", {None, "incomplete"}, "max_output_tokens"),
+    )
+    probe_integers = (
+        ("schemaVersion", 1),
+        ("slotOutputTokenLimit", limits["slotOutputTokenLimit"]),
+        (
+            "minimumRequestedRound2OutputTokens",
+            limits["minimumRequestedRound2OutputTokens"],
+        ),
+        ("totalBurnedOutputBudgetTokens", sum(allocations)),
+    )
+    if (
+        set(probe) != fields
+        or any(
+            not is_strict_int(probe.get(field)) or probe.get(field) != expected_value
+            for field, expected_value in probe_integers
+        )
+        or probe.get("proofClass") != "empirical-responses-truncation-v1"
+        or probe.get("evidenceScope") != "exact_observed_date_model_endpoint"
+        or not probe_started <= observed <= probe_finished
+        or probe.get("endpoint") != "https://api.z.ai/api/v1/responses"
+        or probe.get("model") != model
+        or probe.get("protocol") != "openai_responses"
+        or probe.get("accountingMode") != "fixed_round_allocations"
+        or probe.get("burnedAccounting") != "reserved_budget_retired_not_usage"
+        or len(rounds) != 2
+        or probe.get("noThirdRequest") is not True
+    ):
+        raise IntegrityError("ZAI output budget probe drifted")
+    round_fields = {
+        "ordinal",
+        "effectiveMaxOutputTokens",
+        "reportedOutputTokens",
+        "burnedOutputBudgetTokens",
+        "terminalEvent",
+        "terminalStatus",
+        "incompleteReason",
+    }
+    for index, (raw_round, allocation, terminal) in enumerate(
+        zip(rounds, allocations, expected, strict=True), start=1
+    ):
+        round_value = _mapping(raw_round, f"ZAI probe round {index}")
+        output_tokens = round_value.get("reportedOutputTokens")
+        event, statuses, reason = terminal
+        round_integers = (
+            ("ordinal", index),
+            ("effectiveMaxOutputTokens", allocation),
+            ("burnedOutputBudgetTokens", allocation),
+        )
+        if (
+            set(round_value) != round_fields
+            or any(
+                not is_strict_int(round_value.get(field))
+                or round_value.get(field) != expected_value
+                for field, expected_value in round_integers
+            )
+            or not is_strict_int(output_tokens)
+            or not 0 <= output_tokens <= allocation
+            or round_value.get("terminalEvent") != event
+            or round_value.get("terminalStatus") not in statuses
+            or round_value.get("incompleteReason") != reason
+        ):
+            raise IntegrityError("ZAI output budget probe round drifted")
+        reported += output_tokens
+    usage = _mapping(receipt.get("usage"), "probe receipt usage")
+    if (
+        not is_strict_int(probe.get("totalReportedOutputTokens"))
+        or probe.get("totalReportedOutputTokens") != reported
+        or usage.get("output_tokens") != reported
+    ):
+        raise IntegrityError("ZAI output budget probe usage drifted")
+
+
 def _validated_pilot_receipt(
     receipt: dict[str, Any],
     provider: str,
@@ -2608,8 +2959,8 @@ def _validated_pilot_receipt(
     if (
         set(receipt) != _PROBE_RECEIPT_FIELDS
         or not is_strict_int(receipt.get("schemaVersion"))
-        or receipt.get("schemaVersion") != 2
-        or receipt.get("proofClass") != "live-route-probe-v2"
+        or receipt.get("schemaVersion") != 3
+        or receipt.get("proofClass") != "live-route-probe-v3"
         or receipt.get("provider") != provider
         or receipt.get("model") != model
         or receipt.get("sourceRevision") != binding["source_revision"]
@@ -2640,6 +2991,9 @@ def _validated_pilot_receipt(
         )
     ):
         raise IntegrityError("pilot authorization receipt drifted")
+    _validate_probe_output_budget(
+        receipt, provider, model, probe_started, probe_finished
+    )
     try:
         identity = provider_control_identity(
             control, provider, model, credential_sha256
@@ -2818,7 +3172,7 @@ def _attempt(
     provider_data = _mapping(
         metadata.get("open_agent_lab_provider"), "provider metadata"
     )
-    verified, totals = _validate_relay(
+    verified, totals, budget_outcome = _validate_relay(
         trial_dir,
         provider,
         model,
@@ -2826,7 +3180,10 @@ def _attempt(
         agent_started,
         agent_finished,
         scored_failure,
+        require_scored_budget=True,
     )
+    if budget_outcome is not None:
+        failure_class = "model_budget"
     expected_variant = {
         "schema_version": 1,
         "variant_id": variant,
@@ -2863,8 +3220,8 @@ def _attempt(
         totals,
         tool_calls,
         agent_wall,
-        agent_tokens_complete,
-        trajectory_metrics_complete,
+        agent_tokens_complete or budget_outcome is not None,
+        trajectory_metrics_complete or budget_outcome is not None,
     )
     return {
         "provider": provider,
@@ -3404,7 +3761,7 @@ class RelayEvidence:
         started: datetime,
         finished: datetime,
     ) -> RelayEvidence:
-        verified, usage = _validate_relay(
+        verified, usage, budget_outcome = _validate_relay(
             trial_dir,
             provider,
             model,
@@ -3412,8 +3769,9 @@ class RelayEvidence:
             started,
             finished,
             False,
+            allow_zai_probe=True,
         )
-        if usage is None:
+        if usage is None or budget_outcome is not None:
             raise IntegrityError("complete relay evidence has no usage")
         return cls(verified, usage)
 
@@ -3431,11 +3789,24 @@ class RelayEvidence:
         trajectory: dict[str, Any],
         expected_variant: dict[str, Any],
         expected_harbor: dict[str, Any],
+        *,
+        allow_missing_agent_totals_and_metrics: bool = False,
     ) -> None:
         """Validate Harbor accounting and the embedded copy of sealed evidence."""
-        _validate_agent_totals(agent_result, self.usage, False)
-        metrics = _mapping(trajectory.get("final_metrics"), "trajectory metrics")
-        _validate_trajectory_metrics(metrics, self.usage, len(trajectory["steps"]))
+        token_fields = (
+            "n_input_tokens",
+            "n_output_tokens",
+            "n_cache_tokens",
+        )
+        if not (
+            allow_missing_agent_totals_and_metrics
+            and all(agent_result.get(field) is None for field in token_fields)
+        ):
+            _validate_agent_totals(agent_result, self.usage, False)
+        raw_metrics = trajectory.get("final_metrics")
+        if not (allow_missing_agent_totals_and_metrics and raw_metrics is None):
+            metrics = _mapping(raw_metrics, "trajectory metrics")
+            _validate_trajectory_metrics(metrics, self.usage, len(trajectory["steps"]))
         metadata = _mapping(agent_result.get("metadata"), "agent metadata")
         provider_data = _mapping(
             metadata.get("open_agent_lab_provider"), "provider metadata"
@@ -3858,6 +4229,37 @@ def _validate_global_uniqueness(attempts: list[dict[str, Any]]) -> None:
         raise IntegrityError(conflict)
 
 
+def _validate_scored_output_budget(
+    attempts: list[dict[str, Any]], *, replications_complete: bool
+) -> None:
+    expected_counts = {provider: _SCORED_SLOTS_PER_PROVIDER for provider in _PROVIDERS}
+    counts = Counter(item.get("provider") for item in attempts)
+    if (
+        any(provider not in _PROVIDERS for provider in counts)
+        or any(counts[provider] > limit for provider, limit in expected_counts.items())
+        or (replications_complete and counts != expected_counts)
+    ):
+        raise IntegrityError("scored output-token slot allocation drifted")
+    totals = {provider: 0 for provider in _PROVIDERS}
+    for item in attempts:
+        tokens = item.get("tokens")
+        if tokens is None:
+            continue
+        provider = item["provider"]
+        output_tokens = _integer(
+            _mapping(tokens, "attempt tokens").get("output_tokens"),
+            "attempt output_tokens",
+        )
+        if output_tokens > SCORED_SLOT_OUTPUT_TOKEN_LIMIT:
+            raise IntegrityError("scored output-token slot limit exceeded")
+        totals[provider] += output_tokens
+    if (
+        any(total > SCORED_PROVIDER_OUTPUT_TOKEN_LIMIT for total in totals.values())
+        or sum(totals.values()) > SCORED_CAMPAIGN_OUTPUT_TOKEN_LIMIT
+    ):
+        raise IntegrityError("scored output-token campaign limit exceeded")
+
+
 def _build_pairs(
     attempts: list[dict[str, Any]], tasks: list[str]
 ) -> list[dict[str, Any]]:
@@ -3994,6 +4396,9 @@ def _summary(
     required_replications = {item["id"] for item in manifest["replications"]}
     actual_replications = {item["replication"] for item in attempts}
     replications_complete = actual_replications == required_replications
+    _validate_scored_output_budget(
+        attempts, replications_complete=replications_complete
+    )
     telemetry_complete = all(item["telemetryComplete"] for item in attempts)
     analysis_complete = replications_complete and telemetry_complete
     exception_counts = _exception_counts(attempts)

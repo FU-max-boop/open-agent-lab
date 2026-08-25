@@ -57,6 +57,16 @@ LIVE_ROUTE_PROBE_LIMITS = MappingProxyType(
         "codexTimeoutSeconds": 480,
     }
 )
+SCORED_SLOT_OUTPUT_TOKEN_LIMIT = 50_000
+SCORED_PROVIDER_OUTPUT_TOKEN_LIMIT = 1_000_000
+SCORED_CAMPAIGN_OUTPUT_TOKEN_LIMIT = 2_000_000
+ZAI_ROUTE_PROBE_OUTPUT_BUDGET = MappingProxyType(
+    {
+        "slotOutputTokenLimit": 8_448,
+        "roundOutputTokenLimits": (8_192, 256),
+        "minimumRequestedRound2OutputTokens": 1_024,
+    }
+)
 CODEX_PROVIDER_RETRY_POLICY = MappingProxyType(
     {
         "request_max_retries": 0,
@@ -95,8 +105,19 @@ Call exec_command exactly once with this exact JSON argument and no other tool:
 {{"cmd":{json.dumps(LIVE_ROUTE_PROBE_COMMAND)}}}
 After that command succeeds, reply only LIVE_ROUTE_PROBE_OK.
 """
+ZAI_LIVE_ROUTE_PROBE_INSTRUCTION = f"""This is a non-scoring provider route probe.
+Call exec_command exactly once with this exact JSON argument and no other tool:
+{{"cmd":{json.dumps(LIVE_ROUTE_PROBE_COMMAND)}}}
+After that command succeeds, use no more tools. Produce a neutral final response.
+It must contain at least 1024 output tokens. The response must be unrelated to benchmark tasks, the tool
+result, and any intermediate or final answer; repeat simple numbered observations about
+ordinary geometric shapes until the requested length is reached.
+"""
 LIVE_ROUTE_PROBE_INSTRUCTION_SHA256 = (
     "sha256:" + hashlib.sha256(LIVE_ROUTE_PROBE_INSTRUCTION.encode()).hexdigest()
+)
+ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256 = (
+    "sha256:" + hashlib.sha256(ZAI_LIVE_ROUTE_PROBE_INSTRUCTION.encode()).hexdigest()
 )
 LIVE_ROUTE_PROBE_COMMAND_SHA256 = (
     "sha256:" + hashlib.sha256(LIVE_ROUTE_PROBE_COMMAND.encode()).hexdigest()
@@ -104,6 +125,38 @@ LIVE_ROUTE_PROBE_COMMAND_SHA256 = (
 LIVE_ROUTE_PROBE_EFFECT_SHA256 = (
     "sha256:" + hashlib.sha256(LIVE_ROUTE_PROBE_EFFECT.encode()).hexdigest()
 )
+
+
+def live_route_probe_instruction(provider: str) -> tuple[str, str]:
+    """Return the exact provider-specific non-scoring probe instruction and digest."""
+    if provider == "deepseek":
+        return LIVE_ROUTE_PROBE_INSTRUCTION, LIVE_ROUTE_PROBE_INSTRUCTION_SHA256
+    if provider == "zai":
+        return ZAI_LIVE_ROUTE_PROBE_INSTRUCTION, ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256
+    raise ValueError("unknown live-route provider")
+
+
+def live_route_probe_variant(
+    provider: str, *, effect_verified: bool
+) -> dict[str, object]:
+    """Return the retained agent variant for one provider-specific route probe."""
+    _, instruction_sha256 = live_route_probe_instruction(provider)
+    return {
+        "schema_version": 1,
+        "variant_id": "live-route-probe-v1",
+        "developer_instruction_requested": False,
+        "requested_developer_instructions_sha256": None,
+        "benchmark_task_instruction_used": False,
+        "benchmark_reward_used": False,
+        "instruction_sha256": instruction_sha256,
+        "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
+        "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
+        "effect_verified": effect_verified,
+        **CODEX_PROVIDER_RETRY_POLICY,
+        "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
+    }
+
+
 RUN_BINDING_KEYS = frozenset(
     """schema_version experiment_id replication_id source_revision
     experiment_manifest_sha256 relay_build_sha256 relay_image_sha256
@@ -308,7 +361,7 @@ def artifact_manifest() -> list[dict[str, str | None]]:
     ]
 
 
-def live_route_probe_relay_command(command: object) -> list[str]:
+def live_route_probe_relay_command(command: object, provider: str) -> list[str]:
     """Derive the one narrow live-route relay policy from a frozen pilot command."""
     if not isinstance(command, list) or any(
         not isinstance(item, str) for item in command
@@ -318,7 +371,12 @@ def live_route_probe_relay_command(command: object) -> list[str]:
     replacements = {
         "--ttl-seconds": str(LIVE_ROUTE_PROBE_LIMITS["ttlSeconds"]),
         "--max-requests": str(LIVE_ROUTE_PROBE_LIMITS["maxRequests"]),
+        "--budget-class": (
+            "zai_route_probe" if provider == "zai" else "unmetered_route_probe"
+        ),
     }
+    if provider not in {"deepseek", "zai"}:
+        raise ValueError("relay provider is invalid")
     strict_flags = (
         "--max-request-bytes",
         "--max-response-bytes",

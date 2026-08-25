@@ -5,7 +5,12 @@ import { dirname } from "node:path";
 import { canonicalJson } from "@open-agent-lab/contracts";
 import { sha256 } from "@open-agent-lab/evidence";
 
-export const RELAY_VERSION = "native-responses-relay-v1";
+import {
+  outputBudgetTerminalKind,
+  reportedOutputTokens,
+} from "./responses-output-budget.js";
+
+export const RELAY_VERSION = "native-responses-relay-v2";
 
 const COMMON_RECORD_FIELDS = [
   "schemaVersion",
@@ -30,6 +35,8 @@ const RECORD_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
     "requestSha256",
     "clientRequestId",
     "stream",
+    "requestedMaxOutputTokens",
+    "effectiveMaxOutputTokens",
   ),
   "transport.responses.headers": recordFields(
     "status",
@@ -52,6 +59,8 @@ const RECORD_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
     "modelSources",
     "systemFingerprint",
     "terminalEvent",
+    "terminalStatus",
+    "incompleteReason",
     "usage",
     "metadataConflicts",
     "parseErrors",
@@ -68,6 +77,10 @@ const SEAL_FIELDS = new Set([
   "expectedModel",
   "sealedAt",
   "rejectedRequests",
+  "budgetClass",
+  "accountingMode",
+  "slotOutputTokenLimit",
+  "outputTokenAccounting",
   "eventCount",
   "chainHead",
   "markerSha256",
@@ -92,12 +105,14 @@ const REJECTION_CODES = new Set([
   "concurrency_exceeded",
   "expired",
   "invalid_json",
+  "invalid_max_output_tokens",
   "invalid_turn_state",
   "model_mismatch",
   "not_found",
   "relay_sealed",
   "request_quota_exceeded",
   "request_too_large",
+  "slot_output_budget_exhausted",
   "unsupported_content_type",
   "unsupported_response_mode",
   "upstream_failure",
@@ -115,6 +130,17 @@ const TERMINAL_EVENTS = new Set([
   "response.completed",
   "response.failed",
   "response.incomplete",
+]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "incomplete"]);
+const SCORED_ACCOUNTING_STATES = new Set(
+  ["complete", "budget_terminal", "exact_exhaustion", "poisoned"],
+);
+const ZAI_PROBE_ACCOUNTING_STATES = new Set(["complete", "probe_conformant", "poisoned"]);
+const OUTPUT_TOKEN_ACCOUNTING_FIELDS = new Set([
+  "state",
+  "reportedOutputTokens",
+  "conservativeOutputTokenUpperBound",
+  "unusedOutputTokensBurned",
 ]);
 const MODEL_CONSISTENCIES = new Set(["consistent", "conflict", "missing"]);
 const FAILED_TRANSPORT_ERRORS = new Set([
@@ -135,7 +161,7 @@ export interface RelayJournalSummary {
 }
 
 export interface RelaySealSummary extends RelayJournalSummary {
-  schemaVersion: 1;
+  schemaVersion: 2;
   state: "sealed";
   relayVersion: typeof RELAY_VERSION;
   runId: string;
@@ -145,6 +171,16 @@ export interface RelaySealSummary extends RelayJournalSummary {
   expectedModel: string;
   sealedAt: string;
   rejectedRequests: Record<string, number>;
+  budgetClass: "scored_slot" | "zai_route_probe" | "unmetered_route_probe";
+  accountingMode: "sealed_usage_debit" | "fixed_round_allocations" | "none";
+  slotOutputTokenLimit: number | null;
+  outputTokenAccounting: {
+    state: "complete" | "budget_terminal" | "exact_exhaustion" | "probe_conformant" |
+      "poisoned" | "unmetered";
+    reportedOutputTokens: number | null;
+    conservativeOutputTokenUpperBound: number | null;
+    unusedOutputTokensBurned: number;
+  };
   markerSha256: string;
 }
 
@@ -224,7 +260,11 @@ function optionalText(value: unknown): boolean {
   return value === null || boundedText(value);
 }
 
-function integerBetween(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTEGER): boolean {
+function integerBetween(
+  value: unknown,
+  minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): value is number {
   return (
     typeof value === "number" &&
     Number.isSafeInteger(value) &&
@@ -245,7 +285,7 @@ function validStatus(value: unknown): boolean {
 
 function validCommonShapes(record: Record<string, unknown>): boolean {
   return (
-    record.schemaVersion === 1 &&
+    record.schemaVersion === 2 &&
     record.relayVersion === RELAY_VERSION &&
     typeof record.runId === "string" &&
     RUN_ID.test(record.runId) &&
@@ -289,6 +329,8 @@ function validModelSources(value: unknown, responseBytes: unknown): boolean {
 }
 
 function validRequestShapes(record: Record<string, unknown>): boolean {
+  const requestedMax = record.requestedMaxOutputTokens;
+  const effectiveMax = record.effectiveMaxOutputTokens;
   return (
     typeof record.requestedModel === "string" &&
     MODEL_ID.test(record.requestedModel) &&
@@ -296,7 +338,9 @@ function validRequestShapes(record: Record<string, unknown>): boolean {
     typeof record.requestSha256 === "string" &&
     SHA256.test(record.requestSha256) &&
     optionalText(record.clientRequestId) &&
-    record.stream === true
+    record.stream === true &&
+    (requestedMax === null || integerBetween(requestedMax, 1)) &&
+    (effectiveMax === null || integerBetween(effectiveMax, 1))
   );
 }
 
@@ -314,6 +358,9 @@ function validClosedShapes(record: Record<string, unknown>): boolean {
   const conflicts = record.metadataConflicts;
   const state = record.transportState;
   const error = record.errorCategory;
+  const terminalEvent = record.terminalEvent;
+  const terminalStatus = record.terminalStatus;
+  const incompleteReason = record.incompleteReason;
   const stateMatchesError =
     (state === "completed" && error === null) ||
     (state === "aborted" && error === "client_disconnected") ||
@@ -333,8 +380,21 @@ function validClosedShapes(record: Record<string, unknown>): boolean {
     MODEL_CONSISTENCIES.has(record.modelConsistency) &&
     validModelSources(record.modelSources, record.responseBytes) &&
     optionalText(record.systemFingerprint) &&
-    (record.terminalEvent === null ||
-      (typeof record.terminalEvent === "string" && TERMINAL_EVENTS.has(record.terminalEvent))) &&
+    (terminalEvent === null ||
+      (typeof terminalEvent === "string" && TERMINAL_EVENTS.has(terminalEvent))) &&
+    (terminalStatus === null ||
+      (typeof terminalStatus === "string" && TERMINAL_STATUSES.has(terminalStatus))) &&
+    optionalText(incompleteReason) &&
+    ((terminalEvent === null && terminalStatus === null && incompleteReason === null) ||
+      (terminalEvent === "response.completed" &&
+        (terminalStatus === null || terminalStatus === "completed") &&
+        incompleteReason === null) ||
+      (terminalEvent === "response.failed" &&
+        (terminalStatus === null || terminalStatus === "failed") &&
+        incompleteReason === null) ||
+      (terminalEvent === "response.incomplete" &&
+        (terminalStatus === null || terminalStatus === "incomplete") &&
+        boundedText(incompleteReason))) &&
     (usage === null ||
       (isObject(usage) &&
         Object.keys(usage).every((key) => USAGE_FIELDS.has(key)) &&
@@ -379,6 +439,206 @@ function validRejections(value: unknown, lifecycles: number): boolean {
       (code) => Number(value[code] ?? 0) <= lifecycles,
     )
   );
+}
+
+function validOutputTokenAccounting(
+  value: unknown,
+  budgetClass: unknown,
+  slotOutputTokenLimit: unknown,
+): boolean {
+  if (!isObject(value) || !exactFields(value, OUTPUT_TOKEN_ACCOUNTING_FIELDS)) return false;
+  const state = value.state;
+  const reported = value.reportedOutputTokens;
+  const upper = value.conservativeOutputTokenUpperBound;
+  const burned = value.unusedOutputTokensBurned;
+  if (
+    typeof state !== "string" ||
+    (reported !== null && !integerBetween(reported, 0)) ||
+    (upper !== null && !integerBetween(upper, 0)) ||
+    !integerBetween(burned, 0)
+  ) {
+    return false;
+  }
+  if (budgetClass === "unmetered_route_probe") {
+    return (
+      burned === 0 &&
+      ((state === "unmetered" && integerBetween(reported, 0) && upper === reported) ||
+        (state === "poisoned" && reported === null && upper === null))
+    );
+  }
+  if (!integerBetween(slotOutputTokenLimit, 1)) return false;
+  const limit = slotOutputTokenLimit as number;
+  if (
+    (budgetClass === "scored_slot" && !SCORED_ACCOUNTING_STATES.has(state)) ||
+    (budgetClass === "zai_route_probe" && !ZAI_PROBE_ACCOUNTING_STATES.has(state))
+  ) {
+    return false;
+  }
+  if (state === "poisoned") {
+    return (
+      reported === null &&
+      integerBetween(upper, 0, limit) &&
+      integerBetween(burned, 0, limit) &&
+      upper === limit - burned
+    );
+  }
+  if (!integerBetween(reported, 0, limit) || upper !== reported) return false;
+  if (state === "complete" && budgetClass === "zai_route_probe") {
+    return reported <= 8_192 && integerBetween(burned, 0, 8_192) && reported === 8_192 - burned;
+  }
+  if (state === "exact_exhaustion") return reported === limit && burned === 0;
+  return integerBetween(burned, 0, limit) && reported === limit - burned;
+}
+
+function validBudgetPolicy(body: Record<string, unknown>): boolean {
+  const budgetClass = body.budgetClass;
+  const accountingMode = body.accountingMode;
+  const limit = body.slotOutputTokenLimit;
+  const policyMatches =
+    (budgetClass === "scored_slot" &&
+      accountingMode === "sealed_usage_debit" &&
+      limit === 50_000) ||
+    (budgetClass === "zai_route_probe" &&
+      accountingMode === "fixed_round_allocations" &&
+      limit === 8_448) ||
+    (budgetClass === "unmetered_route_probe" && accountingMode === "none" && limit === null);
+  return policyMatches &&
+    validOutputTokenAccounting(body.outputTokenAccounting, budgetClass, limit);
+}
+
+function settledBudgetLifecycle(
+  closed: Record<string, unknown> | undefined,
+  effectiveMaxOutputTokens: number | null,
+  expectedTerminal?: "completed" | "max_output_tokens",
+): { outputTokens: number; terminal: "completed" | "max_output_tokens" } | null {
+  if (closed?.transportState !== "completed") return null;
+  const terminal = outputBudgetTerminalKind({
+    terminalEvent: closed.terminalEvent,
+    terminalStatus: closed.terminalStatus,
+    incompleteReason: closed.incompleteReason,
+    usage: closed.usage,
+    metadataConflicts: closed.metadataConflicts,
+  });
+  const outputTokens = reportedOutputTokens(closed.usage);
+  const usageConflict =
+    Array.isArray(closed.metadataConflicts) && closed.metadataConflicts.includes("usage");
+  if (
+    terminal === null ||
+    (expectedTerminal !== undefined && terminal !== expectedTerminal) ||
+    outputTokens === null ||
+    usageConflict ||
+    (effectiveMaxOutputTokens !== null && outputTokens > effectiveMaxOutputTokens)
+  ) {
+    return null;
+  }
+  return { outputTokens, terminal };
+}
+
+function validBudgetedRecords(
+  records: Record<string, unknown>[],
+  body: Record<string, unknown>,
+): boolean {
+  const groups = Array.from({ length: records.length / 3 }, (_, index) =>
+    records.slice(index * 3, index * 3 + 3),
+  );
+  const accounting = body.outputTokenAccounting;
+  if (!isObject(accounting)) return false;
+  if (body.budgetClass === "unmetered_route_probe") {
+    if (
+      groups.some(([request]) =>
+        request?.requestedMaxOutputTokens === null
+          ? request.effectiveMaxOutputTokens !== null
+          : request?.effectiveMaxOutputTokens !== request?.requestedMaxOutputTokens,
+      )
+    ) {
+      return false;
+    }
+    const outputs = groups.map(([request, , closed]) =>
+      settledBudgetLifecycle(
+        closed,
+        request?.effectiveMaxOutputTokens as number | null,
+        "completed",
+      )?.outputTokens ?? null
+    );
+    if (accounting.state === "poisoned") {
+      return groups.length > 0 && outputs.slice(0, -1).every((output) => output !== null);
+    }
+    if (outputs.includes(null)) return false;
+    const total = outputs.reduce<number>((sum, output) => sum + (output ?? 0), 0);
+    return accounting.state === "unmetered" &&
+      Number.isSafeInteger(total) && total === accounting.reportedOutputTokens;
+  }
+  const limit = body.slotOutputTokenLimit;
+  if (!integerBetween(limit, 1)) return false;
+  if (body.budgetClass === "zai_route_probe") {
+    const expectedAllocations = [8_192, 256];
+    if (
+      groups.length > 2 ||
+      groups.some(([request], index) =>
+        request?.effectiveMaxOutputTokens !== expectedAllocations[index],
+      )
+    ) return false;
+  }
+  let reportedTotal = 0;
+  let remaining = limit as number;
+  const poisoned = accounting.state === "poisoned";
+  for (const [index, [request, , closed]] of groups.entries()) {
+    const requested = request?.requestedMaxOutputTokens;
+    const effective = request?.effectiveMaxOutputTokens;
+    if (!integerBetween(effective, 1, remaining)) return false;
+    if (body.budgetClass === "scored_slot") {
+      const expectedEffective = Math.min(
+        requested === null ? remaining : (requested as number),
+        remaining,
+      );
+      if (effective !== expectedEffective) return false;
+    }
+    const isPoisonLifecycle = poisoned && index === groups.length - 1;
+    const expectedTerminal = body.budgetClass === "zai_route_probe"
+      ? index === 0 ? "completed" : "max_output_tokens"
+      : index < groups.length - 1 ? "completed" : undefined;
+    const lifecycle = settledBudgetLifecycle(
+      closed,
+      effective as number,
+      expectedTerminal,
+    );
+    if (isPoisonLifecycle && lifecycle === null) {
+      reportedTotal += effective;
+      remaining -= effective;
+      continue;
+    }
+    if (lifecycle === null) return false;
+    reportedTotal += lifecycle.outputTokens;
+    remaining -= lifecycle.outputTokens;
+    if (!Number.isSafeInteger(reportedTotal)) return false;
+  }
+  if (poisoned) {
+    if (groups.length === 0) reportedTotal = 0;
+    return (
+      accounting.conservativeOutputTokenUpperBound === reportedTotal &&
+      accounting.unusedOutputTokensBurned === (limit as number) - reportedTotal
+    );
+  }
+  const reported = accounting.reportedOutputTokens;
+  if (reported !== reportedTotal) return false;
+  const lastClosed = groups.at(-1)?.[2];
+  return accounting.state === "complete"
+    ? lastClosed?.terminalEvent === "response.completed" &&
+        (body.budgetClass !== "zai_route_probe" || groups.length === 1)
+    : accounting.state === "budget_terminal"
+      ? lastClosed?.terminalEvent === "response.incomplete" &&
+        lastClosed.incompleteReason === "max_output_tokens"
+      : accounting.state === "exact_exhaustion"
+        ? lastClosed?.terminalEvent === "response.completed" &&
+          (body.rejectedRequests as Record<string, unknown>).slot_output_budget_exhausted === 1
+        : accounting.state === "probe_conformant"
+          ? (
+      groups.length === 2 &&
+      groups[0]?.[2]?.terminalEvent === "response.completed" &&
+      groups[1]?.[2]?.terminalEvent === "response.incomplete" &&
+      groups[1]?.[2]?.incompleteReason === "max_output_tokens"
+            )
+          : true;
 }
 
 async function atomicFile(path: string, content: string): Promise<void> {
@@ -483,7 +743,7 @@ export function verifyRelayJournal(content: string): RelayJournalSummary {
     }
     for (const [offset, record] of group.entries()) {
       if (
-        record?.schemaVersion !== 1 ||
+        record?.schemaVersion !== 2 ||
         record.relayVersion !== RELAY_VERSION ||
         record.event !== expectedEvents[offset] ||
         record.ordinal !== ordinal ||
@@ -526,7 +786,7 @@ export function verifyRelaySeal(
   const first = records[0];
   if (
     sha256(canonicalJson(body)) !== markerSha256 ||
-    body.schemaVersion !== 1 ||
+    body.schemaVersion !== 2 ||
     body.state !== "sealed" ||
     body.relayVersion !== RELAY_VERSION ||
     typeof body.runId !== "string" ||
@@ -541,6 +801,8 @@ export function verifyRelaySeal(
     !MODEL_ID.test(body.expectedModel) ||
     !validTimestamp(body.sealedAt) ||
     !validRejections(body.rejectedRequests, journal.eventCount / 3) ||
+    !validBudgetPolicy(body) ||
+    !validBudgetedRecords(records, body) ||
     body.eventCount !== journal.eventCount ||
     body.chainHead !== journal.chainHead ||
     (first !== undefined &&

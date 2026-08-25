@@ -1351,7 +1351,7 @@ class PinnedRelayEnvironmentTest(unittest.TestCase):
                 }
             }
             manifest = {
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "experimentId": EXPERIMENT_ID,
                 "relayBuildIds": {
                     "production": build,

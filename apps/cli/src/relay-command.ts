@@ -3,6 +3,10 @@ import { constants } from "node:fs";
 import { access, link, mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+import {
+  outputBudgetPolicy,
+  type OutputBudgetClass,
+} from "./responses-output-budget.js";
 import { startNativeResponsesRelay, type RelaySealSummary } from "./responses-relay.js";
 
 export interface RelayProfile {
@@ -17,6 +21,7 @@ export type RelayProfiles = Readonly<Record<string, RelayProfile>>;
 export interface RelayIdentity {
   readonly provider: string;
   readonly model: string;
+  readonly budgetClass: OutputBudgetClass;
 }
 
 export interface RelayAuthorization extends RelayIdentity {
@@ -131,8 +136,13 @@ export async function awaitRelayAuthorization(
 ): Promise<RelayAuthorization> {
   const provider = option(args, "--provider");
   const model = option(args, "--model");
-  if (provider !== expected.provider || model !== expected.model) {
-    throw new Error("Relay identity does not match the expected provider and model.");
+  const budgetClass = option(args, "--budget-class");
+  if (
+    provider !== expected.provider ||
+    model !== expected.model ||
+    budgetClass !== expected.budgetClass
+  ) {
+    throw new Error("Relay identity does not match the expected provider, model, and budget class.");
   }
   const sidecarPath = option(args, "--output");
   if (sidecarPath === undefined) throw new Error("--output is required.");
@@ -142,11 +152,18 @@ export async function awaitRelayAuthorization(
   await authorizationSignal(async () =>
     publishFileAtomic(
       readyPath,
-      `${JSON.stringify({ schemaVersion: 1, buildId, provider, model, capabilityId })}\n`,
+      `${JSON.stringify({
+        schemaVersion: 2,
+        buildId,
+        provider,
+        model,
+        budgetClass,
+        capabilityId,
+      })}\n`,
       0o444,
     ),
   );
-  return { buildId, readyPath, provider, model, capabilityId };
+  return { buildId, readyPath, provider, model, budgetClass, capabilityId };
 }
 
 function normalizeProviderSecret(raw: string, name: string): string {
@@ -248,6 +265,7 @@ export async function runRelayCommand(
   if (model === undefined || !profile.models.some((candidate) => candidate === model)) {
     throw new Error(`--model must be one of: ${profile.models.join(", ")}.`);
   }
+  const budgetClass = outputBudgetPolicy(option(args, "--budget-class") ?? "").budgetClass;
   const sidecarPath = option(args, "--output");
   if (sidecarPath === undefined) throw new Error("--output is required.");
   const resolvedSidecar = resolve(sidecarPath);
@@ -255,13 +273,14 @@ export async function runRelayCommand(
     option(args, "--client-token-output") ?? `${resolvedSidecar}.client-token`,
   );
   const grant =
-    authorization ?? (await awaitRelayAuthorization(args, env, { provider, model }));
+    authorization ?? (await awaitRelayAuthorization(args, env, { provider, model, budgetClass }));
   const buildId = await readVerifiedBuildId(args, env);
   if (
     grant.buildId !== buildId ||
     grant.readyPath !== resolve(`${resolvedSidecar}.bootstrap-ready`) ||
     grant.provider !== provider ||
     grant.model !== model ||
+    grant.budgetClass !== budgetClass ||
     !/^[a-f0-9]{64}$/u.test(grant.capabilityId)
   ) {
     throw new Error("Relay authorization does not match this process.");
@@ -278,6 +297,7 @@ export async function runRelayCommand(
     providerId: evidenceProviderId,
     buildId,
     expectedModel: model,
+    budgetClass,
     upstreamResponsesUrl: profile.endpoint,
     upstreamBearer: providerKey.value,
     clientBearer,
@@ -316,6 +336,7 @@ export async function runRelayCommand(
         clientTokenPath,
         provider: evidenceProviderId,
         model,
+        budgetClass,
         expiresAt: new Date(expiresAtMs).toISOString(),
       }),
     );

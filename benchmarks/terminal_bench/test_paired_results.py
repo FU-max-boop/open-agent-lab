@@ -126,50 +126,126 @@ def _relay(
     terminal_metadata: bool = True,
     parse_errors: int = 0,
     metadata_conflicts: tuple[str, ...] = (),
+    budget_class: str = "scored_slot",
+    budget_state: str | None = None,
+    rejected_requests: dict[str, int] | None = None,
+    lifecycles: tuple[dict[str, object], ...] | None = None,
 ) -> dict[str, object]:
     first_request_at = started + timedelta(seconds=2)
     identity_digest = hashlib.sha256(identity.encode()).hexdigest()
-    usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
-    if include_optional_usage:
-        usage.update({"cached_input_tokens": 0, "reasoning_output_tokens": 1})
     identity_fields = {
-        "schemaVersion": 1,
-        "relayVersion": "native-responses-relay-v1",
+        "schemaVersion": 2,
+        "relayVersion": "native-responses-relay-v2",
         "runId": f"run-{identity_digest}",
         "relayInstanceId": str(UUID(hex=identity_digest[:32], version=4)),
         "providerId": provider,
         "buildId": build_id,
     }
+    if lifecycles is None:
+        lifecycles = tuple({} for _ in range(request_count))
+    else:
+        request_count = len(lifecycles)
+    policy = {
+        "scored_slot": ("sealed_usage_debit", 50_000),
+        "zai_route_probe": ("fixed_round_allocations", 8_448),
+        "unmetered_route_probe": ("none", None),
+    }
+    accounting_mode, slot_limit = policy[budget_class]
+    remaining = slot_limit
     records = []
     if not empty:
-        for ordinal in range(1, request_count + 1):
+        for ordinal, lifecycle in enumerate(lifecycles, 1):
             requested_at = first_request_at + timedelta(milliseconds=(ordinal - 1) * 3)
             response_id = f"response-{identity}-{ordinal}"
+            lifecycle_transport = str(lifecycle.get("transport_state", transport_state))
+            lifecycle_terminal_metadata = bool(
+                lifecycle.get("terminal_metadata", terminal_metadata)
+            )
+            terminal_event = (
+                str(lifecycle.get("terminal_event", "response.completed"))
+                if lifecycle_terminal_metadata
+                else None
+            )
+            terminal_status = (
+                lifecycle.get(
+                    "terminal_status",
+                    terminal_event.removeprefix("response.")
+                    if terminal_event is not None
+                    else None,
+                )
+                if lifecycle_terminal_metadata
+                else None
+            )
+            incomplete_reason = (
+                lifecycle.get(
+                    "incomplete_reason",
+                    "max_output_tokens"
+                    if terminal_event == "response.incomplete"
+                    else None,
+                )
+                if lifecycle_terminal_metadata
+                else None
+            )
+            lifecycle_output = lifecycle.get("output_tokens", 2)
+            usage = (
+                {
+                    "input_tokens": 3,
+                    "output_tokens": lifecycle_output,
+                    "total_tokens": 3 + lifecycle_output,
+                }
+                if lifecycle_terminal_metadata
+                and isinstance(lifecycle_output, int)
+                and not isinstance(lifecycle_output, bool)
+                else None
+            )
+            if usage is not None and lifecycle.get(
+                "include_optional_usage", include_optional_usage
+            ):
+                usage.update({"cached_input_tokens": 0, "reasoning_output_tokens": 1})
+            requested_max = lifecycle.get(
+                "requested_max",
+                1_024 if budget_class == "zai_route_probe" and ordinal == 2 else None,
+            )
+            effective_max = lifecycle.get("effective_max")
+            if effective_max is None and budget_class == "scored_slot":
+                effective_max = remaining
+            elif effective_max is None and budget_class == "zai_route_probe":
+                effective_max = (8_192, 256)[ordinal - 1]
+            elif budget_class == "unmetered_route_probe":
+                effective_max = requested_max
             upstream_request_id = (
-                provider_request_id or f"provider-{identity}-{ordinal}"
-                if emit_provider_request_id
+                lifecycle.get("provider_request_id")
+                or provider_request_id
+                or f"provider-{identity}-{ordinal}"
+                if lifecycle.get("emit_provider_request_id", emit_provider_request_id)
                 else None
             )
             terminal_response = {
                 "id": response_id,
-                "model": returned_model or model,
+                "model": lifecycle.get("returned_model", returned_model) or model,
                 "usage": usage,
             }
+            if terminal_status is not None:
+                terminal_response["status"] = terminal_status
+            if incomplete_reason is not None:
+                terminal_response["incomplete_details"] = {"reason": incomplete_reason}
             frames = (
                 [
                     "data:"
                     + paired._canonical(
-                        {"type": "response.completed", "response": terminal_response}
+                        {"type": terminal_event, "response": terminal_response}
                     )
                 ]
-                if terminal_metadata
+                if lifecycle_terminal_metadata
                 else []
             )
-            frames.extend("data:{" for _ in range(parse_errors))
+            lifecycle_parse_errors = int(lifecycle.get("parse_errors", parse_errors))
+            frames.extend("data:{" for _ in range(lifecycle_parse_errors))
             response_body = "\n\n".join(frames) if frames else "{}"
-            request_body = paired._canonical(
-                {"model": model, "store": False, "stream": True}
-            )
+            request_payload = {"model": model, "store": False, "stream": True}
+            if effective_max is not None:
+                request_payload["max_output_tokens"] = effective_max
+            request_body = paired._canonical(request_payload)
             common = {
                 **identity_fields,
                 "ordinal": ordinal,
@@ -194,6 +270,8 @@ def _relay(
                         + hashlib.sha256(request_body.encode()).hexdigest(),
                         "clientRequestId": f"client-{identity}",
                         "stream": True,
+                        "requestedMaxOutputTokens": requested_max,
+                        "effectiveMaxOutputTokens": effective_max,
                     },
                     {
                         **common,
@@ -210,12 +288,12 @@ def _relay(
                         "event": "transport.responses.closed",
                         "status": 200,
                         "providerRequestId": upstream_request_id,
-                        "transportState": transport_state,
+                        "transportState": lifecycle_transport,
                         "errorCategory": (
                             None
-                            if transport_state == "completed"
+                            if lifecycle_transport == "completed"
                             else "client_disconnected"
-                            if transport_state == "aborted"
+                            if lifecycle_transport == "aborted"
                             else "upstream_failure"
                         ),
                         "responseBytes": len(response_body.encode()),
@@ -223,33 +301,47 @@ def _relay(
                         + hashlib.sha256(response_body.encode()).hexdigest(),
                         "durationMs": 2,
                         "firstByteMs": 1,
-                        "parseErrors": parse_errors,
-                        "metadataConflicts": list(metadata_conflicts),
-                        "modelConsistency": model_consistency,
+                        "parseErrors": lifecycle_parse_errors,
+                        "metadataConflicts": list(
+                            lifecycle.get("metadata_conflicts", metadata_conflicts)
+                        ),
+                        "modelConsistency": lifecycle.get(
+                            "model_consistency", model_consistency
+                        ),
                         "modelSources": {
                             "http.openai-model.0": model,
                             **(
                                 {
-                                    "event.response.completed.response.model.1": (
-                                        returned_model or model
+                                    f"event.{terminal_event}.response.model.1": (
+                                        lifecycle.get("returned_model", returned_model)
+                                        or model
                                     )
                                 }
-                                if terminal_metadata
+                                if lifecycle_terminal_metadata
                                 else {}
                             ),
                         },
-                        "returnedModel": returned_model or model
-                        if terminal_metadata
+                        "returnedModel": lifecycle.get("returned_model", returned_model)
+                        or model
+                        if lifecycle_terminal_metadata
                         else None,
-                        "responseId": response_id if terminal_metadata else None,
+                        "responseId": response_id
+                        if lifecycle_terminal_metadata
+                        else None,
                         "systemFingerprint": None,
-                        "terminalEvent": "response.completed"
-                        if terminal_metadata
-                        else None,
-                        "usage": usage if terminal_metadata else None,
+                        "terminalEvent": terminal_event,
+                        "terminalStatus": terminal_status,
+                        "incompleteReason": incomplete_reason,
+                        "usage": usage,
                     },
                 ]
             )
+            if (
+                isinstance(remaining, int)
+                and usage is not None
+                and isinstance(usage["output_tokens"], int)
+            ):
+                remaining -= usage["output_tokens"]
     previous = None
     rendered = []
     for record in records:
@@ -257,9 +349,116 @@ def _relay(
         previous = _hash(body)
         rendered.append(paired._canonical({**body, "eventSha256": previous}))
     journal = "\n".join(rendered) + ("\n" if rendered else "")
+    requests = records[0::3]
+    closed = records[2::3]
+
+    def settled_output(
+        index: int,
+        request: dict[str, object],
+        lifecycle_closed: dict[str, object],
+    ) -> int | None:
+        usage = lifecycle_closed.get("usage")
+        output = usage.get("output_tokens") if isinstance(usage, dict) else None
+        terminal_kind = (
+            "completed"
+            if (
+                lifecycle_closed.get("terminalEvent") == "response.completed"
+                and lifecycle_closed.get("terminalStatus") in {None, "completed"}
+                and lifecycle_closed.get("incompleteReason") is None
+            )
+            else "max_output_tokens"
+            if (
+                lifecycle_closed.get("terminalEvent") == "response.incomplete"
+                and lifecycle_closed.get("terminalStatus") in {None, "incomplete"}
+                and lifecycle_closed.get("incompleteReason") == "max_output_tokens"
+            )
+            else None
+        )
+        expected_terminal = (
+            ("completed" if index == 0 else "max_output_tokens")
+            if budget_class == "zai_route_probe"
+            else "completed"
+            if budget_class == "unmetered_route_probe"
+            else None
+        )
+        complete_usage = bool(
+            isinstance(usage, dict)
+            and all(
+                type(usage.get(field)) is int and usage[field] >= 0
+                for field in ("input_tokens", "output_tokens", "total_tokens")
+            )
+            and usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+        )
+        effective = request.get("effectiveMaxOutputTokens")
+        return (
+            output
+            if lifecycle_closed.get("transportState") == "completed"
+            and terminal_kind is not None
+            and (expected_terminal is None or terminal_kind == expected_terminal)
+            and complete_usage
+            and "usage" not in lifecycle_closed.get("metadataConflicts", [])
+            and (effective is None or output <= effective)
+            else None
+        )
+
+    settled_outputs = [
+        settled_output(index, request, lifecycle_closed)
+        for index, (request, lifecycle_closed) in enumerate(
+            zip(requests, closed, strict=True)
+        )
+    ]
+    reported = sum(
+        item["usage"]["output_tokens"]
+        for item in closed
+        if isinstance(item.get("usage"), dict)
+    )
+    unknown_usage = any(item.get("usage") is None for item in closed)
+    if budget_state is None:
+        if empty:
+            budget_state = (
+                "unmetered" if budget_class == "unmetered_route_probe" else "poisoned"
+            )
+        elif unknown_usage or None in settled_outputs:
+            budget_state = "poisoned"
+        elif budget_class == "unmetered_route_probe":
+            budget_state = "unmetered"
+        elif rejected_requests == {"slot_output_budget_exhausted": 1}:
+            budget_state = "exact_exhaustion"
+        elif closed[-1]["terminalEvent"] == "response.incomplete":
+            budget_state = (
+                "probe_conformant"
+                if budget_class == "zai_route_probe" and len(closed) == 2
+                else "budget_terminal"
+            )
+        else:
+            budget_state = "complete"
+    if budget_state == "poisoned":
+        accounting_reported = None
+        if budget_class == "unmetered_route_probe":
+            accounting_upper = None
+            accounting_burned = 0
+        else:
+            unsettled = bool(closed and settled_outputs[-1] is None)
+            settled_reported = sum(
+                output for output in settled_outputs if output is not None
+            )
+            pending = records[-3]["effectiveMaxOutputTokens"] if unsettled else 0
+            accounting_upper = settled_reported + int(pending or 0)
+            assert isinstance(slot_limit, int)
+            accounting_burned = slot_limit - accounting_upper
+    else:
+        accounting_reported = reported
+        accounting_upper = reported
+        if budget_class == "unmetered_route_probe":
+            accounting_burned = 0
+        elif budget_class == "zai_route_probe" and budget_state == "complete":
+            accounting_burned = 8_192 - reported
+        else:
+            assert isinstance(slot_limit, int)
+            accounting_burned = slot_limit - reported
     marker = {
-        "schemaVersion": 1,
-        "relayVersion": "native-responses-relay-v1",
+        "schemaVersion": 2,
+        "relayVersion": "native-responses-relay-v2",
         "runId": identity_fields["runId"],
         "relayInstanceId": identity_fields["relayInstanceId"],
         "providerId": provider,
@@ -269,7 +468,16 @@ def _relay(
         "sealedAt": _relay_time(finished - timedelta(seconds=1)),
         "eventCount": len(records),
         "chainHead": previous,
-        "rejectedRequests": {},
+        "rejectedRequests": rejected_requests or {},
+        "budgetClass": budget_class,
+        "accountingMode": accounting_mode,
+        "slotOutputTokenLimit": slot_limit,
+        "outputTokenAccounting": {
+            "state": budget_state,
+            "reportedOutputTokens": accounting_reported,
+            "conservativeOutputTokenUpperBound": accounting_upper,
+            "unusedOutputTokensBurned": accounting_burned,
+        },
     }
     seal = paired._canonical({**marker, "markerSha256": _hash(marker)}) + "\n"
     host = directory / "artifacts" / "provider-evidence"
@@ -511,6 +719,8 @@ def _rewrite_relay(
                 "modelSources": {},
                 "systemFingerprint": None,
                 "terminalEvent": None,
+                "terminalStatus": None,
+                "incompleteReason": None,
                 "usage": None,
                 "metadataConflicts": [],
                 "parseErrors": 0,
@@ -543,6 +753,8 @@ def _rewrite_relay(
         records[2].update(
             {
                 "terminalEvent": None,
+                "terminalStatus": None,
+                "incompleteReason": None,
                 "returnedModel": None,
                 "responseId": None,
                 "usage": None,
@@ -617,6 +829,8 @@ def _rewrite_relay(
                 "returnedModel": None,
                 "responseId": None,
                 "terminalEvent": None,
+                "terminalStatus": None,
+                "incompleteReason": None,
                 "usage": None,
             }
         )
@@ -703,6 +917,14 @@ def _rewrite_relay(
     marker = json.loads(marker_path.read_text())
     marker.pop("markerSha256")
     marker["chainHead"] = previous
+    if mutation == "missing-terminal-state":
+        effective = records[-3]["effectiveMaxOutputTokens"]
+        marker["outputTokenAccounting"] = {
+            "state": "poisoned",
+            "reportedOutputTokens": None,
+            "conservativeOutputTokenUpperBound": effective,
+            "unusedOutputTokensBurned": 50_000 - effective,
+        }
     if mutation == "verifier-seal":
         result = json.loads((trial / "result.json").read_text())
         marker["sealedAt"] = result["verifier"]["started_at"]
@@ -863,8 +1085,8 @@ def _pilot_authorization(
             }
         )
     return {
-        "schemaVersion": 2,
-        "proofClass": "live-route-probe-v2",
+        "schemaVersion": 3,
+        "proofClass": "live-route-probe-v3",
         "provider": provider,
         "model": model,
         "sourceRevision": binding["source_revision"],
@@ -886,6 +1108,44 @@ def _pilot_authorization(
             "output_tokens": 4,
             "reasoning_output_tokens": 2,
             "total_tokens": 10,
+        },
+        "outputBudgetProbe": None
+        if provider == "deepseek"
+        else {
+            "schemaVersion": 1,
+            "proofClass": "empirical-responses-truncation-v1",
+            "evidenceScope": "exact_observed_date_model_endpoint",
+            "observedAt": stamp(180),
+            "endpoint": "https://api.z.ai/api/v1/responses",
+            "model": model,
+            "protocol": "openai_responses",
+            "accountingMode": "fixed_round_allocations",
+            "burnedAccounting": "reserved_budget_retired_not_usage",
+            "slotOutputTokenLimit": 8_448,
+            "minimumRequestedRound2OutputTokens": 1_024,
+            "rounds": [
+                {
+                    "ordinal": 1,
+                    "effectiveMaxOutputTokens": 8_192,
+                    "reportedOutputTokens": 2,
+                    "burnedOutputBudgetTokens": 8_192,
+                    "terminalEvent": "response.completed",
+                    "terminalStatus": "completed",
+                    "incompleteReason": None,
+                },
+                {
+                    "ordinal": 2,
+                    "effectiveMaxOutputTokens": 256,
+                    "reportedOutputTokens": 2,
+                    "burnedOutputBudgetTokens": 256,
+                    "terminalEvent": "response.incomplete",
+                    "terminalStatus": "incomplete",
+                    "incompleteReason": "max_output_tokens",
+                },
+            ],
+            "totalReportedOutputTokens": 4,
+            "totalBurnedOutputBudgetTokens": 8_448,
+            "noThirdRequest": True,
         },
         "credentialLeakScan": {
             "ok": True,
@@ -914,6 +1174,7 @@ def _pilot_authorization(
         ),
         "liveProviderRouteObserved": True,
         "liveProviderConformance": False,
+        "empiricalResponseTruncationObserved": provider == "zai",
         "benchmarkTaskInstructionUsed": False,
         "benchmarkRewardUsed": False,
         "providerControlVerification": "operator_attested",
@@ -1455,7 +1716,54 @@ class StrictInputTest(unittest.TestCase):
     def test_manifest_policy_has_one_frozen_authority(self) -> None:
         root = paired._repo_root()
         manifest = json.loads((root / paired._MANIFEST).read_text())
-        self.assertEqual(manifest["schemaVersion"], 3)
+        self.assertEqual(manifest["schemaVersion"], 4)
+        self.assertEqual(
+            manifest["runtime"]["outputTokenBudget"],
+            {
+                "scored": {
+                    "budgetClass": "scored_slot",
+                    "accountingMode": "sealed_usage_debit",
+                    "slotOutputTokenLimit": 50_000,
+                    "slotsPerProvider": 20,
+                    "providerOutputTokenLimit": 1_000_000,
+                    "campaignOutputTokenLimit": 2_000_000,
+                    "slotTransferable": False,
+                },
+                "zaiRouteProbe": {
+                    "budgetClass": "zai_route_probe",
+                    "accountingMode": "fixed_round_allocations",
+                    "slotOutputTokenLimit": 8_448,
+                    "roundOutputTokenLimits": [8_192, 256],
+                    "unusedRoundAllocationTransferable": False,
+                    "minimumRequestedRound2OutputTokens": 1_024,
+                    "round2TerminalEvent": "response.incomplete",
+                    "round2IncompleteReason": "max_output_tokens",
+                    "maxRequests": 2,
+                },
+                "routeProbeUsageIncludedInScoredBudget": False,
+            },
+        )
+        self.assertEqual(
+            manifest["failureScoring"]["modelBudget"],
+            {
+                "scorableOutcomes": [
+                    (
+                        "provider_incomplete_max_output_tokens_with_complete_"
+                        "sealed_usage"
+                    ),
+                    (
+                        "local_slot_output_budget_exhausted_after_exact_complete_"
+                        "sealed_usage_without_upstream_request"
+                    ),
+                ],
+                "officialReward": "preserved",
+                "pairedDenominator": "preserved",
+                "analysisComplete": "allowed_with_complete_required_telemetry",
+                "allOtherBudgetOutcomes": "block_complete_analysis",
+            },
+        )
+        self.assertIn("sealed_slot_output_token_accounting", manifest["metrics"])
+        self.assertIn("model_budget_outcomes", manifest["metrics"])
         self.assertEqual(
             manifest["costTelemetry"],
             {
@@ -1473,6 +1781,126 @@ class StrictInputTest(unittest.TestCase):
             ),
         )
         self.assertEqual(manifest["taskRuntimeBindings"], paired._TASK_RUNTIME_BINDINGS)
+
+    def test_manifest_output_budget_contract_is_type_exact(self) -> None:
+        root = paired._repo_root()
+        path = root / paired._MANIFEST
+        original = json.loads(path.read_text())
+        real_load = paired._load
+        mutations = {
+            "schema-type": (("schemaVersion",), 4.0),
+            "scored-slot-type": (
+                ("runtime", "outputTokenBudget", "scored", "slotOutputTokenLimit"),
+                50_000.0,
+            ),
+            "scored-transfer": (
+                ("runtime", "outputTokenBudget", "scored", "slotTransferable"),
+                True,
+            ),
+            "probe-round-two": (
+                (
+                    "runtime",
+                    "outputTokenBudget",
+                    "zaiRouteProbe",
+                    "roundOutputTokenLimits",
+                ),
+                [8_192, 257],
+            ),
+            "probe-reason": (
+                (
+                    "runtime",
+                    "outputTokenBudget",
+                    "zaiRouteProbe",
+                    "round2IncompleteReason",
+                ),
+                "content_filter",
+            ),
+            "third-probe-request": (
+                ("runtime", "outputTokenBudget", "zaiRouteProbe", "maxRequests"),
+                3,
+            ),
+            "probe-counted-as-scored": (
+                (
+                    "runtime",
+                    "outputTokenBudget",
+                    "routeProbeUsageIncludedInScoredBudget",
+                ),
+                True,
+            ),
+            "model-budget-outcome": (
+                ("failureScoring", "modelBudget", "scorableOutcomes"),
+                ["unknown"],
+            ),
+            "metrics": (
+                ("metrics",),
+                [
+                    item
+                    for item in original["metrics"]
+                    if item != "model_budget_outcomes"
+                ],
+            ),
+        }
+        for name, (keys, value) in mutations.items():
+            with self.subTest(name=name):
+                manifest = json.loads(paired._canonical(original))
+                target = manifest
+                for key in keys[:-1]:
+                    target = target[key]
+                target[keys[-1]] = value
+
+                def load(candidate: Path, expected: object = manifest) -> object:
+                    return expected if candidate == path else real_load(candidate)
+
+                with (
+                    patch.object(paired, "_load", side_effect=load),
+                    patch.object(paired, "_POLICY_SHA256", paired._digest(manifest)),
+                    patch.object(
+                        paired,
+                        "_relay_build_id",
+                        side_effect=lambda _root, fixture=False, expected=manifest: (
+                            expected["relayBuildIds"]
+                        )["providerFreeFixture" if fixture else "production"],
+                    ),
+                    patch.object(
+                        paired,
+                        "_frozen_file_digest",
+                        side_effect=lambda _root, relative, expected=manifest: expected[
+                            "fileSha256"
+                        ][relative],
+                    ),
+                    self.assertRaisesRegex(
+                        paired.IntegrityError, "manifest policy drifted"
+                    ),
+                ):
+                    paired._manifest(root)
+
+    def test_scored_output_budget_counts_slots_and_sealed_usage(self) -> None:
+        def attempts(per_provider: int, output_tokens: int) -> list[dict[str, object]]:
+            return [
+                {
+                    "provider": provider,
+                    "tokens": {"output_tokens": output_tokens},
+                }
+                for provider in paired._PROVIDERS
+                for _ in range(per_provider)
+            ]
+
+        paired._validate_scored_output_budget(
+            attempts(10, 50_000), replications_complete=False
+        )
+        paired._validate_scored_output_budget(
+            attempts(20, 50_000), replications_complete=True
+        )
+        for name, values, complete in (
+            ("complete-slot-shortfall", attempts(19, 1), True),
+            ("extra-slot", attempts(21, 1), False),
+            ("slot-limit", attempts(1, 50_001), False),
+            ("provider-limit", attempts(20, 50_001), True),
+        ):
+            with self.subTest(name=name), self.assertRaises(paired.IntegrityError):
+                paired._validate_scored_output_budget(
+                    values, replications_complete=complete
+                )
 
     def test_scorable_exceptions_match_harbor_codex_failure_types(self) -> None:
         classified = {pattern.exception.__name__ for pattern in Codex.ERROR_PATTERNS}
@@ -2069,6 +2497,154 @@ class PairedResultsTest(unittest.TestCase):
         self.task_identity.stop()
         self.temporary.cleanup()
 
+    def test_scored_attempt_requires_scored_slot_relay_budget(self) -> None:
+        for provider, budget_class in (
+            ("deepseek", "unmetered_route_probe"),
+            ("zai", "zai_route_probe"),
+        ):
+            with self.subTest(provider=provider, budget_class=budget_class):
+                case_root = self.root / budget_class
+                case_root.mkdir()
+                screen = RunFixture(case_root, "screen-v1")
+                trial = screen.trials[(provider, screen.tasks[0], "control-v1")]
+                result_path = trial / "result.json"
+                result = json.loads(result_path.read_text())
+                verified = _relay(
+                    trial,
+                    provider,
+                    paired._PROVIDERS[provider]["model"],
+                    screen.binding["relay_build_sha256"],
+                    f"screen-v1-{provider}-{budget_class}",
+                    datetime.fromisoformat(result["started_at"]),
+                    datetime.fromisoformat(result["finished_at"]),
+                    budget_class=budget_class,
+                )
+                self.assertTrue(verified["publication_gate"]["ok"])
+                _replace_relay(result, verified)
+                _write_trial_result(result_path, result)
+                _refresh_job_result(trial.parent)
+                with self.assertRaisesRegex(
+                    paired.IntegrityError, "scored relay output budget drifted"
+                ):
+                    paired.summarize([screen.root])
+
+    def _scored_relay_failure(
+        self,
+        fixture: RunFixture,
+        *,
+        identity: str,
+        lifecycle: dict[str, object],
+        budget_state: str,
+        rejected_requests: dict[str, int] | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        trial = fixture.trials[("zai", fixture.tasks[0], "verify-instruction-v1")]
+        result_path = trial / "result.json"
+        result = json.loads(result_path.read_text())
+        verified = _relay(
+            trial,
+            "zai",
+            paired._PROVIDERS["zai"]["model"],
+            fixture.binding["relay_build_sha256"],
+            identity,
+            datetime.fromisoformat(result["agent_execution"]["started_at"]),
+            datetime.fromisoformat(result["agent_execution"]["finished_at"]),
+            budget_state=budget_state,
+            rejected_requests=rejected_requests,
+            lifecycles=(lifecycle,),
+        )
+        _replace_relay(result, verified)
+        result["exception_info"] = _failure_info(result, "NonZeroAgentExitCodeError")
+        for field in ("n_input_tokens", "n_output_tokens", "n_cache_tokens"):
+            result["agent_result"][field] = None
+        _write_trial_result(result_path, result)
+        trajectory_path = trial / "agent" / "trajectory.json"
+        trajectory = json.loads(trajectory_path.read_text())
+        trajectory["final_metrics"] = None
+        _write(trajectory_path, trajectory)
+        _refresh_job_result(trial.parent)
+        return result, verified
+
+    def test_relay_evidence_accepts_only_the_exact_zai_probe_terminal(self) -> None:
+        trial = self.root / "zai-probe"
+        started = datetime.now(timezone.utc) - timedelta(seconds=20)
+        finished = started + timedelta(seconds=10)
+        build_id = "sha256:" + "1" * 64
+        verified = _relay(
+            trial,
+            "zai",
+            paired._PROVIDERS["zai"]["model"],
+            build_id,
+            "zai-probe",
+            started,
+            finished,
+            budget_class="zai_route_probe",
+            lifecycles=(
+                {"effective_max": 8_192, "output_tokens": 100},
+                {
+                    "requested_max": 1_024,
+                    "effective_max": 256,
+                    "terminal_event": "response.incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                    "output_tokens": 12,
+                },
+            ),
+        )
+        with self.assertRaisesRegex(paired.IntegrityError, "publication gate"):
+            paired._validate_relay(
+                trial,
+                "zai",
+                paired._PROVIDERS["zai"]["model"],
+                build_id,
+                started,
+                finished,
+                False,
+            )
+        evidence = paired.RelayEvidence.complete(
+            trial,
+            "zai",
+            paired._PROVIDERS["zai"]["model"],
+            {"relay_build_sha256": build_id},
+            started,
+            finished,
+        )
+        self.assertEqual(evidence.usage["output_tokens"], 112)
+        expected_variant = {"variant": "probe"}
+        expected_harbor = {"binding": "probe"}
+        provider_data = {
+            **verified,
+            "agent_variant": expected_variant,
+            "harbor_binding": {
+                **expected_harbor,
+                "binding_sha256": paired._digest(expected_harbor),
+            },
+        }
+        trajectory = {"steps": [{}], "final_metrics": None}
+        agent_result = {
+            "n_input_tokens": None,
+            "n_output_tokens": None,
+            "n_cache_tokens": None,
+            "metadata": {"open_agent_lab_provider": provider_data},
+        }
+        with self.assertRaises(paired.IntegrityError):
+            evidence.validate_embedded(
+                agent_result, trajectory, expected_variant, expected_harbor
+            )
+        evidence.validate_embedded(
+            agent_result,
+            trajectory,
+            expected_variant,
+            expected_harbor,
+            allow_missing_agent_totals_and_metrics=True,
+        )
+        with self.assertRaises(paired.IntegrityError):
+            evidence.validate_embedded(
+                {**agent_result, "n_output_tokens": 112},
+                trajectory,
+                expected_variant,
+                expected_harbor,
+                allow_missing_agent_totals_and_metrics=True,
+            )
+
     def test_cleanup_removes_only_verified_run_owned_tags(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
         removed: list[str] = []
@@ -2236,12 +2812,27 @@ class PairedResultsTest(unittest.TestCase):
             paired.summarize([screen.root])
 
     def test_pilot_claim_cannot_bless_invalid_probe_receipts(self) -> None:
-        for mutation in ("junk", "expired", "probe-config", "retry-policy"):
+        for mutation, provider in (
+            ("junk", "deepseek"),
+            ("expired", "deepseek"),
+            ("probe-config", "deepseek"),
+            ("retry-policy", "deepseek"),
+            ("legacy-schema", "deepseek"),
+            ("deepseek-budget-proof", "deepseek"),
+            ("zai-wrong-reason", "zai"),
+            ("zai-schema-bool", "zai"),
+            ("zai-slot-float", "zai"),
+            ("zai-minimum-float", "zai"),
+            ("zai-round-ordinal-bool", "zai"),
+            ("zai-effective-float", "zai"),
+            ("zai-burned-float", "zai"),
+            ("zai-reported-total-float", "zai"),
+            ("zai-burned-total-float", "zai"),
+        ):
             with self.subTest(mutation=mutation):
                 case_root = self.root / mutation
                 case_root.mkdir()
                 screen = RunFixture(case_root, "screen-v1")
-                provider = "deepseek"
                 authorization = screen.root / "authorizations" / f"{provider}.json"
                 receipt = json.loads(authorization.read_text())
                 if mutation == "junk":
@@ -2251,6 +2842,40 @@ class PairedResultsTest(unittest.TestCase):
                     receipt["authorizationExpiresAt"] = "2026-08-22T00:00:05Z"
                 elif mutation == "retry-policy":
                     receipt["codexProviderRetryPolicy"]["request_max_retries"] = 1
+                elif mutation == "legacy-schema":
+                    receipt["schemaVersion"] = 2
+                    receipt["proofClass"] = "live-route-probe-v2"
+                elif mutation == "deepseek-budget-proof":
+                    receipt["outputBudgetProbe"] = {}
+                    receipt["empiricalResponseTruncationObserved"] = True
+                elif mutation == "zai-wrong-reason":
+                    receipt["outputBudgetProbe"]["rounds"][1]["incompleteReason"] = (
+                        "content_filter"
+                    )
+                elif mutation == "zai-schema-bool":
+                    receipt["outputBudgetProbe"]["schemaVersion"] = True
+                elif mutation == "zai-slot-float":
+                    receipt["outputBudgetProbe"]["slotOutputTokenLimit"] = 8_448.0
+                elif mutation == "zai-minimum-float":
+                    receipt["outputBudgetProbe"][
+                        "minimumRequestedRound2OutputTokens"
+                    ] = 1_024.0
+                elif mutation == "zai-round-ordinal-bool":
+                    receipt["outputBudgetProbe"]["rounds"][0]["ordinal"] = True
+                elif mutation == "zai-effective-float":
+                    receipt["outputBudgetProbe"]["rounds"][0][
+                        "effectiveMaxOutputTokens"
+                    ] = 8_192.0
+                elif mutation == "zai-burned-float":
+                    receipt["outputBudgetProbe"]["rounds"][0][
+                        "burnedOutputBudgetTokens"
+                    ] = 8_192.0
+                elif mutation == "zai-reported-total-float":
+                    receipt["outputBudgetProbe"]["totalReportedOutputTokens"] = 4.0
+                elif mutation == "zai-burned-total-float":
+                    receipt["outputBudgetProbe"]["totalBurnedOutputBudgetTokens"] = (
+                        8_448.0
+                    )
                 else:
                     receipt["configSha256"] = "sha256:" + "f" * 64
                 _write_private(authorization, receipt)
@@ -2262,7 +2887,8 @@ class PairedResultsTest(unittest.TestCase):
                     claim["policySha256"] = policy_sha256
                     _write_private(claim_path, claim)
                 with self.assertRaisesRegex(
-                    paired.IntegrityError, "authorization receipt"
+                    paired.IntegrityError,
+                    "authorization receipt|probe budget|truncation|output budget",
                 ):
                     paired.summarize([screen.root])
 
@@ -2419,6 +3045,7 @@ class PairedResultsTest(unittest.TestCase):
                 ]
                 with (
                     patch.object(paired, "_validate_global_uniqueness"),
+                    patch.object(paired, "_validate_scored_output_budget"),
                     patch.object(paired, "_build_pairs", return_value=pairs),
                     patch.object(paired, "_provider_controls", return_value=[]),
                 ):
@@ -2707,7 +3334,7 @@ class PairedResultsTest(unittest.TestCase):
                         "open_agent_lab_provider"
                     ]
                     if mutation == "provider-schema":
-                        provider_data["schema_version"] = 2
+                        provider_data["schema_version"] = 1
                     else:
                         provider_data["unredacted"] = "unexpected"
                     _write(result_path, result)
@@ -3169,6 +3796,233 @@ class PairedResultsTest(unittest.TestCase):
         self.assertEqual(summary["denominator"]["erroredAttempts"], 1)
         self.assertEqual(summary["exceptionCounts"], {"provider_quota": 1})
 
+    def test_exact_scored_budget_failures_preserve_the_denominator_and_usage(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "provider-incomplete",
+                {
+                    "effective_max": 50_000,
+                    "terminal_event": "response.incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                    "output_tokens": 49_999,
+                },
+                "budget_terminal",
+                None,
+                49_999,
+                ["terminal_event_incomplete"],
+            ),
+            (
+                "local-exhaustion",
+                {"effective_max": 50_000, "output_tokens": 50_000},
+                "exact_exhaustion",
+                {"slot_output_budget_exhausted": 1},
+                50_000,
+                ["relay_rejected_requests", "slot_output_budget_exhausted"],
+            ),
+        )
+        for name, lifecycle, state, rejected, expected_output, reasons in cases:
+            with self.subTest(name=name):
+                case_root = self.root / name
+                case_root.mkdir()
+                screen = RunFixture(case_root, "screen-v1")
+                mirror = RunFixture(case_root, "mirror-v1")
+                result, _verified = self._scored_relay_failure(
+                    screen,
+                    identity=f"screen-zai-{name}",
+                    lifecycle=lifecycle,
+                    budget_state=state,
+                    rejected_requests=rejected,
+                )
+
+                summary = paired.summarize([screen.root, mirror.root])
+
+                attempt = next(
+                    item
+                    for item in summary["attempts"]
+                    if item["trialId"] == result["id"]
+                )
+                self.assertEqual(
+                    summary["denominator"],
+                    {
+                        "attempts": 40,
+                        "erroredAttempts": 1,
+                        "pairs": 20,
+                        "tasksPerProvider": 5,
+                    },
+                )
+                self.assertEqual(summary["exceptionCounts"], {"model_budget": 1})
+                self.assertTrue(summary["analysisComplete"])
+                self.assertEqual(
+                    summary["telemetryCoverage"],
+                    {"completeAttempts": 40, "totalAttempts": 40},
+                )
+                self.assertTrue(summary["promotion"]["directionalCriteriaMet"])
+                self.assertEqual(attempt["reward"], 0.6)
+                self.assertEqual(
+                    attempt["topLevelException"], "NonZeroAgentExitCodeError"
+                )
+                self.assertEqual(attempt["failureClass"], "model_budget")
+                self.assertEqual(attempt["tokens"]["output_tokens"], expected_output)
+                self.assertEqual(attempt["tokens"]["total_tokens"], expected_output + 3)
+                self.assertEqual(attempt["telemetryMissing"], [])
+                self.assertEqual(attempt["relayPublicationGate"]["reasons"], reasons)
+                zai = next(
+                    item
+                    for item in summary["providerSummary"]
+                    if item["provider"] == "zai"
+                )
+                self.assertEqual(zai["primaryTokenCoveragePairs"], 10)
+
+    def test_nearby_budget_failures_require_review_without_losing_the_score(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "missing-usage",
+                {
+                    "effective_max": 50_000,
+                    "terminal_event": "response.incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                    "output_tokens": None,
+                },
+                "poisoned",
+                None,
+            ),
+            (
+                "wrong-incomplete-reason",
+                {
+                    "effective_max": 50_000,
+                    "terminal_event": "response.incomplete",
+                    "incomplete_reason": "content_filter",
+                    "output_tokens": 2,
+                },
+                "poisoned",
+                None,
+            ),
+            (
+                "usage-conflict",
+                {
+                    "effective_max": 50_000,
+                    "terminal_event": "response.incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                    "output_tokens": 2,
+                    "metadata_conflicts": ("usage",),
+                },
+                "poisoned",
+                None,
+            ),
+        )
+        for name, lifecycle, state, rejected in cases:
+            with self.subTest(name=name):
+                case_root = self.root / name
+                case_root.mkdir()
+                screen = RunFixture(case_root, "screen-v1")
+                mirror = RunFixture(case_root, "mirror-v1")
+                result, _verified = self._scored_relay_failure(
+                    screen,
+                    identity=f"screen-zai-{name}",
+                    lifecycle=lifecycle,
+                    budget_state=state,
+                    rejected_requests=rejected,
+                )
+                summary = paired.summarize([screen.root, mirror.root])
+                attempt = next(
+                    item
+                    for item in summary["attempts"]
+                    if item["trialId"] == result["id"]
+                )
+                self.assertFalse(summary["analysisComplete"])
+                self.assertEqual(summary["analysisStatus"], "valid_incomplete")
+                self.assertEqual(
+                    summary["denominator"],
+                    {
+                        "attempts": 40,
+                        "erroredAttempts": 1,
+                        "pairs": 20,
+                        "tasksPerProvider": 5,
+                    },
+                )
+                self.assertFalse(summary["promotion"]["directionalCriteriaMet"])
+                self.assertEqual(attempt["reward"], 0.6)
+                self.assertIsNone(attempt["tokens"])
+                self.assertNotEqual(attempt["failureClass"], "model_budget")
+                self.assertIn("provider_usage", attempt["telemetryMissing"])
+
+        over_root = self.root / "output-over-effective-max"
+        over_root.mkdir()
+        over_screen = RunFixture(over_root, "screen-v1")
+        over_mirror = RunFixture(over_root, "mirror-v1")
+        over_trial = over_screen.trials[
+            ("zai", over_screen.tasks[0], "verify-instruction-v1")
+        ]
+        over_path = over_trial / "result.json"
+        over_result = json.loads(over_path.read_text())
+        over_verified = _relay(
+            over_trial,
+            "zai",
+            paired._PROVIDERS["zai"]["model"],
+            over_screen.binding["relay_build_sha256"],
+            "screen-zai-output-over-effective-max",
+            datetime.fromisoformat(over_result["agent_execution"]["started_at"]),
+            datetime.fromisoformat(over_result["agent_execution"]["finished_at"]),
+            budget_state="poisoned",
+            lifecycles=({"requested_max": 1, "effective_max": 1, "output_tokens": 2},),
+        )
+        self.assertTrue(over_verified["publication_gate"]["ok"])
+        _replace_relay(over_result, over_verified)
+        _write_trial_result(over_path, over_result)
+        _refresh_job_result(over_trial.parent)
+        over_summary = paired.summarize([over_screen.root, over_mirror.root])
+        over_attempt = next(
+            item
+            for item in over_summary["attempts"]
+            if item["trialId"] == over_result["id"]
+        )
+        self.assertFalse(over_summary["analysisComplete"])
+        self.assertEqual(over_summary["analysisStatus"], "valid_incomplete")
+        self.assertEqual(over_summary["denominator"]["attempts"], 40)
+        self.assertEqual(over_summary["denominator"]["erroredAttempts"], 0)
+        self.assertFalse(over_summary["promotion"]["directionalCriteriaMet"])
+        self.assertEqual(over_attempt["reward"], 0.6)
+        self.assertIsNone(over_attempt["topLevelException"])
+        self.assertIsNone(over_attempt["failureClass"])
+        self.assertIsNone(over_attempt["tokens"])
+        self.assertIn("provider_usage", over_attempt["telemetryMissing"])
+
+        rejected_root = self.root / "other-rejection"
+        rejected_root.mkdir()
+        rejected = RunFixture(rejected_root, "screen-v1")
+        self._scored_relay_failure(
+            rejected,
+            identity="screen-zai-other-rejection",
+            lifecycle={"effective_max": 50_000, "output_tokens": 2},
+            budget_state="complete",
+            rejected_requests={"invalid_json": 1},
+        )
+        with self.assertRaisesRegex(paired.IntegrityError, "publication gate"):
+            paired.summarize([rejected.root])
+
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            with self.assertRaises(ValueError):
+                _relay(
+                    Path(directory),
+                    "zai",
+                    paired._PROVIDERS["zai"]["model"],
+                    "sha256:" + "1" * 64,
+                    "post-exhaustion-upstream",
+                    now,
+                    now + timedelta(seconds=10),
+                    budget_state="exact_exhaustion",
+                    rejected_requests={"slot_output_budget_exhausted": 1},
+                    lifecycles=(
+                        {"effective_max": 50_000, "output_tokens": 50_000},
+                        {"effective_max": 1, "output_tokens": 0},
+                    ),
+                )
+
     def test_successes_are_not_classified_as_failures(self) -> None:
         screen = RunFixture(self.root, "screen-v1")
 
@@ -3619,7 +4473,6 @@ class PairedResultsTest(unittest.TestCase):
             "screen-v1-zai-over-cap",
             datetime.fromisoformat(result["started_at"]),
             datetime.fromisoformat(result["finished_at"]),
-            transport_state="aborted",
             request_count=paired._RELAY_REQUEST_CAP + 1,
         )
         _replace_relay(result, verified)

@@ -28,6 +28,30 @@ _MODEL_CONFLICTS = {
     "usage",
 }
 _TERMINAL_EVENTS = {"response.completed", "response.failed", "response.incomplete"}
+_TERMINAL_STATUSES = {"completed", "failed", "incomplete"}
+_BUDGET_CLASSES = {"scored_slot", "zai_route_probe", "unmetered_route_probe"}
+_ACCOUNTING_MODES = {"sealed_usage_debit", "fixed_round_allocations", "none"}
+_OUTPUT_TOKEN_ACCOUNTING_STATES = {
+    "complete",
+    "budget_terminal",
+    "exact_exhaustion",
+    "probe_conformant",
+    "poisoned",
+    "unmetered",
+}
+_SCORED_ACCOUNTING_STATES = {
+    "complete",
+    "budget_terminal",
+    "exact_exhaustion",
+    "poisoned",
+}
+_ZAI_PROBE_ACCOUNTING_STATES = {"complete", "probe_conformant", "poisoned"}
+_OUTPUT_TOKEN_ACCOUNTING_FIELDS = {
+    "state",
+    "reportedOutputTokens",
+    "conservativeOutputTokenUpperBound",
+    "unusedOutputTokensBurned",
+}
 _FAILED_TRANSPORT_ERRORS = {
     "expired",
     "response_too_large",
@@ -67,7 +91,15 @@ _COMMON_FIELDS = {
 }
 _EVENT_FIELDS = {
     "transport.responses.request": _COMMON_FIELDS
-    | {"requestedModel", "requestBytes", "requestSha256", "clientRequestId", "stream"},
+    | {
+        "requestedModel",
+        "requestBytes",
+        "requestSha256",
+        "clientRequestId",
+        "stream",
+        "requestedMaxOutputTokens",
+        "effectiveMaxOutputTokens",
+    },
     "transport.responses.headers": _COMMON_FIELDS
     | {"status", "providerRequestId", "modelHeader", "headersMs"},
     "transport.responses.closed": _COMMON_FIELDS
@@ -86,6 +118,8 @@ _EVENT_FIELDS = {
         "modelSources",
         "systemFingerprint",
         "terminalEvent",
+        "terminalStatus",
+        "incompleteReason",
         "usage",
         "metadataConflicts",
         "parseErrors",
@@ -102,6 +136,10 @@ _SEAL_FIELDS = {
     "expectedModel",
     "sealedAt",
     "rejectedRequests",
+    "budgetClass",
+    "accountingMode",
+    "slotOutputTokenLimit",
+    "outputTokenAccounting",
     "eventCount",
     "chainHead",
     "markerSha256",
@@ -111,6 +149,7 @@ _REJECTION_CODES = {
     "client_disconnected_after_close",
     "concurrency_exceeded",
     "expired",
+    "invalid_max_output_tokens",
     "invalid_json",
     "invalid_turn_state",
     "model_mismatch",
@@ -118,6 +157,7 @@ _REJECTION_CODES = {
     "relay_sealed",
     "request_quota_exceeded",
     "request_too_large",
+    "slot_output_budget_exhausted",
     "unsupported_content_type",
     "unsupported_response_mode",
     "upstream_failure",
@@ -131,6 +171,12 @@ def _is_integer(value: object) -> bool:
         and not isinstance(value, bool)
         and abs(value) <= _MAX_SAFE_INTEGER
     )
+
+
+def _integer_between(
+    value: object, minimum: int, maximum: int = _MAX_SAFE_INTEGER
+) -> bool:
+    return _is_integer(value) and minimum <= value <= maximum
 
 
 def _bounded_text(value: object) -> bool:
@@ -195,6 +241,8 @@ def _usage(value: object) -> bool:
 
 
 def _request_payload(record: dict[str, Any]) -> bool:
+    requested_max = record.get("requestedMaxOutputTokens")
+    effective_max = record.get("effectiveMaxOutputTokens")
     return all(
         (
             _bounded_text(record.get("requestedModel")),
@@ -204,6 +252,8 @@ def _request_payload(record: dict[str, Any]) -> bool:
             bool(_BUILD_ID.fullmatch(str(record.get("requestSha256", "")))),
             _optional_text(record.get("clientRequestId")),
             record.get("stream") is True,
+            requested_max is None or (_is_integer(requested_max) and requested_max > 0),
+            effective_max is None or (_is_integer(effective_max) and effective_max > 0),
         )
     )
 
@@ -227,6 +277,9 @@ def _closed_payload(record: dict[str, Any]) -> bool:
     conflicts = record.get("metadataConflicts")
     state = record.get("transportState")
     error = record.get("errorCategory")
+    terminal_event = record.get("terminalEvent")
+    terminal_status = record.get("terminalStatus")
+    incomplete_reason = record.get("incompleteReason")
     state_matches_error = (
         (state == "completed" and error is None)
         or (state == "aborted" and error == "client_disconnected")
@@ -255,8 +308,34 @@ def _closed_payload(record: dict[str, Any]) -> bool:
             record.get("modelConsistency") in {"consistent", "conflict", "missing"},
             _model_sources(record.get("modelSources")),
             _optional_text(record.get("systemFingerprint")),
-            record.get("terminalEvent") is None
-            or record.get("terminalEvent") in _TERMINAL_EVENTS,
+            terminal_event is None
+            or (isinstance(terminal_event, str) and terminal_event in _TERMINAL_EVENTS),
+            terminal_status is None
+            or (
+                isinstance(terminal_status, str)
+                and terminal_status in _TERMINAL_STATUSES
+            ),
+            _optional_text(incomplete_reason),
+            (
+                terminal_event is None
+                and terminal_status is None
+                and incomplete_reason is None
+            )
+            or (
+                terminal_event == "response.completed"
+                and (terminal_status is None or terminal_status == "completed")
+                and incomplete_reason is None
+            )
+            or (
+                terminal_event == "response.failed"
+                and (terminal_status is None or terminal_status == "failed")
+                and incomplete_reason is None
+            )
+            or (
+                terminal_event == "response.incomplete"
+                and (terminal_status is None or terminal_status == "incomplete")
+                and _bounded_text(incomplete_reason)
+            ),
             _usage(record.get("usage")),
             isinstance(conflicts, list),
             len(conflicts) == len(set(conflicts))
@@ -290,9 +369,12 @@ def _minimum_terminal_sse_bytes(record: dict[str, Any]) -> int:
         ("id", "responseId"),
         ("model", "returnedModel"),
         ("system_fingerprint", "systemFingerprint"),
+        ("status", "terminalStatus"),
     ):
         if record[source] is not None:
             response[field] = record[source]
+    if record["incompleteReason"] is not None:
+        response["incomplete_details"] = {"reason": record["incompleteReason"]}
     if record["usage"] is not None:
         response["usage"] = {field: 0 for field in record["usage"]}
     minimal = json.dumps(
@@ -353,6 +435,8 @@ def _valid_transport_measurements(group: list[dict[str, Any]]) -> bool:
                 "returnedModel",
                 "systemFingerprint",
                 "terminalEvent",
+                "terminalStatus",
+                "incompleteReason",
                 "usage",
             )
         )
@@ -574,8 +658,8 @@ def _valid_lifecycle_record(
     return all(
         (
             _is_integer(record.get("schemaVersion")),
-            record.get("schemaVersion") == 1,
-            record.get("relayVersion") == "native-responses-relay-v1",
+            record.get("schemaVersion") == 2,
+            record.get("relayVersion") == "native-responses-relay-v2",
             record.get("event") == expected_event,
             _is_integer(record.get("ordinal")),
             record.get("ordinal") == ordinal,
@@ -664,10 +748,294 @@ def _provider_response_identity_error(
     return None
 
 
+def _valid_output_token_accounting(
+    value: object, budget_class: object, slot_output_token_limit: object
+) -> bool:
+    if not isinstance(value, dict) or set(value) != _OUTPUT_TOKEN_ACCOUNTING_FIELDS:
+        return False
+    state = value.get("state")
+    reported = value.get("reportedOutputTokens")
+    upper = value.get("conservativeOutputTokenUpperBound")
+    burned = value.get("unusedOutputTokensBurned")
+    if not all(
+        (
+            isinstance(state, str) and state in _OUTPUT_TOKEN_ACCOUNTING_STATES,
+            reported is None or _integer_between(reported, 0),
+            upper is None or _integer_between(upper, 0),
+            _integer_between(burned, 0),
+        )
+    ):
+        return False
+    if budget_class == "unmetered_route_probe":
+        return bool(
+            burned == 0
+            and (
+                (
+                    state == "unmetered"
+                    and _integer_between(reported, 0)
+                    and upper == reported
+                )
+                or (state == "poisoned" and reported is None and upper is None)
+            )
+        )
+    if not _integer_between(slot_output_token_limit, 1):
+        return False
+    limit = slot_output_token_limit
+    if (budget_class == "scored_slot" and state not in _SCORED_ACCOUNTING_STATES) or (
+        budget_class == "zai_route_probe" and state not in _ZAI_PROBE_ACCOUNTING_STATES
+    ):
+        return False
+    if state == "poisoned":
+        return bool(
+            reported is None
+            and _integer_between(upper, 0, limit)
+            and _integer_between(burned, 0, limit)
+            and upper == limit - burned
+        )
+    if not _integer_between(reported, 0, limit) or upper != reported:
+        return False
+    if state == "complete" and budget_class == "zai_route_probe":
+        return bool(
+            reported <= 8_192
+            and _integer_between(burned, 0, 8_192)
+            and reported == 8_192 - burned
+        )
+    if state == "exact_exhaustion":
+        return reported == limit and burned == 0
+    return bool(_integer_between(burned, 0, limit) and reported == limit - burned)
+
+
+def _valid_budget_policy(marker: dict[str, Any]) -> bool:
+    budget_class = marker.get("budgetClass")
+    accounting_mode = marker.get("accountingMode")
+    limit = marker.get("slotOutputTokenLimit")
+    if not all(
+        (
+            isinstance(budget_class, str) and budget_class in _BUDGET_CLASSES,
+            isinstance(accounting_mode, str) and accounting_mode in _ACCOUNTING_MODES,
+        )
+    ):
+        return False
+    policy_matches = (
+        (
+            budget_class == "scored_slot"
+            and accounting_mode == "sealed_usage_debit"
+            and limit == 50_000
+        )
+        or (
+            budget_class == "zai_route_probe"
+            and accounting_mode == "fixed_round_allocations"
+            and limit == 8_448
+        )
+        or (
+            budget_class == "unmetered_route_probe"
+            and accounting_mode == "none"
+            and limit is None
+        )
+    )
+    return policy_matches and _valid_output_token_accounting(
+        marker.get("outputTokenAccounting"), budget_class, limit
+    )
+
+
+def _settled_output_tokens(
+    closed: dict[str, Any],
+    effective_max: int | None,
+    expected_terminal: str | None = None,
+) -> int | None:
+    if closed.get("transportState") != "completed":
+        return None
+    event = closed.get("terminalEvent")
+    status = closed.get("terminalStatus")
+    reason = closed.get("incompleteReason")
+    terminal = (
+        "completed"
+        if event == "response.completed"
+        and status in {None, "completed"}
+        and reason is None
+        else "max_output_tokens"
+        if event == "response.incomplete"
+        and status in {None, "incomplete"}
+        and reason == "max_output_tokens"
+        else None
+    )
+    usage = closed.get("usage")
+    output = usage.get("output_tokens") if isinstance(usage, dict) else None
+    complete_usage = bool(
+        isinstance(usage, dict)
+        and all(
+            _integer_between(usage.get(field), 0)
+            for field in ("input_tokens", "output_tokens", "total_tokens")
+        )
+        and usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+    )
+    conflicts = closed.get("metadataConflicts")
+    if (
+        terminal is None
+        or (expected_terminal is not None and terminal != expected_terminal)
+        or not complete_usage
+        or (isinstance(conflicts, list) and "usage" in conflicts)
+        or not _integer_between(output, 0)
+        or (effective_max is not None and output > effective_max)
+    ):
+        return None
+    return output
+
+
+def _valid_unmetered_records(
+    groups: list[list[dict[str, Any]]], accounting: dict[str, Any]
+) -> bool:
+    maxima_match = all(
+        (
+            request.get("effectiveMaxOutputTokens") is None
+            if request.get("requestedMaxOutputTokens") is None
+            else request.get("effectiveMaxOutputTokens")
+            == request.get("requestedMaxOutputTokens")
+        )
+        for request, _headers, _closed in groups
+    )
+    if not maxima_match:
+        return False
+    outputs = [
+        _settled_output_tokens(
+            closed, request.get("effectiveMaxOutputTokens"), "completed"
+        )
+        for request, _headers, closed in groups
+    ]
+    if accounting.get("state") == "poisoned":
+        return bool(groups and all(output is not None for output in outputs[:-1]))
+    if None in outputs:
+        return False
+    total = sum(output for output in outputs if output is not None)
+    return bool(
+        _is_integer(total)
+        and accounting.get("state") == "unmetered"
+        and total == accounting.get("reportedOutputTokens")
+    )
+
+
+def _valid_zai_allocations(groups: list[list[dict[str, Any]]]) -> bool:
+    allocations = (8_192, 256)
+    return len(groups) <= len(allocations) and all(
+        request.get("effectiveMaxOutputTokens") == allocations[index]
+        for index, (request, _headers, _closed) in enumerate(groups)
+    )
+
+
+def _budgeted_reported_total(
+    groups: list[list[dict[str, Any]]],
+    budget_class: object,
+    limit: int,
+    poisoned: bool,
+) -> int | None:
+    total = 0
+    remaining = limit
+    for index, (request, _headers, closed) in enumerate(groups):
+        requested = request.get("requestedMaxOutputTokens")
+        effective = request.get("effectiveMaxOutputTokens")
+        if not _integer_between(effective, 1, remaining):
+            return None
+        if budget_class == "scored_slot" and effective != min(
+            remaining if requested is None else requested, remaining
+        ):
+            return None
+        expected_terminal = (
+            ("completed" if index == 0 else "max_output_tokens")
+            if budget_class == "zai_route_probe"
+            else "completed"
+            if index < len(groups) - 1
+            else None
+        )
+        output = _settled_output_tokens(
+            closed,
+            effective,
+            expected_terminal,
+        )
+        if poisoned and index == len(groups) - 1 and output is None:
+            output = effective
+        elif output is None:
+            return None
+        total += output
+        remaining -= output
+        if not _is_integer(total):
+            return None
+    return total
+
+
+def _valid_budgeted_final_state(
+    groups: list[list[dict[str, Any]]],
+    marker: dict[str, Any],
+    accounting: dict[str, Any],
+    limit: int,
+    reported_total: int,
+) -> bool:
+    state = accounting.get("state")
+    if not isinstance(state, str):
+        return False
+    if state == "poisoned":
+        return bool(
+            accounting.get("conservativeOutputTokenUpperBound") == reported_total
+            and accounting.get("unusedOutputTokensBurned") == limit - reported_total
+        )
+    if accounting.get("reportedOutputTokens") != reported_total:
+        return False
+    last_closed = groups[-1][2] if groups else None
+    rejected = marker.get("rejectedRequests")
+    valid_states = {
+        "complete": bool(
+            last_closed is not None
+            and last_closed.get("terminalEvent") == "response.completed"
+            and (marker.get("budgetClass") != "zai_route_probe" or len(groups) == 1)
+        ),
+        "budget_terminal": bool(
+            last_closed is not None
+            and last_closed.get("terminalEvent") == "response.incomplete"
+            and last_closed.get("incompleteReason") == "max_output_tokens"
+        ),
+        "exact_exhaustion": bool(
+            last_closed is not None
+            and last_closed.get("terminalEvent") == "response.completed"
+            and isinstance(rejected, dict)
+            and rejected.get("slot_output_budget_exhausted") == 1
+        ),
+        "probe_conformant": bool(
+            len(groups) == 2
+            and groups[0][2].get("terminalEvent") == "response.completed"
+            and groups[1][2].get("terminalEvent") == "response.incomplete"
+            and groups[1][2].get("incompleteReason") == "max_output_tokens"
+        ),
+    }
+    return valid_states.get(state, True)
+
+
+def _valid_budgeted_records(
+    records: list[dict[str, Any]], marker: dict[str, Any]
+) -> bool:
+    groups = [records[offset : offset + 3] for offset in range(0, len(records), 3)]
+    accounting = marker.get("outputTokenAccounting")
+    if not isinstance(accounting, dict):
+        return False
+    budget_class = marker.get("budgetClass")
+    if budget_class == "unmetered_route_probe":
+        return _valid_unmetered_records(groups, accounting)
+    limit = marker.get("slotOutputTokenLimit")
+    if not _integer_between(limit, 1) or (
+        budget_class == "zai_route_probe" and not _valid_zai_allocations(groups)
+    ):
+        return False
+    reported_total = _budgeted_reported_total(
+        groups, budget_class, limit, accounting.get("state") == "poisoned"
+    )
+    return reported_total is not None and _valid_budgeted_final_state(
+        groups, marker, accounting, limit, reported_total
+    )
+
+
 def _validate_marker(
     marker: dict[str, Any],
     marker_hash: str,
     actual_marker_hash: str,
+    records: list[dict[str, Any]],
     identity: tuple[str, str, str, str],
     requested_model: str,
     event_count: int,
@@ -693,9 +1061,9 @@ def _validate_marker(
         (
             marker_hash == actual_marker_hash,
             _is_integer(marker.get("schemaVersion")),
-            marker.get("schemaVersion") == 1,
+            marker.get("schemaVersion") == 2,
             marker.get("state") == "sealed",
-            marker.get("relayVersion") == "native-responses-relay-v1",
+            marker.get("relayVersion") == "native-responses-relay-v2",
             marker.get("runId") == run_id,
             marker.get("relayInstanceId") == instance_id,
             marker.get("providerId") == provider_id,
@@ -706,6 +1074,8 @@ def _validate_marker(
             marker.get("chainHead") == chain_head,
             marker.get("expectedModel") == requested_model,
             rejected_valid,
+            _valid_budget_policy(marker),
+            _valid_budgeted_records(records, marker),
         )
     )
     if not valid:
@@ -804,7 +1174,9 @@ def _closed_record_reasons(record: dict[str, Any]) -> set[str]:
         for field in ("input_tokens", "output_tokens", "total_tokens")
     ):
         reasons.add("usage_missing_or_invalid")
-    if record.get("terminalEvent") != "response.completed":
+    if record.get("terminalEvent") == "response.incomplete":
+        reasons.add("terminal_event_incomplete")
+    elif record.get("terminalEvent") != "response.completed":
         reasons.add("terminal_event_missing")
     return reasons
 
@@ -858,6 +1230,10 @@ def _publication_reasons(
         reasons.add("upstream_secret_echo")
     if rejected_requests.get("invalid_turn_state", 0) > 0:
         reasons.add("invalid_turn_state")
+    if rejected_requests.get("slot_output_budget_exhausted", 0) > 0:
+        reasons.add("slot_output_budget_exhausted")
+    if rejected_requests.get("invalid_max_output_tokens", 0) > 0:
+        reasons.add("invalid_max_output_tokens")
     # Clients may close after terminal SSE instead of waiting for EOF.
     if any(
         count
@@ -886,6 +1262,7 @@ def relay_metadata(
         marker,
         marker_hash,
         actual_marker_hash,
+        records,
         identity,
         requested_model,
         len(records),
@@ -895,7 +1272,7 @@ def relay_metadata(
         records, rejected_requests, provider_id, build_id, requested_model
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "event_count": len(records),
         "chain_head": chain_head,
         "seal": marker,

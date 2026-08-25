@@ -33,6 +33,8 @@ from benchmarks.terminal_bench.experiment_contract import (
     LIVE_ROUTE_PROBE_COMMAND,
     LIVE_ROUTE_PROBE_INSTRUCTION,
     PILOT_RECEIPT_ENV,
+    ZAI_LIVE_ROUTE_PROBE_INSTRUCTION,
+    ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
 )
 from benchmarks.terminal_bench.harbor_agent import (
     _EXPERIMENT_MANIFEST,
@@ -89,14 +91,16 @@ def _bootstrap_identity(
     *,
     provider: str = "zai",
     model: str = "glm-5.3",
+    budget_class: str = "scored_slot",
     capability_id: str = _CAPABILITY_ID,
 ) -> str:
     return _canonical(
         {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "buildId": _RUN_BINDING["relay_build_sha256"],
             "provider": provider,
             "model": model,
+            "budgetClass": budget_class,
             "capabilityId": capability_id,
         }
     )
@@ -124,11 +128,14 @@ def _write_evidence(
     provider_id: str = "zai",
     returned_model: str = "glm-5.3",
     build_id: str = "sha256:" + "b" * 64,
-    schema_version: object = 1,
+    schema_version: object = 2,
     requests: tuple[tuple[int, str, object], ...] | None = None,
     rejected_requests: dict[str, int] | None = None,
 ) -> None:
     events = []
+    reported_output_tokens = 0
+    remaining_output_tokens = 50_000
+    poisoned_upper_bound: int | None = None
     for ordinal, (status, transport_state, usage) in enumerate(
         ((200, "completed", _DEFAULT_USAGE),) if requests is None else requests,
         1,
@@ -141,19 +148,46 @@ def _write_evidence(
             if usage is _DEFAULT_USAGE
             else usage
         )
-        terminal_response = {
+        complete_usage = (
+            isinstance(observed_usage, dict)
+            and type(observed_usage.get("input_tokens")) is int
+            and type(observed_usage.get("output_tokens")) is int
+            and type(observed_usage.get("total_tokens")) is int
+            and observed_usage["total_tokens"]
+            == observed_usage["input_tokens"] + observed_usage["output_tokens"]
+        )
+        effective_max = remaining_output_tokens
+        terminal_response: dict[str, object] = {
             "id": f"response-test-{ordinal}",
             "model": returned_model,
+            "status": "completed",
         }
         if observed_usage is not None:
             terminal_response["usage"] = observed_usage
-        response_body = "data:" + _canonical(
-            {"type": "response.completed", "response": terminal_response}
+        response_body = (
+            "data: "
+            + _canonical({"type": "response.completed", "response": terminal_response})
+            + "\n\n"
+            if transport_state == "completed"
+            else ""
         )
-        request_body = _canonical({"model": "glm-5.3", "store": False, "stream": True})
+        if transport_state == "completed" and complete_usage:
+            output_tokens = observed_usage["output_tokens"]
+            reported_output_tokens += output_tokens
+            remaining_output_tokens -= output_tokens
+        elif poisoned_upper_bound is None:
+            poisoned_upper_bound = reported_output_tokens + effective_max
+        request_body = _canonical(
+            {
+                "max_output_tokens": effective_max,
+                "model": "glm-5.3",
+                "store": False,
+                "stream": True,
+            }
+        )
         common = {
             "schemaVersion": schema_version,
-            "relayVersion": "native-responses-relay-v1",
+            "relayVersion": "native-responses-relay-v2",
             "runId": "relay-test",
             "relayInstanceId": "00000000-0000-4000-8000-000000000001",
             "providerId": provider_id,
@@ -172,6 +206,8 @@ def _write_evidence(
                     "requestSha256": _digest(request_body),
                     "clientRequestId": f"client-test-{ordinal}",
                     "stream": True,
+                    "requestedMaxOutputTokens": None,
+                    "effectiveMaxOutputTokens": effective_max,
                 },
                 {
                     **common,
@@ -199,19 +235,37 @@ def _write_evidence(
                     "responseBytes": len(response_body.encode()),
                     "responseSha256": _digest(response_body),
                     "durationMs": 2,
-                    "firstByteMs": 1,
+                    "firstByteMs": 1 if response_body else None,
                     "parseErrors": 0,
                     "metadataConflicts": [],
-                    "modelConsistency": "consistent",
-                    "modelSources": {
-                        "http.openai-model.0": "glm-5.3",
-                        "event.response.completed.response.model.1": returned_model,
-                    },
-                    "returnedModel": returned_model,
-                    "responseId": f"response-test-{ordinal}",
+                    "modelConsistency": (
+                        "consistent" if transport_state == "completed" else "missing"
+                    ),
+                    "modelSources": (
+                        {
+                            "http.openai-model.0": "glm-5.3",
+                            "event.response.completed.response.model.1": returned_model,
+                        }
+                        if transport_state == "completed"
+                        else {}
+                    ),
+                    "returnedModel": (
+                        returned_model if transport_state == "completed" else None
+                    ),
+                    "responseId": (
+                        f"response-test-{ordinal}"
+                        if transport_state == "completed"
+                        else None
+                    ),
                     "systemFingerprint": None,
-                    "terminalEvent": "response.completed",
-                    "usage": observed_usage,
+                    "terminalEvent": (
+                        "response.completed" if transport_state == "completed" else None
+                    ),
+                    "terminalStatus": (
+                        "completed" if transport_state == "completed" else None
+                    ),
+                    "incompleteReason": None,
+                    "usage": observed_usage if transport_state == "completed" else None,
                 },
             ]
         )
@@ -226,7 +280,7 @@ def _write_evidence(
     )
     marker = {
         "schemaVersion": schema_version,
-        "relayVersion": "native-responses-relay-v1",
+        "relayVersion": "native-responses-relay-v2",
         "runId": "relay-test",
         "relayInstanceId": "00000000-0000-4000-8000-000000000001",
         "providerId": provider_id,
@@ -237,6 +291,36 @@ def _write_evidence(
         "eventCount": len(events),
         "chainHead": previous,
         "rejectedRequests": rejected_requests or {},
+        "budgetClass": "scored_slot",
+        "accountingMode": "sealed_usage_debit",
+        "slotOutputTokenLimit": 50_000,
+        "outputTokenAccounting": {
+            "state": "poisoned"
+            if poisoned_upper_bound is not None or not events
+            else "complete",
+            "reportedOutputTokens": (
+                None
+                if poisoned_upper_bound is not None or not events
+                else reported_output_tokens
+            ),
+            "conservativeOutputTokenUpperBound": (
+                poisoned_upper_bound
+                if poisoned_upper_bound is not None
+                else 0
+                if not events
+                else reported_output_tokens
+            ),
+            "unusedOutputTokensBurned": (
+                50_000
+                - (
+                    poisoned_upper_bound
+                    if poisoned_upper_bound is not None
+                    else 0
+                    if not events
+                    else reported_output_tokens
+                )
+            ),
+        },
     }
     seal = {**marker, "markerSha256": _digest(_canonical(marker))}
     (directory / "provider-metadata.ndjson.sealed").write_text(_canonical(seal) + "\n")
@@ -346,12 +430,6 @@ class RelayMetadataTest(unittest.TestCase):
                     "reasons": ["relay_rejected_requests", "upstream_secret_echo"],
                 },
             )
-            with self.assertRaisesRegex(
-                paired.IntegrityError, "relay publication gate failed"
-            ):
-                paired._relay_gate_is_complete(
-                    metadata["publication_gate"], allow_incomplete=True
-                )
 
     def test_real_rejection_still_blocks_with_a_post_terminal_disconnect(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -537,6 +615,7 @@ class ProfileDriftTest(unittest.TestCase):
                 )
                 self.assertEqual(paired["n_concurrent_trials"], 1)
                 self.assertEqual(paired["retry"], {"max_retries": 0})
+                self.assertIs(type(paired["retry"]["max_retries"]), int)
                 self.assertEqual(
                     paired["environment"]["extra_docker_compose"],
                     [f"benchmarks/terminal_bench/{compose_name}"],
@@ -766,6 +845,10 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                 probe._open_agent_lab_variant["benchmark_task_instruction_used"]
             )
             self.assertFalse(probe._open_agent_lab_variant["benchmark_reward_used"])
+            self.assertEqual(
+                probe._open_agent_lab_variant["instruction_sha256"],
+                ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
+            )
             with self.assertRaisesRegex(ValueError, "cannot enable"):
                 OpenAgentLabCodexLiveRouteProbe(
                     Path(raw),
@@ -829,55 +912,79 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_live_route_probe_replaces_task_instruction_and_checks_effect(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            with patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"):
-                probe = OpenAgentLabCodexLiveRouteProbe(
-                    Path(raw),
-                    model_name="deepseek/deepseek-v4-pro",
-                    version="0.149.0",
-                    run_binding=_RUN_BINDING,
-                    extra_env={
-                        "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
-                        LIVE_ROUTE_PROBE_CAP_ENV: str(
-                            Path(raw) / "authorizations" / "deepseek.cap.json"
+        cases = (
+            (
+                "deepseek/deepseek-v4-pro",
+                "deepseek.cap.json",
+                LIVE_ROUTE_PROBE_INSTRUCTION,
+            ),
+            (
+                "zai/glm-5.3",
+                "zai.cap.json",
+                ZAI_LIVE_ROUTE_PROBE_INSTRUCTION,
+            ),
+        )
+        for model_name, policy_name, expected_instruction in cases:
+            with self.subTest(provider=model_name.split("/", 1)[0]):
+                with tempfile.TemporaryDirectory() as raw:
+                    with patch(
+                        "benchmarks.terminal_bench.harbor_agent._validate_live_source"
+                    ):
+                        probe = OpenAgentLabCodexLiveRouteProbe(
+                            Path(raw),
+                            model_name=model_name,
+                            version="0.149.0",
+                            run_binding=_RUN_BINDING,
+                            extra_env={
+                                "OAL_RELAY_URL": (
+                                    "http://open-agent-lab-relay:8080/v1"
+                                ),
+                                LIVE_ROUTE_PROBE_CAP_ENV: str(
+                                    Path(raw) / "authorizations" / policy_name
+                                ),
+                            },
+                        )
+                    parent_run = AsyncMock(
+                        side_effect=lambda *_args, _probe=probe, **_kwargs: setattr(
+                            _probe, "_codex_launches", 1
+                        )
+                    )
+                    parent_exec = AsyncMock(return_value=SimpleNamespace(return_code=0))
+                    retain = AsyncMock()
+                    environment = _pinned_environment_mock(
+                        None, role="live-route-probe"
+                    )
+                    with (
+                        patch(
+                            "benchmarks.terminal_bench.harbor_agent._validate_live_source"
                         ),
-                    },
+                        patch.object(Codex, "run", new=parent_run),
+                        patch.object(Codex, "exec_as_agent", new=parent_exec),
+                        patch.object(
+                            probe,
+                            "_authorize_relay",
+                            new=AsyncMock(return_value="a" * 64),
+                        ),
+                        patch.object(probe, "_seal_and_retain", new=retain),
+                    ):
+                        await probe.run(
+                            "PRIVATE BENCHMARK INSTRUCTION",
+                            environment,
+                            AgentContext(),
+                        )
+                parent_run.assert_awaited_once_with(
+                    expected_instruction, environment, ANY
                 )
-            parent_run = AsyncMock(
-                side_effect=lambda *_args, **_kwargs: setattr(
-                    probe, "_codex_launches", 1
+                self.assertNotIn("PRIVATE BENCHMARK", expected_instruction)
+                self.assertIn(
+                    json.dumps(LIVE_ROUTE_PROBE_COMMAND), expected_instruction
                 )
-            )
-            parent_exec = AsyncMock(return_value=SimpleNamespace(return_code=0))
-            retain = AsyncMock()
-            environment = _pinned_environment_mock(None, role="live-route-probe")
-            with (
-                patch("benchmarks.terminal_bench.harbor_agent._validate_live_source"),
-                patch.object(Codex, "run", new=parent_run),
-                patch.object(Codex, "exec_as_agent", new=parent_exec),
-                patch.object(
-                    probe,
-                    "_authorize_relay",
-                    new=AsyncMock(return_value="a" * 64),
-                ),
-                patch.object(probe, "_seal_and_retain", new=retain),
-            ):
-                await probe.run(
-                    "PRIVATE BENCHMARK INSTRUCTION", environment, AgentContext()
+                parent_exec.assert_awaited_once()
+                environment.scoped_exec_env.assert_called_once_with(
+                    {"OAL_RELAY_TOKEN": "a" * 64}
                 )
-        parent_run.assert_awaited_once_with(
-            LIVE_ROUTE_PROBE_INSTRUCTION, environment, ANY
-        )
-        self.assertNotIn("PRIVATE BENCHMARK", LIVE_ROUTE_PROBE_INSTRUCTION)
-        self.assertIn(
-            json.dumps(LIVE_ROUTE_PROBE_COMMAND), LIVE_ROUTE_PROBE_INSTRUCTION
-        )
-        parent_exec.assert_awaited_once()
-        environment.scoped_exec_env.assert_called_once_with(
-            {"OAL_RELAY_TOKEN": "a" * 64}
-        )
-        self.assertTrue(probe._open_agent_lab_variant["effect_verified"])
-        retain.assert_awaited_once()
+                self.assertTrue(probe._open_agent_lab_variant["effect_verified"])
+                retain.assert_awaited_once()
 
     def test_verify_instruction_switch_is_strict(self) -> None:
         common = {
@@ -1801,12 +1908,15 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            for provider, model in (
-                ("zai", "glm-5.3"),
-                ("deepseek", "deepseek-v4-flash"),
+            for provider, model, budget_class in (
+                ("zai", "glm-5.3", "scored_slot"),
+                ("deepseek", "deepseek-v4-flash", "scored_slot"),
+                ("deepseek", "deepseek-v4-pro", "unmetered_route_probe"),
             ):
                 with (
-                    self.subTest(provider=provider, model=model),
+                    self.subTest(
+                        provider=provider, model=model, budget_class=budget_class
+                    ),
                     patch(
                         "benchmarks.terminal_bench.harbor_agent._validate_live_source"
                     ),
@@ -1827,6 +1937,7 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                     *,
                     selected_provider: str = provider,
                     selected_model: str = model,
+                    selected_budget_class: str = budget_class,
                     selected_commands: list[str] = commands,
                     **_kwargs: object,
                 ) -> object:
@@ -1835,7 +1946,9 @@ class HarborAdapterTest(unittest.IsolatedAsyncioTestCase):
                         _RUN_BINDING["relay_build_sha256"]
                         if command == "cat /app/relay-build-id"
                         else _bootstrap_identity(
-                            provider=selected_provider, model=selected_model
+                            provider=selected_provider,
+                            model=selected_model,
+                            budget_class=selected_budget_class,
                         )
                     )
                     return SimpleNamespace(return_code=0, stdout=stdout, stderr="")

@@ -115,6 +115,7 @@ export async function runCodexProbe(
         providerId: "probe",
         buildId: "development",
         expectedModel: PROBE_MODEL,
+        budgetClass: "unmetered_route_probe",
         upstreamResponsesUrl: `${fixture.baseUrl}/responses`,
         upstreamBearer: UPSTREAM_PROBE_KEY,
         clientBearer: PROBE_KEY,

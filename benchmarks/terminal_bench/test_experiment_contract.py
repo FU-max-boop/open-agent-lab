@@ -16,12 +16,16 @@ from benchmarks.terminal_bench.experiment_contract import (
     RELAY_SEAL_PATH,
     RELAY_SERVICE,
     RUN_BINDING_KEYS,
+    ZAI_LIVE_ROUTE_PROBE_INSTRUCTION,
+    ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
+    ZAI_ROUTE_PROBE_OUTPUT_BUDGET,
     artifact_manifest,
     canonical_json,
     digest_bytes,
     is_digest,
     is_revision,
     is_strict_int,
+    live_route_probe_instruction,
     live_route_probe_networks,
     live_route_probe_relay_command,
     provider_control_identity,
@@ -38,6 +42,8 @@ _PILOT_RELAY_COMMAND = [
     str(PILOT_RELAY_TTL_SECONDS),
     "--max-requests",
     "256",
+    "--budget-class",
+    "scored_slot",
     "--build-id-file",
     "/app/relay-build-id",
 ]
@@ -302,7 +308,7 @@ class ExperimentContractTest(unittest.TestCase):
     def test_live_route_probe_relay_command_is_exact_and_non_mutating(self) -> None:
         command = list(_PILOT_RELAY_COMMAND)
 
-        result = live_route_probe_relay_command(command)
+        result = live_route_probe_relay_command(command, "deepseek")
 
         self.assertEqual(command, _PILOT_RELAY_COMMAND)
         self.assertIsNot(result, command)
@@ -317,6 +323,8 @@ class ExperimentContractTest(unittest.TestCase):
                 "600",
                 "--max-requests",
                 "2",
+                "--budget-class",
+                "unmetered_route_probe",
                 "--max-request-bytes",
                 str(512 * 1024),
                 "--max-response-bytes",
@@ -329,6 +337,8 @@ class ExperimentContractTest(unittest.TestCase):
                 "/app/relay-build-id",
             ],
         )
+        zai = live_route_probe_relay_command(command, "zai")
+        self.assertEqual(zai[zai.index("--budget-class") + 1], "zai_route_probe")
         self.assertEqual(
             dict(LIVE_ROUTE_PROBE_LIMITS),
             {
@@ -341,6 +351,23 @@ class ExperimentContractTest(unittest.TestCase):
                 "codexTimeoutSeconds": 480,
             },
         )
+
+    def test_zai_probe_instruction_and_allocations_are_frozen(self) -> None:
+        instruction, digest = live_route_probe_instruction("zai")
+        self.assertEqual(instruction, ZAI_LIVE_ROUTE_PROBE_INSTRUCTION)
+        self.assertEqual(digest, ZAI_LIVE_ROUTE_PROBE_INSTRUCTION_SHA256)
+        self.assertIn("at least 1024 output tokens", instruction)
+        self.assertIn("unrelated to benchmark tasks", instruction)
+        self.assertEqual(
+            dict(ZAI_ROUTE_PROBE_OUTPUT_BUDGET),
+            {
+                "slotOutputTokenLimit": 8_448,
+                "roundOutputTokenLimits": (8_192, 256),
+                "minimumRequestedRound2OutputTokens": 1_024,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "unknown live-route provider"):
+            live_route_probe_instruction("unknown")
 
     def test_live_route_probe_networks_isolates_main_from_egress(self) -> None:
         compose = {
@@ -396,28 +423,40 @@ class ExperimentContractTest(unittest.TestCase):
     def test_live_route_probe_relay_command_rejects_invalid_shapes(self) -> None:
         for command in (None, "relay", tuple(_PILOT_RELAY_COMMAND), ["relay", 1]):
             with self.subTest(command=command), self.assertRaises(ValueError):
-                live_route_probe_relay_command(command)
+                live_route_probe_relay_command(command, "deepseek")
+        with self.assertRaises(ValueError):
+            live_route_probe_relay_command(_PILOT_RELAY_COMMAND, "unknown")
 
     def test_live_route_probe_relay_command_rejects_missing_policy_flags(self) -> None:
-        for flag in ("--ttl-seconds", "--max-requests", "--build-id-file"):
+        for flag in (
+            "--ttl-seconds",
+            "--max-requests",
+            "--budget-class",
+            "--build-id-file",
+        ):
             command = list(_PILOT_RELAY_COMMAND)
             index = command.index(flag)
             del command[index : index + 2]
             original = list(command)
             with self.subTest(flag=flag), self.assertRaises(ValueError):
-                live_route_probe_relay_command(command)
+                live_route_probe_relay_command(command, "deepseek")
             self.assertEqual(command, original)
 
     def test_live_route_probe_relay_command_rejects_duplicate_policy_flags(
         self,
     ) -> None:
-        for flag in ("--ttl-seconds", "--max-requests", "--build-id-file"):
+        for flag in (
+            "--ttl-seconds",
+            "--max-requests",
+            "--budget-class",
+            "--build-id-file",
+        ):
             command = list(_PILOT_RELAY_COMMAND)
             index = command.index(flag)
             command[index:index] = command[index : index + 2]
             original = list(command)
             with self.subTest(flag=flag), self.assertRaises(ValueError):
-                live_route_probe_relay_command(command)
+                live_route_probe_relay_command(command, "deepseek")
             self.assertEqual(command, original)
 
 

@@ -24,12 +24,10 @@ from benchmarks.terminal_bench.experiment_contract import (
     LIVE_ROUTE_PROBE_AGENT_IMPORT,
     LIVE_ROUTE_PROBE_CAP_ENV,
     LIVE_ROUTE_PROBE_COMMAND,
-    LIVE_ROUTE_PROBE_COMMAND_SHA256,
-    LIVE_ROUTE_PROBE_EFFECT_SHA256,
-    LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
     LIVE_ROUTE_PROBE_LIMITS,
     LIVE_ROUTE_PROBE_TASK,
     canonical_json,
+    live_route_probe_variant,
     relay_claim_name,
 )
 from benchmarks.terminal_bench.test_paired_results import RunFixture, _relay
@@ -41,13 +39,24 @@ def _write(path: Path, value: object) -> None:
 
 
 class ProbeFixture:
-    provider = "deepseek"
-    model = paired._PROVIDERS[provider]["model"]
     image = "sha256:" + "1" * 64
     build = "sha256:" + "2" * 64
     source = "a" * 40
 
-    def __init__(self, parent: Path) -> None:
+    def __init__(
+        self,
+        parent: Path,
+        provider: str = "deepseek",
+        *,
+        relay_lifecycles: tuple[dict[str, object], ...] | None = None,
+        relay_budget_state: str | None = None,
+        relay_rejected_requests: dict[str, int] | None = None,
+    ) -> None:
+        self.provider = provider
+        self.model = paired._PROVIDERS[provider]["model"]
+        self.relay_lifecycles = relay_lifecycles
+        self.relay_budget_state = relay_budget_state
+        self.relay_rejected_requests = relay_rejected_requests
         self.root = (parent / "run").resolve()
         self.root.mkdir()
         self.authorizations = self.root / "authorizations"
@@ -76,7 +85,7 @@ class ProbeFixture:
             self.preflight, paired._digest(self.preflight)
         )
         overlay = (
-            self.root / "overlays" / "relay.deepseek.live-route-probe.compose.yaml"
+            self.root / "overlays" / f"relay.{provider}.live-route-probe.compose.yaml"
         )
         overlay.parent.mkdir()
         overlay.write_text(
@@ -91,7 +100,7 @@ class ProbeFixture:
             )
         )
         compose_sha = paired._digest_bytes(overlay.read_bytes())
-        self.job_name = "open-agent-lab-screen-v1-deepseek-live-route-probe"
+        self.job_name = f"open-agent-lab-screen-v1-{provider}-live-route-probe"
         self.job_dir = self.root / "live-route-jobs" / self.provider / self.job_name
         self.job_dir.mkdir(parents=True)
         config = {
@@ -146,14 +155,14 @@ class ProbeFixture:
                     "env": {
                         "OAL_RELAY_URL": "http://open-agent-lab-relay:8080/v1",
                         LIVE_ROUTE_PROBE_CAP_ENV: str(
-                            self.authorizations / "deepseek.cap.json"
+                            self.authorizations / f"{provider}.cap.json"
                         ),
                     },
                 }
             ],
             "tasks": [{"path": str(task), "source": LIVE_ROUTE_PROBE_TASK}],
         }
-        config_path = self.root / "live-route-probes" / "deepseek.yaml"
+        config_path = self.root / "live-route-probes" / f"{provider}.yaml"
         config_path.parent.mkdir()
         config_path.write_text(yaml.safe_dump(config, sort_keys=False))
         self.entry = {
@@ -161,10 +170,10 @@ class ProbeFixture:
             "model": self.model,
             "reasoning": paired._PROVIDERS[self.provider]["reasoning"],
             "task": LIVE_ROUTE_PROBE_TASK,
-            "config": "live-route-probes/deepseek.yaml",
+            "config": f"live-route-probes/{provider}.yaml",
             "configSha256": paired._digest_bytes(config_path.read_bytes()),
             "jobDir": f"live-route-jobs/{self.provider}/{self.job_name}",
-            "compose": "overlays/relay.deepseek.live-route-probe.compose.yaml",
+            "compose": f"overlays/relay.{provider}.live-route-probe.compose.yaml",
             "composeSha256": compose_sha,
             "relayImageSha256": self.image,
             "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
@@ -172,21 +181,26 @@ class ProbeFixture:
         self.pilot_entry = {
             "provider": self.provider,
             "model": self.model,
-            "armOrder": ["control-v1", "verify-instruction-v1"],
-            "config": "configs/deepseek.yaml",
+            "armOrder": (
+                ["control-v1", "verify-instruction-v1"]
+                if provider == "deepseek"
+                else ["verify-instruction-v1", "control-v1"]
+            ),
+            "config": f"configs/{provider}.yaml",
             "configSha256": "sha256:" + "7" * 64,
-            "jobDir": "jobs/deepseek/open-agent-lab-screen-v1-deepseek",
-            "compose": "overlays/relay.deepseek.compose.yaml",
+            "jobDir": f"jobs/{provider}/open-agent-lab-screen-v1-{provider}",
+            "compose": f"overlays/relay.{provider}.compose.yaml",
             "composeSha256": "sha256:" + "8" * 64,
             "relayImageSha256": self.image,
         }
-        self.pilot_entries = [self.pilot_entry, {"provider": "zai"}]
+        other = "zai" if provider == "deepseek" else "deepseek"
+        self.pilot_entries = [self.pilot_entry, {"provider": other}]
         _write(self.root / "run-record.json", {"liveRouteProbes": [self.entry]})
         self.credential = parent / "credential"
         self.credential.write_bytes(b"fixture-provider-secret-00000000\n")
         self._job(config, task, overlay, compose_sha)
-        self.cap = self.authorizations / "deepseek.cap.json"
-        self.authorization = self.authorizations / "deepseek.json"
+        self.cap = self.authorizations / f"{provider}.cap.json"
+        self.authorization = self.authorizations / f"{provider}.json"
         self.write_cap()
         self.manifest = {
             "runtime": {"codexRuntime": {}},
@@ -201,6 +215,44 @@ class ProbeFixture:
                 }
             ],
         }
+
+    def _valid_relay_lifecycles(self) -> tuple[dict[str, object], ...]:
+        if self.provider == "deepseek":
+            return ({"output_tokens": 2}, {"output_tokens": 2})
+        return (
+            {"requested_max": None, "effective_max": 8_192, "output_tokens": 4},
+            {
+                "requested_max": None,
+                "effective_max": 256,
+                "terminal_event": "response.incomplete",
+                "terminal_status": "incomplete",
+                "incomplete_reason": "max_output_tokens",
+                "output_tokens": 200,
+            },
+        )
+
+    @staticmethod
+    def _relay_totals(verified: dict[str, object]) -> dict[str, int]:
+        records = verified["records"]
+        assert isinstance(records, list)
+        usages = [
+            item["usage"]
+            for item in records
+            if isinstance(item, dict)
+            and item.get("event") == "transport.responses.closed"
+            and isinstance(item.get("usage"), dict)
+        ]
+        totals = {
+            field: sum(int(usage.get(field, 0)) for usage in usages)
+            for field in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            )
+        }
+        return totals
 
     def _job(
         self, config: dict[str, object], task: Path, overlay: Path, compose_sha: str
@@ -219,11 +271,17 @@ class ProbeFixture:
             self.provider,
             self.model,
             self.build,
-            "live-route-probe",
+            f"{self.provider}-live-route-probe",
             agent_started,
             agent_finished,
-            request_count=2,
+            budget_class=(
+                "zai_route_probe" if self.provider == "zai" else "unmetered_route_probe"
+            ),
+            budget_state=self.relay_budget_state,
+            rejected_requests=self.relay_rejected_requests,
+            lifecycles=self.relay_lifecycles or self._valid_relay_lifecycles(),
         )
+        totals = self._relay_totals(verified)
         session = "probe-session"
         harbor_binding = {
             "schema_version": 1,
@@ -241,22 +299,7 @@ class ProbeFixture:
             "run_binding": self.binding,
         }
         harbor_binding["binding_sha256"] = paired._digest(harbor_binding)
-        variant = {
-            "schema_version": 1,
-            "variant_id": "live-route-probe-v1",
-            "developer_instruction_requested": False,
-            "requested_developer_instructions_sha256": None,
-            "benchmark_task_instruction_used": False,
-            "benchmark_reward_used": False,
-            "instruction_sha256": LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
-            "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
-            "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
-            "effect_verified": True,
-            "request_max_retries": 0,
-            "stream_max_retries": 0,
-            "unbounded_connection_retries": False,
-            "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
-        }
+        variant = live_route_probe_variant(self.provider, effect_verified=True)
         provider_data = {
             **verified,
             "harbor_binding": harbor_binding,
@@ -299,9 +342,9 @@ class ProbeFixture:
                     "model_info": {"name": self.model, "provider": self.provider},
                 },
                 "agent_result": {
-                    "n_input_tokens": 6,
-                    "n_cache_tokens": 0,
-                    "n_output_tokens": 4,
+                    "n_input_tokens": totals["input_tokens"],
+                    "n_cache_tokens": totals["cached_input_tokens"],
+                    "n_output_tokens": totals["output_tokens"],
                     "metadata": {"open_agent_lab_provider": provider_data},
                 },
                 "verifier_result": None,
@@ -329,7 +372,8 @@ class ProbeFixture:
             trial / "config.json",
             trial_config.model_dump(mode="json", exclude_defaults=True),
         )
-        _write(trial / "result.json", json.loads(result.model_dump_json()))
+        self.result_path = trial / "result.json"
+        _write(self.result_path, json.loads(result.model_dump_json()))
         trial_lock = paired.PreparedJob(
             self.root,
             self.provider,
@@ -382,14 +426,18 @@ class ProbeFixture:
                 },
             ],
             "final_metrics": {
-                "total_prompt_tokens": 6,
-                "total_completion_tokens": 4,
-                "total_cached_tokens": 0,
+                "total_prompt_tokens": totals["input_tokens"],
+                "total_completion_tokens": totals["output_tokens"],
+                "total_cached_tokens": totals["cached_input_tokens"],
                 "total_steps": 2,
-                "extra": {"reasoning_output_tokens": 2, "total_tokens": 10},
+                "extra": {
+                    "reasoning_output_tokens": totals["reasoning_output_tokens"],
+                    "total_tokens": totals["total_tokens"],
+                },
             },
         }
-        _write(trial / "agent" / "trajectory.json", trajectory)
+        self.trajectory_path = trial / "agent" / "trajectory.json"
+        _write(self.trajectory_path, trajectory)
         cleanup = {
             "schemaVersion": 1,
             "experimentId": EXPERIMENT_ID,
@@ -453,10 +501,53 @@ class ProbeFixture:
     def write_cap(self, *, expired: bool = False) -> None:
         now = datetime.now(timezone.utc)
         observed = now - (timedelta(hours=2) if expired else timedelta(minutes=10))
-        expires = now - timedelta(hours=1) if expired else now + timedelta(hours=5)
+        expires = (
+            now - timedelta(hours=1)
+            if expired
+            else now + timedelta(hours=4, minutes=30)
+            if self.provider == "zai"
+            else now + timedelta(hours=5)
+        )
         stamp = lambda value: value.isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
         )
+        control: dict[str, object] = {
+            "controlClass": "provider_hard_spend_cap_usd",
+            "scope": "campaign",
+            "limitUsd": 2,
+            "observedAt": stamp(observed),
+            "expiresAt": stamp(expires),
+            "evidenceSha256": "sha256:" + "6" * 64,
+            "sourceUrls": {"providerControl": "https://platform.deepseek.com/"},
+            "assertedBy": "fixture operator",
+        }
+        if self.provider == "zai":
+            control = {
+                "controlClass": ("coding_plan_subscription_quota_no_balance_deduction"),
+                "scope": "campaign",
+                "baseUrl": "https://api.z.ai/api/v1",
+                "protocol": "openai_responses",
+                "plan": "zai_coding_plan",
+                "noBalanceDeduction": True,
+                "quotaSnapshot": {
+                    "fiveHour": {
+                        "remainingPercent": 80,
+                        "resetsAt": stamp(observed + timedelta(hours=5)),
+                    },
+                    "weekly": {
+                        "remainingPercent": 70,
+                        "resetsAt": stamp(observed + timedelta(days=7)),
+                    },
+                },
+                "observedAt": stamp(observed),
+                "expiresAt": stamp(expires),
+                "evidenceSha256": "sha256:" + "6" * 64,
+                "sourceUrls": {
+                    "endpointProtocol": "https://docs.z.ai/devpack/tool/others",
+                    "providerControl": "https://docs.z.ai/devpack/faq",
+                },
+                "assertedBy": "fixture operator",
+            }
         self.cap.write_bytes(
             canonical_json(
                 {
@@ -469,18 +560,7 @@ class ProbeFixture:
                     "providerCredentialSha256": paired._digest_bytes(
                         self.credential.read_bytes()
                     ),
-                    "providerControl": {
-                        "controlClass": "provider_hard_spend_cap_usd",
-                        "scope": "campaign",
-                        "limitUsd": 2,
-                        "observedAt": stamp(observed),
-                        "expiresAt": stamp(expires),
-                        "evidenceSha256": "sha256:" + "6" * 64,
-                        "sourceUrls": {
-                            "providerControl": "https://platform.deepseek.com/"
-                        },
-                        "assertedBy": "fixture operator",
-                    },
+                    "providerControl": control,
                     "verification": "operator_attested",
                 }
             )
@@ -653,14 +733,29 @@ class LiveRouteProbeTest(unittest.TestCase):
         self.fixture = self._new_fixture()
         self.base = self.fixture.root.parent
 
-    def _new_fixture(self) -> ProbeFixture:
+    def _new_fixture(
+        self,
+        provider: str = "deepseek",
+        *,
+        relay_lifecycles: tuple[dict[str, object], ...] | None = None,
+        relay_budget_state: str | None = None,
+        relay_rejected_requests: dict[str, int] | None = None,
+    ) -> ProbeFixture:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        return ProbeFixture(Path(temporary.name))
+        return ProbeFixture(
+            Path(temporary.name),
+            provider,
+            relay_lifecycles=relay_lifecycles,
+            relay_budget_state=relay_budget_state,
+            relay_rejected_requests=relay_rejected_requests,
+        )
 
     def test_valid_probe_publishes_minimal_fail_closed_receipt(self) -> None:
         output = self.fixture.authorization
         receipt = self.fixture.verify(output)
+        self.assertEqual(receipt["schemaVersion"], 3)
+        self.assertEqual(receipt["proofClass"], "live-route-probe-v3")
         self.assertTrue(receipt["benchmarkStartAuthorized"])
         self.assertTrue(receipt["liveProviderRouteObserved"])
         self.assertFalse(receipt["liveProviderConformance"])
@@ -669,6 +764,7 @@ class LiveRouteProbeTest(unittest.TestCase):
         self.assertEqual(receipt["requestCount"], 2)
         self.assertEqual(receipt["pilotJob"]["config"], "configs/deepseek.yaml")
         self.assertEqual(receipt["providerControl"]["limitUsd"], 2)
+        self.assertIsNone(receipt["outputBudgetProbe"])
         self.assertEqual(receipt["harborTrialRetries"], 0)
         self.assertEqual(
             receipt["codexProviderRetryPolicy"], dict(CODEX_PROVIDER_RETRY_POLICY)
@@ -686,6 +782,176 @@ class LiveRouteProbeTest(unittest.TestCase):
         malformed["credentialLeakScan"].pop("directories")
         with self.assertRaisesRegex(paired.IntegrityError, "directories"):
             paired._probe_receipt_payloads(malformed, self.fixture.pilot_entry)
+
+    def test_zai_two_round_truncation_publishes_exact_receipt(self) -> None:
+        fixture = self._new_fixture("zai")
+        receipt = fixture.verify(fixture.authorization)
+        self.assertTrue(receipt["benchmarkStartAuthorized"])
+        self.assertTrue(receipt["empiricalResponseTruncationObserved"])
+        self.assertEqual(receipt["requestCount"], 2)
+        provider_data = json.loads(fixture.result_path.read_text())["agent_result"][
+            "metadata"
+        ]["open_agent_lab_provider"]
+        closed = [
+            item
+            for item in provider_data["records"]
+            if item["event"] == "transport.responses.closed"
+        ]
+        self.assertEqual(
+            receipt["outputBudgetProbe"],
+            {
+                "schemaVersion": 1,
+                "proofClass": "empirical-responses-truncation-v1",
+                "evidenceScope": "exact_observed_date_model_endpoint",
+                "observedAt": closed[-1]["at"],
+                "endpoint": "https://api.z.ai/api/v1/responses",
+                "model": fixture.model,
+                "protocol": "openai_responses",
+                "accountingMode": "fixed_round_allocations",
+                "burnedAccounting": "reserved_budget_retired_not_usage",
+                "slotOutputTokenLimit": 8_448,
+                "minimumRequestedRound2OutputTokens": 1_024,
+                "rounds": [
+                    {
+                        "ordinal": 1,
+                        "effectiveMaxOutputTokens": 8_192,
+                        "reportedOutputTokens": 4,
+                        "burnedOutputBudgetTokens": 8_192,
+                        "terminalEvent": "response.completed",
+                        "terminalStatus": "completed",
+                        "incompleteReason": None,
+                    },
+                    {
+                        "ordinal": 2,
+                        "effectiveMaxOutputTokens": 256,
+                        "reportedOutputTokens": 200,
+                        "burnedOutputBudgetTokens": 256,
+                        "terminalEvent": "response.incomplete",
+                        "terminalStatus": "incomplete",
+                        "incompleteReason": "max_output_tokens",
+                    },
+                ],
+                "totalReportedOutputTokens": 204,
+                "totalBurnedOutputBudgetTokens": 8_448,
+                "noThirdRequest": True,
+            },
+        )
+        trajectory = json.loads(fixture.trajectory_path.read_text())
+        calls = [
+            call for step in trajectory["steps"] for call in step.get("tool_calls", [])
+        ]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function_name"], "exec_command")
+        self.assertEqual(calls[0]["arguments"], {"cmd": LIVE_ROUTE_PROBE_COMMAND})
+        self.assertTrue(provider_data["agent_variant"]["effect_verified"])
+
+    def test_zai_incomplete_output_allows_missing_final_artifacts(self) -> None:
+        fixture = self._new_fixture("zai")
+        trajectory = json.loads(fixture.trajectory_path.read_text())
+        trajectory["steps"] = trajectory["steps"][:1]
+        trajectory.pop("final_metrics")
+        _write(fixture.trajectory_path, trajectory)
+        receipt = fixture.verify(fixture.authorization)
+        self.assertTrue(receipt["benchmarkStartAuthorized"])
+        self.assertEqual(
+            receipt["outputBudgetProbe"]["rounds"][1]["incompleteReason"],
+            "max_output_tokens",
+        )
+
+    def test_zai_round_and_accounting_mutations_fail_closed(self) -> None:
+        completed = {
+            "requested_max": None,
+            "effective_max": 8_192,
+            "output_tokens": 4,
+        }
+        incomplete = {
+            "requested_max": None,
+            "effective_max": 256,
+            "terminal_event": "response.incomplete",
+            "terminal_status": "incomplete",
+            "incomplete_reason": "max_output_tokens",
+            "output_tokens": 200,
+        }
+        cases = (
+            (
+                "round-2-completed",
+                (completed, {"effective_max": 256, "output_tokens": 200}),
+                "poisoned",
+                None,
+            ),
+            (
+                "wrong-incomplete-reason",
+                (
+                    completed,
+                    {**incomplete, "incomplete_reason": "content_filter"},
+                ),
+                "poisoned",
+                None,
+            ),
+            (
+                "missing-usage",
+                (completed, {**incomplete, "output_tokens": None}),
+                "poisoned",
+                None,
+            ),
+            (
+                "round-2-over-limit",
+                (completed, {**incomplete, "output_tokens": 257}),
+                "poisoned",
+                None,
+            ),
+            (
+                "relay-rejection",
+                (completed, incomplete),
+                None,
+                {"invalid_json": 1},
+            ),
+        )
+        for label, lifecycles, state, rejected in cases:
+            fixture = self._new_fixture(
+                "zai",
+                relay_lifecycles=lifecycles,
+                relay_budget_state=state,
+                relay_rejected_requests=rejected,
+            )
+            with (
+                self.subTest(label=label),
+                self.assertRaises(paired.IntegrityError),
+            ):
+                fixture.verify()
+
+        invalid_evidence = (
+            (
+                "round-1-incomplete",
+                {
+                    **completed,
+                    "terminal_event": "response.incomplete",
+                    "terminal_status": "incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                },
+                incomplete,
+            ),
+            (
+                "third-request",
+                completed,
+                incomplete,
+                {"effective_max": 1, "output_tokens": 1},
+            ),
+        )
+        for label, *lifecycles in invalid_evidence:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self._new_fixture(
+                    "zai",
+                    relay_lifecycles=lifecycles,
+                    relay_budget_state="poisoned",
+                )
+
+        fixture = self._new_fixture("zai")
+        trajectory = json.loads(fixture.trajectory_path.read_text())
+        trajectory["steps"][0]["tool_calls"] *= 2
+        _write(fixture.trajectory_path, trajectory)
+        with self.assertRaises(paired.IntegrityError):
+            fixture.verify()
 
     def test_probe_receipt_requires_a_pre_execution_claim(self) -> None:
         with self.assertRaisesRegex(paired.IntegrityError, "claim is unavailable"):
@@ -992,19 +1258,11 @@ class LiveRouteProbeTest(unittest.TestCase):
                 prepared.claim_active_trial(trial)
 
     def test_third_request_is_rejected(self) -> None:
-        start = datetime.now(timezone.utc) - timedelta(minutes=2)
-        _relay(
-            self.fixture.trial,
-            self.fixture.provider,
-            self.fixture.model,
-            self.fixture.build,
-            "three-requests",
-            start,
-            start + timedelta(seconds=10),
-            request_count=3,
+        fixture = self._new_fixture(
+            relay_lifecycles=tuple({"output_tokens": 2} for _ in range(3))
         )
         with self.assertRaises(paired.IntegrityError):
-            self.fixture.verify()
+            fixture.verify()
 
     def test_wrong_task_agent_and_unverified_effect_are_rejected(self) -> None:
         record = json.loads((self.fixture.root / "run-record.json").read_text())

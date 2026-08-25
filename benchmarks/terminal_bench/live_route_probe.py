@@ -21,18 +21,17 @@ from .experiment_contract import (
     LIVE_ROUTE_PROBE_AGENT,
     LIVE_ROUTE_PROBE_AGENT_IMPORT,
     LIVE_ROUTE_PROBE_COMMAND,
-    LIVE_ROUTE_PROBE_COMMAND_SHA256,
-    LIVE_ROUTE_PROBE_EFFECT_SHA256,
-    LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
     LIVE_ROUTE_PROBE_LIMITS,
     LIVE_ROUTE_PROBE_TASK,
     PILOT_RELAY_TTL_SECONDS,
     RELAY_CLAIM_FIELDS,
+    ZAI_ROUTE_PROBE_OUTPUT_BUDGET,
     canonical_digest,
     canonical_json,
     digest_bytes,
     is_digest,
     is_strict_int,
+    live_route_probe_variant,
     provider_control_window,
     relay_claim_name,
     same_json,
@@ -499,6 +498,11 @@ def _trajectory(
         detail.get("metadata", extra.get("tool_metadata")) or {},
         "tool execution metadata",
     )
+    final_response_ok = run.provider == "zai" or (
+        agent_messages == ["LIVE_ROUTE_PROBE_OK"]
+        and steps[-1].get("source") == "agent"
+        and steps[-1].get("message") == "LIVE_ROUTE_PROBE_OK"
+    )
     if (
         not isinstance(call_id, str)
         or not call_id
@@ -512,12 +516,101 @@ def _trajectory(
         or status != "completed"
         or not is_strict_int(metadata.get("exit_code"))
         or metadata["exit_code"] != 0
-        or agent_messages != ["LIVE_ROUTE_PROBE_OK"]
-        or steps[-1].get("source") != "agent"
-        or steps[-1].get("message") != "LIVE_ROUTE_PROBE_OK"
+        or not final_response_ok
     ):
         raise IntegrityError("probe tool lifecycle or final response drifted")
     return value, session
+
+
+def _output_budget_probe(
+    records: list[dict[str, Any]], marker: dict[str, Any], provider: str, model: str
+) -> dict[str, Any] | None:
+    accounting = _mapping(
+        marker.get("outputTokenAccounting"), "relay output-token accounting"
+    )
+    if provider == "deepseek":
+        if (
+            marker.get("budgetClass") != "unmetered_route_probe"
+            or marker.get("accountingMode") != "none"
+            or marker.get("slotOutputTokenLimit") is not None
+            or accounting.get("state") != "unmetered"
+        ):
+            raise IntegrityError("DeepSeek route-probe budget policy drifted")
+        return None
+    limits = dict(ZAI_ROUTE_PROBE_OUTPUT_BUDGET)
+    allocations = tuple(limits["roundOutputTokenLimits"])
+    requests = [
+        item for item in records if item.get("event") == "transport.responses.request"
+    ]
+    closed = [
+        item for item in records if item.get("event") == "transport.responses.closed"
+    ]
+    expected_terminals = (
+        ("response.completed", (None, "completed"), None),
+        ("response.incomplete", (None, "incomplete"), "max_output_tokens"),
+    )
+    rounds: list[dict[str, Any]] = []
+    total_reported = 0
+    for index, (request, terminal, allocation) in enumerate(
+        zip(requests, closed, allocations, strict=True), start=1
+    ):
+        usage = _mapping(terminal.get("usage"), f"round {index} relay usage")
+        output_tokens = usage.get("output_tokens")
+        event, statuses, reason = expected_terminals[index - 1]
+        if (
+            request.get("effectiveMaxOutputTokens") != allocation
+            or not is_strict_int(output_tokens)
+            or not 0 <= output_tokens <= allocation
+            or terminal.get("terminalEvent") != event
+            or terminal.get("terminalStatus") not in statuses
+            or terminal.get("incompleteReason") != reason
+        ):
+            raise IntegrityError("ZAI truncation-probe round drifted")
+        total_reported += output_tokens
+        rounds.append(
+            {
+                "ordinal": index,
+                "effectiveMaxOutputTokens": allocation,
+                "reportedOutputTokens": output_tokens,
+                "burnedOutputBudgetTokens": allocation,
+                "terminalEvent": event,
+                "terminalStatus": terminal.get("terminalStatus"),
+                "incompleteReason": reason,
+            }
+        )
+    if (
+        len(requests) != 2
+        or len(closed) != 2
+        or marker.get("budgetClass") != "zai_route_probe"
+        or marker.get("accountingMode") != "fixed_round_allocations"
+        or marker.get("slotOutputTokenLimit") != limits["slotOutputTokenLimit"]
+        or marker.get("rejectedRequests") != {}
+        or accounting.get("state") != "probe_conformant"
+        or accounting.get("reportedOutputTokens") != total_reported
+        or accounting.get("conservativeOutputTokenUpperBound") != total_reported
+        or accounting.get("unusedOutputTokensBurned")
+        != limits["slotOutputTokenLimit"] - total_reported
+    ):
+        raise IntegrityError("ZAI truncation-probe accounting drifted")
+    return {
+        "schemaVersion": 1,
+        "proofClass": "empirical-responses-truncation-v1",
+        "evidenceScope": "exact_observed_date_model_endpoint",
+        "observedAt": closed[-1]["at"],
+        "endpoint": "https://api.z.ai/api/v1/responses",
+        "model": model,
+        "protocol": "openai_responses",
+        "accountingMode": "fixed_round_allocations",
+        "burnedAccounting": "reserved_budget_retired_not_usage",
+        "slotOutputTokenLimit": limits["slotOutputTokenLimit"],
+        "minimumRequestedRound2OutputTokens": limits[
+            "minimumRequestedRound2OutputTokens"
+        ],
+        "rounds": rounds,
+        "totalReportedOutputTokens": total_reported,
+        "totalBurnedOutputBudgetTokens": sum(allocations),
+        "noThirdRequest": True,
+    }
 
 
 def _relay_and_metadata(
@@ -528,7 +621,7 @@ def _relay_and_metadata(
     agent_finished: datetime,
     trajectory: dict[str, Any],
     trajectory_session: str,
-) -> tuple[dict[str, Any], dict[str, int | None]]:
+) -> tuple[dict[str, Any], dict[str, int | None], dict[str, Any] | None]:
     evidence = RelayEvidence.complete(
         trial_dir,
         run.provider,
@@ -569,20 +662,7 @@ def _relay_and_metadata(
     ):
         raise IntegrityError("live-route provider response identity is incomplete")
     agent_result = _mapping(result.get("agent_result"), "agent result")
-    expected_variant = {
-        "schema_version": 1,
-        "variant_id": "live-route-probe-v1",
-        "developer_instruction_requested": False,
-        "requested_developer_instructions_sha256": None,
-        "benchmark_task_instruction_used": False,
-        "benchmark_reward_used": False,
-        "instruction_sha256": LIVE_ROUTE_PROBE_INSTRUCTION_SHA256,
-        "command_sha256": LIVE_ROUTE_PROBE_COMMAND_SHA256,
-        "effect_sha256": LIVE_ROUTE_PROBE_EFFECT_SHA256,
-        "effect_verified": True,
-        **CODEX_PROVIDER_RETRY_POLICY,
-        "limits": dict(LIVE_ROUTE_PROBE_LIMITS),
-    }
+    expected_variant = live_route_probe_variant(run.provider, effect_verified=True)
     expected_harbor = {
         "schema_version": 1,
         "harbor_context_id": str(result["id"]),
@@ -599,9 +679,17 @@ def _relay_and_metadata(
         "run_binding": run.binding,
     }
     evidence.validate_embedded(
-        agent_result, trajectory, expected_variant, expected_harbor
+        agent_result,
+        trajectory,
+        expected_variant,
+        expected_harbor,
+        allow_missing_agent_totals_and_metrics=run.provider == "zai",
     )
-    return evidence.verified, evidence.usage
+    return (
+        evidence.verified,
+        evidence.usage,
+        _output_budget_probe(records, marker, run.provider, run.model),
+    )
 
 
 def _cleanup(
@@ -836,7 +924,7 @@ def verify_probe(
         before=agent_started,
     )
     trajectory, session = _trajectory(completed, trial_dir, run)
-    verified, totals = _relay_and_metadata(
+    verified, totals, output_budget_probe = _relay_and_metadata(
         trial_dir,
         result,
         run,
@@ -863,8 +951,8 @@ def verify_probe(
         if output_run_dir != run_dir:
             raise IntegrityError("authorization output belongs to another prepared run")
     receipt = {
-        "schemaVersion": 2,
-        "proofClass": "live-route-probe-v2",
+        "schemaVersion": 3,
+        "proofClass": "live-route-probe-v3",
         "provider": provider,
         "model": run.model,
         "sourceRevision": run.preflight["sourceRevision"],
@@ -883,6 +971,7 @@ def verify_probe(
         "responseIdsSha256": canonical_digest([item["responseId"] for item in closed]),
         "requestCount": 2,
         "usage": totals,
+        "outputBudgetProbe": output_budget_probe,
         "credentialLeakScan": {"ok": True, **scan},
         "providerControl": control,
         "codexProviderRetryPolicy": dict(CODEX_PROVIDER_RETRY_POLICY),
@@ -907,6 +996,7 @@ def verify_probe(
         "authorizationExpiresAt": control["expiresAt"],
         "liveProviderRouteObserved": True,
         "liveProviderConformance": False,
+        "empiricalResponseTruncationObserved": provider == "zai",
         "benchmarkTaskInstructionUsed": False,
         "benchmarkRewardUsed": False,
         "providerControlVerification": cap["verification"],
